@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from app.db import DEFAULT_DATABASE_PATH
+
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 _DOCKERIGNORE = BACKEND_ROOT / ".dockerignore"
 
@@ -131,6 +133,17 @@ def test_caches_and_local_data_are_excluded_at_any_depth(path: str) -> None:
 @pytest.mark.parametrize("path", _KEPT_PATHS)
 def test_source_and_the_lock_file_survive_the_ignore_file(path: str) -> None:
     assert not _is_excluded(path, _dockerignore_patterns()), f"{path} would be missing"
+
+
+def test_the_default_local_database_is_excluded() -> None:
+    """The one database file the app creates itself must never enter a build context.
+
+    The path is taken from `app.db` instead of being repeated as a literal, so
+    moving the default cannot silently take the file out of the ignore file.
+    """
+    relative = DEFAULT_DATABASE_PATH.relative_to(BACKEND_ROOT).as_posix()
+
+    assert _is_excluded(relative, _dockerignore_patterns()), f"{relative} would enter the image"
 
 
 def test_no_exclusion_pattern_is_anchored_at_the_context_root_only() -> None:

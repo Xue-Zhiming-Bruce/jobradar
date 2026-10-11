@@ -3,6 +3,10 @@
 `uv run uvicorn app.main:app` takes no arguments and no environment, so the
 import is exercised in a subprocess with an empty environment, in a scratch
 directory: a required variable or a stray file shows up as a failure here.
+
+The app does create one file once it runs -- the local database at
+`data/jobradar.db` -- so that directory is expected and gitignored; anything
+else is a leak. Adding a database file to the source tree is #21's problem.
 """
 
 import subprocess
@@ -10,6 +14,7 @@ import sys
 from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DATABASE_DIRECTORY = BACKEND_ROOT / "data"
 
 # Virtualenvs and tool caches are not part of the app's own footprint.
 _CACHES = {".venv", "__pycache__", ".pytest_cache", ".ruff_cache"}
@@ -45,5 +50,12 @@ def test_importing_the_app_needs_no_environment_and_creates_no_file(tmp_path: Pa
 
 def test_no_database_upload_or_data_file_exists() -> None:
     assert not (BACKEND_ROOT / "uploads").exists()
-    assert not (BACKEND_ROOT / "data").exists()
-    assert [path for path in _application_files() if path.suffix in {".db", ".sqlite", ".sqlite3"}] == []
+    # The local database belongs in the gitignored data/ directory and nowhere
+    # else: the app writes it there on start, so only stray copies fail here.
+    stray = [
+        path
+        for path in _application_files()
+        if path.suffix in {".db", ".sqlite", ".sqlite3"}
+        and DEFAULT_DATABASE_DIRECTORY not in path.parents
+    ]
+    assert stray == []
