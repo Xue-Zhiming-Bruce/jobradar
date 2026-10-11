@@ -129,14 +129,14 @@ def test_create_read_update_delete_round_trip_over_all_five_tables(engine: Engin
         session.scalars(select(Company)).one().name = "Acme Renamed"
         session.scalars(select(Posting)).one().title = "Staff Engineer"
         session.scalars(select(Match)).one().state = "saved"
-        session.scalars(select(Run)).one().status = "done"
+        session.scalars(select(Run)).one().status = "succeeded"
         session.scalars(select(Resume)).one().is_active = False
 
     with db.session_scope() as session:
         assert session.scalars(select(Company)).one().name == "Acme Renamed"
         assert session.scalars(select(Posting)).one().title == "Staff Engineer"
         assert session.scalars(select(Match)).one().state == "saved"
-        assert session.scalars(select(Run)).one().status == "done"
+        assert session.scalars(select(Run)).one().status == "succeeded"
         assert session.scalars(select(Resume)).one().is_active is False
 
     with db.session_scope() as session:
@@ -200,7 +200,7 @@ def test_timestamps_round_trip_as_the_same_aware_instant(engine: Engine) -> None
                 notified_at=KNOWN_UTC,
             )
         )
-        session.add(Run(status="done", started_at=KNOWN_UTC, finished_at=KNOWN_UTC))
+        session.add(Run(status="succeeded", started_at=KNOWN_UTC, finished_at=KNOWN_UTC))
         session.add(
             Resume(
                 filename="synthetic-resume.txt",
@@ -235,7 +235,7 @@ def test_defaults_come_from_the_models_not_from_the_database(engine: Engine) -> 
     with db.session_scope() as session:
         _, posting = _add_company_with_posting(session)
         session.add(Match(posting_id=posting.id, score=1, reason="Fits"))
-        session.add(Run(status="done"))
+        session.add(Run(status="succeeded"))
         session.add(
             Resume(
                 filename="synthetic-resume.txt",

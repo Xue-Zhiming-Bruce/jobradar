@@ -9,6 +9,13 @@ root or from `backend/`, with no setup and no environment.
 an existing table, so a change to `app.models` is invisible to a database that
 already holds rows -- the local file or the deployed Neon database. That gap is
 `#21`'s (schema migrations); nothing here migrates anything.
+
+Every SQLite connection this module hands out is told to enforce foreign keys.
+SQLite ignores foreign keys unless the pragma is set, and it is per connection
+rather than per database, so an engine-level listener sets it whenever a
+connection is opened; a handler that ran once, for one connection, would leave
+the pool's later connections unguarded. PostgreSQL enforces foreign keys always
+and needs nothing here.
 """
 
 import os
@@ -16,9 +23,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import ConnectionPoolEntry
 
 from app.models import Base
 
@@ -34,6 +43,15 @@ def database_url() -> str:
     return os.environ.get("DATABASE_URL", "").strip() or f"sqlite:///{DEFAULT_DATABASE_PATH}"
 
 
+def _enforce_foreign_keys(
+    dbapi_connection: DBAPIConnection, connection_record: ConnectionPoolEntry
+) -> None:
+    """Switch on foreign keys for one SQLite connection, as it is handed out."""
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
 def get_engine() -> Engine:
     """Build the engine on first use, and rebuild it if `DATABASE_URL` changes.
 
@@ -46,7 +64,10 @@ def get_engine() -> Engine:
     if _engine is None or url != _engine_url:
         if url.startswith("sqlite:///"):
             Path(url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
-        _engine = create_engine(url)
+        engine = create_engine(url)
+        if engine.dialect.name == "sqlite":
+            event.listen(engine, "connect", _enforce_foreign_keys)
+        _engine = engine
         _engine_url = url
     return _engine
 
