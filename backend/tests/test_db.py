@@ -12,6 +12,10 @@ the app through `TestClient`, and the lifespan's `init_db()` creates
 `backend/data/jobradar.db`. `.gitignore` covers it, which is why `git status
 --short` stays empty -- the last tests here check that instead of claiming the
 suite leaves nothing behind.
+
+The foreign-key pragma is checked here too, with a control that builds an engine
+without the listener: SQLite is the only engine that needs the pragma, so it
+cannot be part of the parametrised matrix.
 """
 
 import subprocess
@@ -20,12 +24,14 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import inspect, select
+from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app import db
 from app.main import app
-from app.models import Base, Company, Resume
+from app.models import Base, Company, Posting, Resume
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 REPOSITORY_ROOT = BACKEND_ROOT.parent
@@ -205,6 +211,69 @@ def test_the_session_helper_rolls_back_and_closes_on_error(engine: Engine) -> No
     assert engine.pool.checkedout() == 0  # the connection went back to the pool
     with db.session_scope() as session:
         assert session.scalars(select(Company)).all() == []
+
+
+def _foreign_keys_pragma(engine: Engine) -> int:
+    with engine.connect() as connection:
+        return connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one()
+
+
+def test_every_sqlite_connection_the_app_opens_enforces_foreign_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SQLite ignores foreign keys unless each connection asks it to.
+
+    A connection taken from the pool and one opened after the pool was emptied
+    both carry the pragma, which is what "per connection" has to mean: the
+    listener runs whenever a connection is opened, not once at import.
+    """
+    _point_at_a_scratch_file(tmp_path, monkeypatch)
+    db.init_db()
+    engine = db.get_engine()
+
+    assert _foreign_keys_pragma(engine) == 1
+    engine.dispose()  # close the pooled connection, so the next one is new
+    assert _foreign_keys_pragma(engine) == 1
+
+
+def test_without_the_pragma_the_same_schema_takes_a_posting_with_no_company(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control: the pragma is the whole difference between the two engines.
+
+    Same file, same schema, same row: an engine built without the listener
+    accepts a posting whose company does not exist, and the app's engine refuses
+    it. This is the SQLite half of #23's foreign-key rule, so it is here rather
+    than in the parametrised matrix.
+    """
+    database_file = _point_at_a_scratch_file(tmp_path, monkeypatch)
+    db.init_db()
+
+    pragma_free = create_engine(f"sqlite:///{database_file}")
+    with Session(pragma_free) as session:
+        session.add(
+            Posting(
+                company_id=999_999,
+                external_id="greenhouse-1",
+                title="Backend Engineer",
+                url="https://example.test/1",
+            )
+        )
+        session.commit()
+    with Session(pragma_free) as session:
+        assert session.scalars(select(Posting)).one().company_id == 999_999
+    pragma_free.dispose()
+
+    with pytest.raises(IntegrityError, match="FOREIGN KEY constraint failed"):
+        with db.session_scope() as session:
+            session.add(
+                Posting(
+                    company_id=999_998,
+                    external_id="greenhouse-2",
+                    title="Backend Engineer",
+                    url="https://example.test/2",
+                )
+            )
 
 
 def test_resume_text_lives_in_the_database(

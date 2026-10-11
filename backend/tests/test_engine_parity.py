@@ -5,12 +5,22 @@ SQLite and once on PostgreSQL: the SQLite parameter always runs, the PostgreSQL
 parameter runs when `TEST_DATABASE_URL` is set and is skipped, visibly, when it
 is not. Nothing in this module names an engine, a dialect or a URL, so the same
 behaviour is proved on both engines by the same functions.
+
+The last section asks the engines to refuse a row that breaks one of the rules
+of #23 -- a duplicate dedupe key, a second active resume, a score outside the
+range, a state or status outside its vocabulary, a foreign key to a row that is
+not there, a second match for one posting -- through the app's own
+`session_scope()`. Nothing filters those rows in Python, so what the assertions
+read back is the engine's own refusal, named in its own words.
 """
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import inspect, select
+import pytest
+from sqlalchemy import event, inspect, select
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import db
@@ -67,14 +77,16 @@ def _assert_aware_utc(instant: datetime, label: str) -> None:
     assert instant.utcoffset() == timedelta(0), label
 
 
-def _add_company_with_posting(session: Session) -> tuple[Company, Posting]:
+def _add_company_with_posting(
+    session: Session, slug: str = "acme", external_id: str = "greenhouse-1"
+) -> tuple[Company, Posting]:
     """One company with one posting under it, flushed so both carry an id."""
-    company = Company(name="Acme", slug="acme")
+    company = Company(name=slug.capitalize(), slug=slug)
     session.add(company)
     session.flush()
     posting = Posting(
         company_id=company.id,
-        external_id="greenhouse-1",
+        external_id=external_id,
         title="Backend Engineer",
         url="https://example.test/1",
     )
@@ -292,3 +304,330 @@ def test_a_table_named_match_is_created_read_updated_and_deleted(engine: Engine)
 
     with db.session_scope() as session:
         assert session.scalars(select(Match)).all() == []
+
+
+# What the database itself refuses, asked through the app's own session helper.
+
+
+def _synthetic_resume(**overrides: object) -> Resume:
+    """A resume row whose text is synthetic: the repository holds no real one."""
+    fields: dict[str, object] = {
+        "filename": "synthetic-resume.txt",
+        "content_type": "text/plain",
+        "text": SYNTHETIC_RESUME_TEXT,
+        "stored_path": "/tmp/synthetic-resume.txt",
+    }
+    fields.update(overrides)
+    return Resume(**fields)
+
+
+def _assert_the_engine_named_what_it_refused(
+    exception: IntegrityError, *spellings: str
+) -> None:
+    """Both engines name the rule they refused, each in its own spelling.
+
+    SQLite names a unique constraint by its columns and a named check by its
+    name; PostgreSQL names the constraint itself, which for the constraints left
+    to SQLAlchemy is `<table>_<columns>_key`. Any of the spellings may match --
+    the engine's whole message is reported when none of them does.
+    """
+    message = str(exception)
+    assert any(spelling in message for spelling in spellings), message
+
+
+def _deletes_sent_by(engine: Engine, action: Callable[[], None]) -> list[str]:
+    """Every DELETE the engine sent while `action` ran, as one flat line each."""
+    statements: list[str] = []
+
+    def record(connection: object, cursor: object, statement: str, *rest: object) -> None:
+        if statement.lstrip().upper().startswith("DELETE"):
+            statements.append(" ".join(statement.split()))
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        action()
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    return statements
+
+
+def test_a_duplicate_company_slug_is_refused_by_the_database(engine: Engine) -> None:
+    with db.session_scope() as session:
+        session.add(Company(name="Acme", slug="acme"))
+
+    with pytest.raises(IntegrityError) as refusal:
+        with db.session_scope() as session:
+            session.add(Company(name="Acme Again", slug="acme"))
+
+    _assert_the_engine_named_what_it_refused(refusal.value, "company.slug", "company_slug_key")
+    with db.session_scope() as session:
+        assert [company.slug for company in session.scalars(select(Company))] == ["acme"]
+
+
+def test_a_duplicate_posting_key_is_refused_by_the_database(engine: Engine) -> None:
+    with db.session_scope() as session:
+        company, _ = _add_company_with_posting(session)
+        company_id = company.id
+
+    with pytest.raises(IntegrityError) as refusal:
+        with db.session_scope() as session:
+            session.add(
+                Posting(
+                    company_id=company_id,
+                    external_id="greenhouse-1",
+                    title="Backend Engineer",
+                    url="https://example.test/1",
+                )
+            )
+
+    _assert_the_engine_named_what_it_refused(
+        refusal.value,
+        "posting.company_id, posting.external_id",
+        "posting_company_id_external_id_key",
+    )
+    with db.session_scope() as session:
+        assert len(session.scalars(select(Posting)).all()) == 1
+
+
+def test_the_same_external_id_under_another_company_is_a_different_posting(
+    engine: Engine,
+) -> None:
+    """The key is the pair, not the source's id on its own."""
+    with db.session_scope() as session:
+        first, _ = _add_company_with_posting(session, slug="acme")
+        first_id = first.id
+
+    with db.session_scope() as session:
+        second, _ = _add_company_with_posting(session, slug="other")
+        second_id = second.id
+
+    with db.session_scope() as session:
+        postings = session.scalars(select(Posting)).all()
+
+        assert [posting.external_id for posting in postings] == [
+            "greenhouse-1",
+            "greenhouse-1",
+        ]
+        assert {posting.company_id for posting in postings} == {first_id, second_id}
+
+
+def test_a_slug_is_trimmed_and_lower_cased_before_it_is_stored(engine: Engine) -> None:
+    with db.session_scope() as session:
+        session.add(Company(name="Acme", slug="  Acme  "))
+
+    with db.session_scope() as session:
+        assert session.scalars(select(Company)).one().slug == "acme"
+
+
+def test_two_slugs_that_normalise_to_one_spelling_collide_in_the_database(
+    engine: Engine,
+) -> None:
+    with db.session_scope() as session:
+        session.add(Company(name="Acme", slug="  Acme  "))
+
+    with pytest.raises(IntegrityError) as refusal:
+        with db.session_scope() as session:
+            session.add(Company(name="Acme Again", slug="  ACME  "))
+
+    _assert_the_engine_named_what_it_refused(refusal.value, "company.slug", "company_slug_key")
+
+
+def test_uniqueness_alone_cannot_bind_the_two_spellings_of_a_slug(engine: Engine) -> None:
+    """Why the model normalises: neither engine's `UNIQUE` merges the spellings.
+
+    The rows go in through the table rather than through `Company`, on purpose: it
+    is the column-level rule on its own that is under test, and it stores `Acme`
+    and `acme` side by side because both engines compare text case-sensitively.
+    The app's writes go through the model, which trims and lower-cases the slug.
+    """
+    with db.session_scope() as session:
+        session.execute(Company.__table__.insert().values(name="Casey", slug="Acme"))
+        session.execute(Company.__table__.insert().values(name="Casey Too", slug="acme"))
+
+    with db.session_scope() as session:
+        assert {company.slug for company in session.scalars(select(Company))} == {"Acme", "acme"}
+
+
+def test_a_second_active_resume_is_refused_and_a_second_inactive_one_is_not(
+    engine: Engine,
+) -> None:
+    with db.session_scope() as session:
+        session.add(_synthetic_resume())
+
+    with pytest.raises(IntegrityError) as refusal:
+        with db.session_scope() as session:
+            session.add(_synthetic_resume(filename="synthetic-resume-2.txt"))
+
+    _assert_the_engine_named_what_it_refused(
+        refusal.value, "resume.is_active", "uq_resume_one_active"
+    )
+
+    with db.session_scope() as session:
+        session.scalars(select(Resume)).one().is_active = False
+
+    with db.session_scope() as session:
+        session.add(
+            _synthetic_resume(
+                filename="synthetic-resume-2.txt",
+                stored_path="/tmp/synthetic-resume-2.txt",
+                is_active=False,
+            )
+        )
+        session.add(
+            _synthetic_resume(
+                filename="synthetic-resume-3.txt",
+                stored_path="/tmp/synthetic-resume-3.txt",
+                is_active=False,
+            )
+        )
+
+    with db.session_scope() as session:
+        resumes = session.scalars(select(Resume).order_by(Resume.id)).all()
+
+        assert [resume.is_active for resume in resumes] == [False, False, False]
+
+
+def test_a_score_outside_zero_to_one_hundred_is_refused_by_the_database(
+    engine: Engine,
+) -> None:
+    """Each case gets its own posting: `match.posting_id` is unique as well."""
+    for score in (101, -1):
+        with db.session_scope() as session:
+            _, posting = _add_company_with_posting(session, slug=f"company-{abs(score)}")
+            posting_id = posting.id
+
+        with pytest.raises(IntegrityError) as refusal:
+            with db.session_scope() as session:
+                session.add(Match(posting_id=posting_id, score=score, reason="Fits"))
+
+        _assert_the_engine_named_what_it_refused(refusal.value, "ck_match_score_range")
+
+
+def test_the_ends_of_the_score_range_are_accepted(engine: Engine) -> None:
+    with db.session_scope() as session:
+        _, posting = _add_company_with_posting(session, slug="low")
+        session.add(Match(posting_id=posting.id, score=0, reason="Fits"))
+        _, posting = _add_company_with_posting(session, slug="high")
+        session.add(Match(posting_id=posting.id, score=100, reason="Fits"))
+
+    with db.session_scope() as session:
+        assert sorted(match.score for match in session.scalars(select(Match))) == [0, 100]
+
+
+def test_the_two_vocabularies_are_what_the_columns_accept(engine: Engine) -> None:
+    with db.session_scope() as session:
+        for index, state in enumerate(("new", "saved", "dismissed")):
+            _, posting = _add_company_with_posting(session, slug=f"state-{index}")
+            session.add(Match(posting_id=posting.id, score=50, reason="Fits", state=state))
+        for status in ("running", "succeeded", "failed"):
+            session.add(Run(status=status))
+
+    with db.session_scope() as session:
+        assert sorted(match.state for match in session.scalars(select(Match))) == [
+            "dismissed",
+            "new",
+            "saved",
+        ]
+        assert sorted(run.status for run in session.scalars(select(Run))) == [
+            "failed",
+            "running",
+            "succeeded",
+        ]
+
+
+def test_a_state_outside_the_vocabulary_is_refused_by_the_database(engine: Engine) -> None:
+    with db.session_scope() as session:
+        _, posting = _add_company_with_posting(session)
+        posting_id = posting.id
+
+    with pytest.raises(IntegrityError) as refusal:
+        with db.session_scope() as session:
+            session.add(Match(posting_id=posting_id, score=50, reason="Fits", state="archived"))
+
+    _assert_the_engine_named_what_it_refused(refusal.value, "ck_match_state_values")
+
+
+def test_a_status_outside_the_vocabulary_is_refused_by_the_database(engine: Engine) -> None:
+    """`done` is not a status: the column accepts `running`, `succeeded`, `failed`."""
+    with pytest.raises(IntegrityError) as refusal:
+        with db.session_scope() as session:
+            session.add(Run(status="done"))
+
+    _assert_the_engine_named_what_it_refused(refusal.value, "ck_run_status_values")
+
+
+def test_a_posting_for_a_company_that_does_not_exist_is_refused(engine: Engine) -> None:
+    with pytest.raises(IntegrityError) as refusal:
+        with db.session_scope() as session:
+            session.add(
+                Posting(
+                    company_id=999_999,
+                    external_id="greenhouse-1",
+                    title="Backend Engineer",
+                    url="https://example.test/1",
+                )
+            )
+
+    _assert_the_engine_named_what_it_refused(
+        refusal.value, "FOREIGN KEY constraint failed", "violates foreign key constraint"
+    )
+
+
+def test_a_second_match_for_one_posting_is_refused_by_the_database(engine: Engine) -> None:
+    with db.session_scope() as session:
+        _, posting = _add_company_with_posting(session)
+        session.add(Match(posting_id=posting.id, score=87, reason="Python and SQL fit"))
+        posting_id = posting.id
+
+    with pytest.raises(IntegrityError) as refusal:
+        with db.session_scope() as session:
+            session.add(Match(posting_id=posting_id, score=91, reason="Re-scored"))
+
+    _assert_the_engine_named_what_it_refused(
+        refusal.value, "match.posting_id", "match_posting_id_key"
+    )
+
+
+def test_deleting_a_company_deletes_its_postings_and_their_matches(engine: Engine) -> None:
+    """One `DELETE` is enough: the cascade runs in the database, for these rows only."""
+    with db.session_scope() as session:
+        company, posting = _add_company_with_posting(session, slug="acme")
+        session.add(Match(posting_id=posting.id, score=87, reason="Fits"))
+        other, other_posting = _add_company_with_posting(session, slug="other")
+        session.add(Match(posting_id=other_posting.id, score=40, reason="Partly fits"))
+        company_id, other_id, other_posting_id = company.id, other.id, other_posting.id
+
+    def delete_the_company() -> None:
+        with db.session_scope() as session:
+            session.delete(session.get(Company, company_id))
+
+    statements = _deletes_sent_by(engine, delete_the_company)
+
+    assert len(statements) == 1, statements
+    assert statements[0].startswith("DELETE FROM company WHERE company.id")
+    with db.session_scope() as session:
+        assert [company.slug for company in session.scalars(select(Company))] == ["other"]
+        assert [posting.company_id for posting in session.scalars(select(Posting))] == [other_id]
+        assert [match.posting_id for match in session.scalars(select(Match))] == [
+            other_posting_id
+        ]
+
+
+def test_deleting_a_posting_deletes_its_match(engine: Engine) -> None:
+    with db.session_scope() as session:
+        _, posting = _add_company_with_posting(session)
+        session.add(Match(posting_id=posting.id, score=87, reason="Fits"))
+        posting_id = posting.id
+
+    def delete_the_posting() -> None:
+        with db.session_scope() as session:
+            session.delete(session.get(Posting, posting_id))
+
+    statements = _deletes_sent_by(engine, delete_the_posting)
+
+    assert len(statements) == 1, statements
+    assert statements[0].startswith("DELETE FROM posting WHERE posting.id")
+    with db.session_scope() as session:
+        assert session.scalars(select(Match)).all() == []
+        assert session.scalars(select(Posting)).all() == []
+        assert len(session.scalars(select(Company)).all()) == 1

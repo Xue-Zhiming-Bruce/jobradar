@@ -6,19 +6,22 @@ declares table structure, so one place has to be migrated (#21) when it changes.
 Everything here reads the metadata and compiles DDL; nothing connects. The two
 rendered dialects are the evidence that one generic declaration covers SQLite
 and PostgreSQL, and the column tests pin the lengths, the timestamp type and the
-Python-side defaults that #2 declared.
+Python-side defaults that #2 declared. The rules of #23 -- the dedupe keys, the
+single active resume, the score range, the two vocabularies and the cascading
+foreign keys -- are pinned here as declared, and refused by the engines in
+`tests/test_engine_parity.py`.
 """
 
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import DateTime, Dialect, String
+from sqlalchemy import CheckConstraint, DateTime, Dialect, String, UniqueConstraint
 from sqlalchemy.dialects import postgresql, sqlite
-from sqlalchemy.schema import CreateTable
+from sqlalchemy.schema import CreateIndex, CreateTable
 
 from app import models
-from app.models import Base, UTCDateTime
+from app.models import Base, Company, Match, Posting, Resume, Run, UTCDateTime
 
 APP_ROOT = Path(__file__).resolve().parent.parent / "app"
 
@@ -140,6 +143,16 @@ def _ddl(dialect: Dialect) -> str:
     return "\n".join(
         str(CreateTable(table).compile(dialect=dialect)) for table in Base.metadata.sorted_tables
     )
+
+
+def _dialect(dialect_name: str) -> Dialect:
+    """One of the two dialects the suite runs on, by the name the matrix uses."""
+    return sqlite.dialect() if dialect_name == "sqlite" else postgresql.dialect()
+
+
+def _both_ddl() -> dict[str, str]:
+    """The whole schema as SQLite and PostgreSQL each render it."""
+    return {name: _ddl(_dialect(name)) for name in ("sqlite", "postgres")}
 
 
 def test_the_five_tables_are_declared_and_no_others() -> None:
@@ -276,3 +289,108 @@ def test_the_docstring_says_tables_only_are_created_and_names_21() -> None:
     docstring = models.__doc__ or ""
     assert "#21" in docstring
     assert "never alters" in docstring
+
+
+# The rules the database enforces on both engines (#23), pinned as declared:
+# what each engine is asked to refuse, and the portable spelling it is asked in.
+
+
+def test_the_dedupe_keys_are_declared_as_unique_constraints() -> None:
+    """The three keys a re-run, a double click or a re-score must not get past."""
+    unique_constraints = {
+        table.name: [
+            [column.name for column in constraint.columns]
+            for constraint in table.constraints
+            if isinstance(constraint, UniqueConstraint)
+        ]
+        for table in Base.metadata.sorted_tables
+    }
+
+    assert Company.__table__.c.slug.unique is True
+    assert Match.__table__.c.posting_id.unique is True
+    assert unique_constraints["company"] == [["slug"]]
+    assert unique_constraints["posting"] == [["company_id", "external_id"]]
+    assert unique_constraints["match"] == [["posting_id"]]
+
+
+def test_uniqueness_never_leans_on_a_collation() -> None:
+    """No `COLLATE` and no expression index: the models normalise the slug instead."""
+    for dialect_name, ddl in _both_ddl().items():
+        assert "COLLATE" not in ddl, dialect_name
+        assert "lower(" not in ddl, dialect_name
+
+
+def test_the_one_active_resume_index_is_partial_for_both_engines() -> None:
+    (index,) = Resume.__table__.indexes
+
+    assert index.unique is True
+    assert index.dialect_options["sqlite"]["where"] is not None
+    assert index.dialect_options["postgresql"]["where"] is not None
+    rendered = {
+        dialect_name: str(CreateIndex(index).compile(dialect=_dialect(dialect_name))).strip()
+        for dialect_name in ("sqlite", "postgres")
+    }
+
+    assert set(rendered.values()) == {
+        "CREATE UNIQUE INDEX uq_resume_one_active ON resume (is_active) WHERE is_active"
+    }
+
+
+def test_the_checks_are_named_and_carry_plain_string_columns() -> None:
+    checks = {
+        (table.name, constraint.name): str(constraint.sqltext)
+        for table in Base.metadata.sorted_tables
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+    assert checks == {
+        ("match", "ck_match_score_range"): "score >= 0 AND score <= 100",
+        ("match", "ck_match_state_values"): "state IN ('new', 'saved', 'dismissed')",
+        ("run", "ck_run_status_values"): "status IN ('running', 'succeeded', 'failed')",
+    }
+    for dialect_name, ddl in _both_ddl().items():
+        assert all(
+            f"CONSTRAINT {name} CHECK ({rule})" in ddl for (_, name), rule in checks.items()
+        ), dialect_name
+        # The vocabulary rides on a bounded string on both engines: no ENUM type
+        # and no dialect import, which `test_no_app_module_names_a_dialect` holds.
+        assert "state VARCHAR(20) NOT NULL" in ddl, dialect_name
+        assert "status VARCHAR(20) NOT NULL" in ddl, dialect_name
+
+
+def test_every_foreign_key_cascades_on_both_engines() -> None:
+    declared = {
+        (table.name, foreign_key.parent.name): foreign_key.ondelete
+        for table in Base.metadata.sorted_tables
+        for foreign_key in table.foreign_keys
+    }
+
+    assert declared == {
+        ("posting", "company_id"): "CASCADE",
+        ("match", "posting_id"): "CASCADE",
+    }
+    for dialect_name, ddl in _both_ddl().items():
+        assert ddl.count("ON DELETE CASCADE") == 2, dialect_name
+
+
+def test_the_slug_is_a_bounded_string_column_like_the_lengths_test_expects() -> None:
+    """Normalisation is the model's job, not a type's: the column is a plain string."""
+    assert isinstance(Company.__table__.c.slug.type, String)
+    assert Company.__table__.c.slug.type.length == 255
+
+
+def test_every_column_a_constraint_rides_on_is_not_nullable() -> None:
+    """A `NULL` collides with nothing and a `CHECK` over it passes, on both engines."""
+    riding_on_a_rule = [
+        Company.__table__.c.slug,
+        Resume.__table__.c.is_active,
+        Posting.__table__.c.company_id,
+        Posting.__table__.c.external_id,
+        Match.__table__.c.posting_id,
+        Match.__table__.c.score,
+        Match.__table__.c.state,
+        Run.__table__.c.status,
+    ]
+
+    assert [column.name for column in riding_on_a_rule if column.nullable] == []
