@@ -1,8 +1,17 @@
 """The local SQLite path, the one create-tables function, and the session helper.
 
-`DATABASE_URL` is never set for the whole test session: each test points the app
-at a scratch file with `monkeypatch`, so the suite proves the default path and
-the configurable one without ever leaving a database behind in the checkout.
+`DATABASE_URL` is never set for the whole test session: each test that wants a
+database points the app at one with `monkeypatch`, so the suite proves the
+default path, a scratch file, and -- through the shared `engine` fixture in
+`tests/conftest.py` -- a PostgreSQL database when `TEST_DATABASE_URL` is set.
+The two session-helper tests are parametrised over that fixture, so the same
+functions run on both engines.
+
+The run does leave one database in the checkout: `tests/test_health.py` starts
+the app through `TestClient`, and the lifespan's `init_db()` creates
+`backend/data/jobradar.db`. `.gitignore` covers it, which is why `git status
+--short` stays empty -- the last tests here check that instead of claiming the
+suite leaves nothing behind.
 """
 
 import subprocess
@@ -12,6 +21,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect, select
+from sqlalchemy.engine import Engine
 
 from app import db
 from app.main import app
@@ -176,27 +186,16 @@ def test_starting_the_app_creates_the_tables(
     assert set(inspect(db.get_engine()).get_table_names()) == set(Base.metadata.tables)
 
 
-def test_the_session_helper_commits_on_success(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _point_at_a_scratch_file(tmp_path, monkeypatch)
-    db.init_db()
-
+def test_the_session_helper_commits_on_success(engine: Engine) -> None:
     with db.session_scope() as session:
         session.add(Company(name="Acme", slug="acme"))
 
-    assert db.get_engine().pool.checkedout() == 0
+    assert engine.pool.checkedout() == 0
     with db.session_scope() as session:
         assert session.scalars(select(Company)).one().name == "Acme"
 
 
-def test_the_session_helper_rolls_back_and_closes_on_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _point_at_a_scratch_file(tmp_path, monkeypatch)
-    db.init_db()
-    engine = db.get_engine()
-
+def test_the_session_helper_rolls_back_and_closes_on_error(engine: Engine) -> None:
     with pytest.raises(RuntimeError, match="boom"):
         with db.session_scope() as session:
             session.add(Company(name="Acme", slug="acme"))
@@ -237,6 +236,20 @@ def test_the_default_database_file_is_ignored_by_git() -> None:
     ignored = _git("check-ignore", relative)
 
     assert ignored == relative
+
+
+def test_the_run_creates_the_local_database_and_git_ignores_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The suite's own app start writes `backend/data/jobradar.db`, and git hides it."""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    with TestClient(app):
+        pass
+
+    relative = db.DEFAULT_DATABASE_PATH.relative_to(REPOSITORY_ROOT).as_posix()
+    assert db.DEFAULT_DATABASE_PATH.is_file()
+    assert _git("check-ignore", relative) == relative
 
 
 def test_no_database_file_is_committed_or_left_for_git_to_report() -> None:
