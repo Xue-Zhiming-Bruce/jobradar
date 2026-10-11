@@ -1,0 +1,22 @@
+# The image needs the source and the lockfile, nothing else.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# The image's Python comes from its base image tag, not from a local pin.
+.python-version
+
+# The tests run outside the image.
+tests/
+
+# Local data and secrets must never enter a build context.
+uploads/
+data/
+*.db
+*.sqlite3
+.env
+.env.*
+
+.DS_Store
