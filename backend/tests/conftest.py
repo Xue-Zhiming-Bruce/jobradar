@@ -16,6 +16,14 @@ cannot choose an engine or be written to -- whatever it names is untouched.
 
 Each test gets empty tables: the fixture creates them and, for PostgreSQL, drops
 them again, so the test database is left as it was found.
+
+Every connection the engine hands out has to be back in the pool when the test
+ends, so the fixture asserts the pool's checked-out count after every test that
+takes it: a connection whose reference outlives the test -- a module-level or
+closure reference, a session a background thread still holds -- fails the suite
+instead of leaking quietly into the next test. A connection that is merely
+dropped, with no reference left, is returned by the pool before this runs, and
+that is the one case the count cannot close.
 """
 
 import os
@@ -63,6 +71,12 @@ def engine(
     db.init_db()
     engine = db.get_engine()
     yield engine
+
+    assert engine.pool.checkedout() == 0, (
+        "a connection is still checked out when the test ended: something kept it "
+        "referenced -- a module-level or closure reference, or a session a "
+        "background thread still holds"
+    )
 
     if request.param == POSTGRES:
         # The suite owns these five table names in the test database: drop what
