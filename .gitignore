@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Local data — a resume and the local database are user data
+*.db
+*.sqlite3
+uploads/
+data/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
