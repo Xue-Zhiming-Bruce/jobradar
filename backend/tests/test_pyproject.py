@@ -1,4 +1,10 @@
-"""The uv project file is part of the contract: no database, one Python pin."""
+"""The uv project file is part of the contract: one ORM at most, one Python pin.
+
+#2 introduced SQLAlchemy, so the skeleton's "no database at all" guard is now
+"at most one ORM". The exactly-one-ORM / exactly-one-PostgreSQL-driver rule and
+the driver itself are finalised by #23; `_DATABASE_PACKAGES` stays the list that
+keeps a second ORM or driver from creeping in unnoticed.
+"""
 
 import re
 import tomllib
@@ -30,9 +36,9 @@ def _package_name(requirement: str) -> str:
     return re.split(r"[<>=!~\[ ;]", requirement, maxsplit=1)[0].lower().replace("_", "-")
 
 
-def test_no_database_driver_or_orm_is_declared() -> None:
+def test_at_most_one_database_orm_is_declared() -> None:
     declared = {_package_name(requirement) for requirement in _declared_requirements()}
-    assert declared & _DATABASE_PACKAGES == set()
+    assert declared & _DATABASE_PACKAGES <= {"sqlalchemy"}
 
 
 def test_python_version_is_pinned_to_one_minor_release() -> None:
