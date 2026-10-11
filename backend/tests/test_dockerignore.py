@@ -1,0 +1,142 @@
+"""`backend/.dockerignore` must keep caches and local data out of the build context.
+
+Unlike `.gitignore`, `.dockerignore` patterns are anchored at the context root:
+`__pycache__/` excludes the root directory only, so after `uv run pytest` the
+nested `app/__pycache__/*.pyc` was copied into the image. `ls -a` cannot see
+that, because it lists the top level only.
+
+The rules modelled here are Docker's (moby/patternmatcher): every pattern is
+anchored at the context root, `**` stands for any number of directories
+including none, `*` and `?` never cross a `/`, and a path is excluded when a
+pattern matches the path or any of its parent directories. The model was pinned
+against a real `docker build` of a context holding these same trees; the
+recursive image check that does the same against the built image is documented
+in `README.md`.
+"""
+
+import re
+from pathlib import Path
+
+import pytest
+
+BACKEND_ROOT = Path(__file__).resolve().parent.parent
+_DOCKERIGNORE = BACKEND_ROOT / ".dockerignore"
+
+# Patterns that are deliberately anchored at the context root.
+_ROOT_ONLY_PATTERNS = {".python-version"}
+
+# Junk at the root and below it: none of it may reach the image.
+_EXCLUDED_PATHS = [
+    ".venv/lib/python3.12/site-packages/fastapi/__init__.py",
+    ".pytest_cache/v/cache/lastfailed",
+    ".ruff_cache/0.1.0/data",
+    ".mypy_cache/3.12/app.main.data.json",
+    "__pycache__/main.cpython-312.pyc",
+    "app/__pycache__/__init__.cpython-312.pyc",
+    "app/__pycache__/main.cpython-312.pyc",
+    "app/__pycache__/export_openapi.cpython-312.pyc",
+    "tests/__pycache__/test_health.cpython-312.pyc",
+    "app/main.pyc",
+    "app/main.pyo",
+    "app/main.pyd",
+    "jobradar.db",
+    "data/jobradar.db",
+    "nested/data/jobradar.db",
+    "jobradar.sqlite3",
+    "deep/nested/notes.sqlite3",
+    "uploads/resume.pdf",
+    "nested/uploads/resume.pdf",
+    ".env",
+    ".env.local",
+    "app/.env.local",
+    ".DS_Store",
+    "app/.DS_Store",
+]
+
+# Everything the image needs must survive the ignore file.
+_KEPT_PATHS = [
+    "Dockerfile",
+    "pyproject.toml",
+    "uv.lock",
+    "openapi.json",
+    "app/__init__.py",
+    "app/main.py",
+    "app/export_openapi.py",
+]
+
+# The characters moby escapes before handing a pattern to the regexp engine.
+_ESCAPED_CHARACTERS = set("\\$^+.()|{}")
+
+
+def _dockerignore_patterns() -> list[str]:
+    return [
+        line
+        for raw in _DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+        if (line := raw.strip()) and not line.startswith("#")
+    ]
+
+
+def _clean(pattern: str) -> str:
+    cleaned = pattern.removeprefix("./")
+    return cleaned.rstrip("/") or cleaned
+
+
+def _pattern_regex(pattern: str) -> re.Pattern[str]:
+    cleaned = _clean(pattern)
+    regex = "^"
+    index = 0
+    while index < len(cleaned):
+        character = cleaned[index]
+        if cleaned.startswith("**", index):
+            index += 2
+            if cleaned[index : index + 1] == "/":
+                index += 1
+            regex += "(.*/)?" if index < len(cleaned) else ".*"
+        elif character == "*":
+            index += 1
+            regex += "[^/]*"
+        elif character == "?":
+            index += 1
+            regex += "[^/]"
+        elif character in _ESCAPED_CHARACTERS:
+            index += 1
+            regex += re.escape(character)
+        else:
+            index += 1
+            regex += character
+    return re.compile(regex + "$")
+
+
+def _is_excluded(path: str, patterns: list[str]) -> bool:
+    parts = path.split("/")
+    candidates = ["/".join(parts[: index + 1]) for index in range(len(parts))]
+    excluded = False
+    for pattern in patterns:
+        negated = pattern.startswith("!")
+        body = pattern[1:] if negated else pattern
+        if any(_pattern_regex(body).match(candidate) for candidate in candidates):
+            excluded = not negated
+    return excluded
+
+
+def test_the_build_context_is_governed_by_a_dockerignore_file() -> None:
+    assert _DOCKERIGNORE.is_file()
+
+
+@pytest.mark.parametrize("path", _EXCLUDED_PATHS)
+def test_caches_and_local_data_are_excluded_at_any_depth(path: str) -> None:
+    assert _is_excluded(path, _dockerignore_patterns()), f"{path} would enter the image"
+
+
+@pytest.mark.parametrize("path", _KEPT_PATHS)
+def test_source_and_the_lock_file_survive_the_ignore_file(path: str) -> None:
+    assert not _is_excluded(path, _dockerignore_patterns()), f"{path} would be missing"
+
+
+def test_no_exclusion_pattern_is_anchored_at_the_context_root_only() -> None:
+    wrong = [
+        pattern
+        for pattern in _dockerignore_patterns()
+        if not pattern.startswith("**/") and pattern not in _ROOT_ONLY_PATTERNS
+    ]
+    assert wrong == [], f"root-only patterns let nested paths through: {wrong}"

@@ -1,22 +1,27 @@
-# The image needs the source and the lockfile, nothing else.
-.venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.ruff_cache/
+# The image needs the source and the lock file, nothing else.
+#
+# Unlike .gitignore, .dockerignore patterns are anchored at the build-context
+# root: `__pycache__/` matches the root directory only and lets `app/__pycache__/`
+# into the image, so every pattern that has to match at any depth carries the
+# `**/` prefix (`**/` also matches zero directories, so the root is covered).
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
 
 # The image's Python comes from its base image tag, not from a local pin.
 .python-version
 
 # The tests run outside the image.
-tests/
+**/tests/
 
 # Local data and secrets must never enter a build context.
-uploads/
-data/
-*.db
-*.sqlite3
-.env
-.env.*
-
-.DS_Store
+**/uploads/
+**/data/
+**/*.db
+**/*.sqlite3
+**/.env
+**/.env.*
+**/.DS_Store
