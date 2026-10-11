@@ -27,17 +27,18 @@ document is generated and committed.
 
 ## T2 — Data model and dual-database configuration
 
-**Goal.** Tables for resume, company, posting, match and run; SQLite locally and
-Postgres in production from the same models.
+Split into four issues during grooming: #2 carried 40 acceptance criteria, which is
+not a one-session task. The content is unchanged, only divided.
 
-**Acceptance criteria**
-- [ ] All five tables exist and are created from the models
-- [ ] The app runs against SQLite with no configuration
-- [ ] The app runs against Postgres given `DATABASE_URL`
-- [ ] The same test suite passes against both engines
+- **T2a — Models, tables, and the SQLite path.** #2
+- **T2b — Postgres parity and the engine matrix.** #22
+- **T2c — Constraints the database enforces.** #23
+- **T2d — Runtime configuration and the connection lifecycle.** #24 (follow-up,
+filed because the 12-criteria ceiling left six lifecycle and configuration
+criteria with no home)
 
-**Out of scope.** Migrations tooling; any endpoint.
-**Constraints.** `backend/app/models.py`, `backend/app/db.py`.
+Migration tooling is out of scope for all four and is owned by #21.
+
 **Rubric.** Database integration (different environments).
 
 ---
