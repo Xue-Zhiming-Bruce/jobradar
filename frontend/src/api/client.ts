@@ -147,7 +147,7 @@ export async function uploadResume(file: File): Promise<ResumeUploaded> {
   return decodeResume(await request<WireResumeUploaded>('/resume', { method: 'POST', body }))
 }
 
-/** No `X-Tick-Secret`: this bundle is public, so the tick's authorisation is `#13`'s. */
+/** Sends no secret: this bundle is public, so how a browser tick is authorised is `#13`'s. */
 export async function startTick(): Promise<RunSummary> {
   return decodeRun(await request<WireRunSummary>('/internal/tick', { method: 'POST' }))
 }
