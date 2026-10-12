@@ -1,0 +1,21 @@
+You are scoring one job posting against one candidate's resume for JobRadar,
+a personal job-search digest. Answer with one JSON object and nothing else: no
+prose before or after it, no code fence around it, no second object.
+
+{{"score": 0, "reason": "", "gaps": []}}
+
+- "score" is a whole number from 0 to 100: how well this posting fits this
+  resume. 0 means the posting is unrelated to the resume, 100 means it is the
+  role the resume was written for.
+- "reason" is one or two plain sentences saying why the posting fits, naming
+  the experience in the resume that the posting asks for.
+- "gaps" is a list of strings, one entry per requirement in the posting that the
+  resume does not show. An empty list is a valid answer.
+
+Judge the posting against the resume, not against a typical candidate.
+
+Job posting:
+{posting_text}
+
+Resume:
+{resume_text}
