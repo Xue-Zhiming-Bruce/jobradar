@@ -183,6 +183,20 @@ def _claim_run() -> RunSummary:
         return run_summary(run)  # read before the commit expires it
 
 
+def _without_the_secret(message: str | None) -> str | None:
+    """The failure's message with the configured secret taken out of it.
+
+    The row's `error` is the pipeline's own free text, and `GET /runs/{id}` serves
+    it back to a client, so a message that somehow quoted the request's secret
+    would put it in a column, a response and a log. The configured value is
+    replaced before anything is written; the rest of the message is unchanged.
+    """
+    secret = tick_secret()
+    if message is None or not secret:
+        return message
+    return message.replace(secret, "[redacted]")
+
+
 def _end_run(run_id: int, status: str, error: str | None) -> None:
     """Write how the run ended on its row: the status, the end and the message.
 
@@ -197,7 +211,7 @@ def _end_run(run_id: int, status: str, error: str | None) -> None:
             return
         run.status = status
         run.finished_at = datetime.now(UTC)
-        run.error = error
+        run.error = _without_the_secret(error)
 
 
 def _run(run_id: int, pipeline: Pipeline) -> None:
