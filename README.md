@@ -200,3 +200,142 @@ mock backend, so they need no API, no key and no network.
 `npm test` is `vitest run`: it runs the whole suite under `frontend/src/` once
 and exits on its own. `npm run dev` serves the app with the mock backend
 answering in the browser.
+
+## MCP server
+
+`mcp/` is a second uv project, `jobradar_mcp`: a small MCP server that drives the
+app this repository already serves, over HTTP, through five bounded tools. It is a
+project of its own so the `mcp` dependency never enters `backend/`'s tree or the
+deployed image, and `cd backend && uv run pytest` is unaffected. It speaks MCP over
+**stdio** — no port, no host and no HTTP server of its own — and it holds no
+credential of its own beyond two variables:
+
+| Variable | What it is |
+| --- | --- |
+| `JOBRADAR_URL` | the app's base URL, e.g. `http://127.0.0.1:8123` |
+| `JOBRADAR_TICK_SECRET` | the value sent as `X-Tick-Secret`: the same value the app reads from `TICK_SECRET` |
+
+Nothing else is read: no model key, no database URL, no SMTP variable, no upload
+directory and no digest rule. Either variable unset or blank is a tool error naming
+that variable — the server still starts and lists its tools, and the tools that do
+not need the missing one still answer. The secret's value never reaches a result,
+an error message or a log line. The app itself is reached directly: a proxy taken
+from the machine's own settings does not stand between the two, which is what
+keeps the loopback demo below working on a machine that runs one.
+
+### Tools
+
+| Tool | Arguments | Returns |
+| --- | --- | --- |
+| `add_company` | `name: string`, `slug: string` (both required) | the app's `201` body: `id`, `name`, `slug`, `is_active` |
+| `list_watchlist` | none | every company, ascending id, active or not: `id`, `name`, `slug`, `is_active` |
+| `list_matches` | none | every match row, newest first, unfiltered: `id`, `company_name`, `title`, `url`, `score`, `reason`, `gaps`, `state`, `created_at` |
+| `trigger_run` | none | the app's `202` body: `id`, `status`, `started_at`, `finished_at`, `error`, `postings_seen`, `matches_created` |
+| `get_run` | `run_id: integer` (required) | that run's row, the same seven fields |
+
+Each tool returns the app's own response body, field for field and name for name:
+nothing is filtered, renamed or derived here. `list_matches` has no filter of its
+own, so a prefiltered row (`score` 0) and an unscored one come back exactly as
+stored — keeping either out of a digest or a screen is the app's business. A list
+is rendered as one JSON block per row, because that is how the SDK renders a
+returned list; anything else is one JSON block. Every failure a client can see is
+a tool error (`isError`) carrying the app's own `detail` text, never a hang, never
+a silent success and never a traceback.
+
+Each tool calls one endpoint the app serves today: `POST /watchlist`,
+`GET /watchlist`, `GET /matches`, `POST /internal/tick` and `GET /runs/{id}`.
+`trigger_run` sends one request and answers the row while the run is still
+running — it does not wait for it and does not poll it; `get_run` is the read.
+
+### Run it, and register it
+
+    cd mcp && uv sync
+    cd mcp && uv run python -m jobradar_mcp
+
+An MCP client starts that command for you; the entry is the command, its
+arguments and the two variables:
+
+```json
+{
+  "mcpServers": {
+    "jobradar": {
+      "command": "uv",
+      "args": ["--directory", "mcp", "run", "python", "-m", "jobradar_mcp"],
+      "env": {
+        "JOBRADAR_URL": "http://127.0.0.1:8123",
+        "JOBRADAR_TICK_SECRET": "throwaway-local-secret"
+      }
+    }
+  }
+}
+```
+
+### See one tool call yourself
+
+**Terminal 1** — the app, with a throwaway secret and a throwaway database, on
+port 8123 (8000 belongs to compose). `TICK_SECRET` is a literal throwaway, like
+the local Postgres password in `compose.yaml`: its only power is over the app on
+this machine's port 8123.
+
+    cd backend && TICK_SECRET=throwaway-local-secret \
+      DATABASE_URL=sqlite:////tmp/jobradar-mcp-demo.db \
+      uv run uvicorn app.main:app --port 8123
+
+**Terminal 2** — one command that opens a stdio session to that server, calls one
+tool and prints the result. No Node, no Inspector, no interactive click:
+
+    cd mcp && JOBRADAR_URL=http://127.0.0.1:8123 \
+      JOBRADAR_TICK_SECRET=throwaway-local-secret uv run python demo_client.py
+
+`demo_client.py` is that short client: `mcp.client.stdio` starts the server on the
+other end of a pipe, `ClientSession.call_tool("trigger_run", {})` makes the one
+call, and the body it returns is printed. What a reviewer must see is a run row
+with an `id` and `"status": "running"` (the id and the timestamps are the app's
+own, so they differ per run):
+
+```
+trigger_run -> {
+  "id": 1,
+  "status": "running",
+  "started_at": "2026-10-12T18:09:54.022466Z",
+  "finished_at": null,
+  "error": null,
+  "postings_seen": 0,
+  "matches_created": 0
+}
+```
+
+The server logs the one request it made to stderr, above that block; the answer
+itself is the whole of stdout's protocol on that pipe.
+
+At that moment the app is up, with its tables created, and the same row is
+readable from the app itself:
+
+    curl -s http://127.0.0.1:8123/healthz      # {"status":"ok"}
+    curl -s http://127.0.0.1:8123/runs/1
+
+The demo needs no LLM key, no SMTP, no real `TICK_SECRET`, no real `DATABASE_URL`
+and no resume: the configuration table above says what each of those unset means.
+The run's later outcome is **not** asserted — with an empty watchlist and no model
+key the pipeline may score nothing and end the row `succeeded` or `failed`, so the
+row the `curl` above prints at `id` 1 may already read
+`"error": "No active resume: upload one before a run can score postings"`. That is
+the app's own business, and not this call's.
+
+### MCP tests
+
+    cd mcp && uv sync
+    cd mcp && uv run pytest
+    cd mcp && uv run pytest -m live
+
+The default run needs no app, no network, no `.env` and neither variable: every
+case injects `httpx2.Client(transport=httpx2.MockTransport(...))` the way
+`backend/tests/test_greenhouse_source.py` does, and drives the tools by name
+through `MCPServer.call_tool` and `MCPServer.list_tools()`, so the SDK's own
+argument validation, output conversion and error wrapping are what is exercised.
+The one case that drives the real app is excluded by
+`addopts = "-m 'not live'"` in `mcp/pyproject.toml`, the way the backend excludes
+`integration`: it starts the app as a subprocess on a free port with a temporary
+SQLite file under the system temp directory — never `backend/data/jobradar.db` —
+and asserts that the row `trigger_run()` returned is the row `get_run(run_id)`
+reads back.
