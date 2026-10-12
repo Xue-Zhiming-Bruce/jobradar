@@ -1,0 +1,91 @@
+# Local only: the API and the built UI in one container, plus the Postgres that
+# container writes to. `#16` is where production hosting lives -- a Render web
+# service and a Neon database -- and this file is not that.
+#
+# One command, from the repository root, with no `.env` and no manual step:
+#
+#     docker compose up --build --wait
+#
+# Nothing here is required to be set. Every variable below is `${VAR:-}`, so an
+# unset one arrives empty and the app's own default is what an empty one means:
+# unset `TICK_SECRET` makes every tick `401`, and a missing `LLM_API_KEY` leaves
+# the run's row `failed` with a message naming the variable. `/healthz` is green
+# either way.
+#
+# The Postgres password is a local throwaway: `db` publishes no host port, so the
+# only thing it guards is a database on this machine. Production credentials come
+# from Render and Neon and never appear in this file, which is committed to a
+# public repository.
+
+name: jobradar
+
+services:
+  api:
+    # The repository root is the build context because the frontend's build stage
+    # lives in the same Dockerfile (#13).
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://jobradar:jobradar-local-throwaway@db:5432/jobradar
+      UPLOADS_DIR: /data/uploads
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-}
+      TICK_SECRET: ${TICK_SECRET:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      SCORER_MAX_POSTINGS: ${SCORER_MAX_POSTINGS:-}
+      PREFILTER_TITLE_TERMS: ${PREFILTER_TITLE_TERMS:-}
+      PREFILTER_SENIORITY_TERMS: ${PREFILTER_SENIORITY_TERMS:-}
+      PREFILTER_LOCATION_TERMS: ${PREFILTER_LOCATION_TERMS:-}
+      PREFILTER_MUST_HAVE_KEYWORDS: ${PREFILTER_MUST_HAVE_KEYWORDS:-}
+      DIGEST_MIN_SCORE: ${DIGEST_MIN_SCORE:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      DIGEST_FROM: ${DIGEST_FROM:-}
+      DIGEST_TO: ${DIGEST_TO:-}
+    volumes:
+      # Uploaded resumes, outside the repository and outside the image.
+      - jobradar-uploads:/data/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # What the image has is python, not curl.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).read()
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: jobradar
+      POSTGRES_PASSWORD: jobradar-local-throwaway
+      POSTGRES_DB: jobradar
+    volumes:
+      - jobradar-postgres:/var/lib/postgresql/data
+    # No `ports:`: nothing outside this compose network reaches the database.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobradar -d jobradar"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+# Named volumes, so `restart` and `down` + `up` keep the database and the
+# uploaded resumes. The explicit `name:` is the volume's own name, not a
+# project-prefixed one: `jobradar-postgres` and `jobradar-uploads` on the host.
+volumes:
+  jobradar-postgres:
+    name: jobradar-postgres
+  jobradar-uploads:
+    name: jobradar-uploads
