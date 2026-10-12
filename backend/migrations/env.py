@@ -56,7 +56,14 @@ def discard_an_empty_revision(
 
 
 def run_migrations_online() -> None:
-    """Connect through the app's own engine and apply the revisions on it."""
+    """Connect through the app's own engine and apply the revisions on it.
+
+    `db.get_engine()` is the engine `db.database_url()` builds, so the URL has one
+    source, the scheme gate applies to it, and a SQLite connection opened here
+    carries the same pragmas `init_db()`'s connections carry. It is also the one
+    object the suite's `engine` fixture holds, so alembic's connections are the
+    ones the fixture's leak check counts.
+    """
     with db.get_engine().connect() as connection:
         context.configure(
             connection=connection,
