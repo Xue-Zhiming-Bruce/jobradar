@@ -400,7 +400,9 @@ def test_a_reopened_posting_is_reported_as_reopened_and_not_as_created(engine: E
     assert result.created_ids == []
     assert result.reopened_ids == [before["Z"]["id"], before["Y"]["id"]]
     with db.session_scope() as session:
-        assert [session.get(Posting, posting_id) for posting_id in result.reopened_ids]
+        assert [
+            session.get(Posting, posting_id).external_id for posting_id in result.reopened_ids
+        ] == ["Z", "Y"]
 
 
 def test_the_seam_is_a_company_and_the_postings_fetched_for_it() -> None:
