@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw'
-import { companies, resumeUploaded, runSummary } from './fixtures'
+import { companies, matches, resumeUploaded, runSummary, runSucceeded } from './fixtures'
 
 /** The mock backend: one handler per method-and-path pair in `backend/openapi.json`. */
 export const handlers = [
@@ -13,5 +13,16 @@ export const handlers = [
 
   http.post('/internal/tick', () => HttpResponse.json(runSummary, { status: 202 })),
 
-  http.get('/runs/:id', () => HttpResponse.json(runSummary)),
+  http.get('/runs/:id', () => HttpResponse.json(runSucceeded)),
+
+  http.get('/matches', () => HttpResponse.json(matches)),
+
+  // The verdict echoes back, so a test can see the round trip without the mock
+  // keeping state: the answer is the row it found, in the state it was sent.
+  http.patch('/matches/:id', async ({ request, params }) => {
+    const { state } = (await request.json()) as { state: string }
+    const id = Number(params.id)
+    const row = matches.find((match) => match.id === id) ?? matches[0]
+    return HttpResponse.json({ ...row, id, state })
+  }),
 ]

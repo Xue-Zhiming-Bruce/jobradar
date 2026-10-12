@@ -75,4 +75,34 @@ describe('the mock answers the shapes the contract requires', () => {
     expect(response.status).toBe(200)
     expect(await keysOf(response)).toEqual(requiredKeys('RunSummary'))
   })
+
+  it('GET /matches answers MatchSummary rows, a row per state', async () => {
+    const response = await api('/matches')
+
+    expect(response.status).toBe(200)
+    const rows = (await response.json()) as { state: string }[]
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) {
+      expect(Object.keys(row).sort()).toEqual(requiredKeys('MatchSummary'))
+    }
+    expect([...new Set(rows.map((row) => row.state))].sort()).toEqual([
+      'dismissed',
+      'new',
+      'saved',
+    ])
+  })
+
+  it('PATCH /matches/:id answers one MatchSummary in the state it was sent', async () => {
+    const response = await api('/matches/1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: 'dismissed' }),
+    })
+
+    expect(response.status).toBe(200)
+    const row = (await response.json()) as { id: number; state: string }
+    expect(Object.keys(row).sort()).toEqual(requiredKeys('MatchSummary'))
+    expect(row.id).toBe(1)
+    expect(row.state).toBe('dismissed')
+  })
 })
