@@ -1,0 +1,121 @@
+# CI: this repository's own runners run the three suites and the stale-contract
+# check. There is no deploy step -- deploying a green `main` is #45, which needs
+# #16's Render service and Neon database. Nothing in this file reaches a
+# credential beyond the throwaway Postgres one below, which the README already
+# publishes for an ephemeral container.
+#
+# What each job runs, and the local command that stands in for it:
+#
+#   backend      cd backend && uv sync && uv run pytest
+#                the integration suite is collected and deselected here; the
+#                summary reads `N deselected`
+#   frontend     cd frontend && npm ci && npm run build && npm test
+#                `npm ci` installs the committed `frontend/package-lock.json`
+#   integration  the marked suite against the throwaway server, on port 5433
+#                because 5432 is taken on a development machine:
+#
+#                  docker run --rm -d --name jobradar-test-db -p 5433:5432 \
+#                    -e POSTGRES_USER=jobradar -e POSTGRES_PASSWORD=jobradar-throwaway \
+#                    -e POSTGRES_DB=jobradar postgres:17
+#                  cd backend && TEST_DATABASE_URL=postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:5433/jobradar uv run pytest -m integration
+#                  docker rm -f jobradar-test-db
+#
+#                the job itself uses a service container, not the local compose
+#                stack, which the README says is not a test harness
+#   contract     cd backend && uv run python -m app.export_openapi
+#                git diff --exit-code -- backend/openapi.json
+#                a stale or hand-edited contract rewrites the file, so the diff
+#                is non-empty and this fails with the diff printed
+#
+# That the YAML itself is valid -- empty output and exit 0 on both files:
+#
+#   python3 -c 'import yaml, sys; [yaml.safe_load(open(path)) for path in sys.argv[1:]]' .github/workflows/ci.yml .github/workflows/tick.yml
+#
+# The stronger check, which knows Actions' own schema:
+#
+#   docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest
+#
+# The versions are this repository's own: Python 3.12 (`requires-python`),
+# Node 22.12 (`backend/Dockerfile`) and `postgres:17` (`compose.yaml`).
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.12"
+      - run: uv sync
+        working-directory: backend
+      - run: uv run pytest
+        working-directory: backend
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22.12"
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - run: npm test
+        working-directory: frontend
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: jobradar
+          POSTGRES_PASSWORD: jobradar-throwaway
+          POSTGRES_DB: jobradar
+        ports:
+          - "5432:5432"
+        # The health check in `compose.yaml`'s `db` service, with a start period:
+        # the suite must not reach a server that is still starting up.
+        options: >-
+          --health-cmd "pg_isready -U jobradar -d jobradar"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+          --health-start-period 5s
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.12"
+      - run: uv sync
+        working-directory: backend
+      # `backend/tests/integration/conftest.py` fails rather than skips on an
+      # unset URL, so a job that lost this variable is red, not green.
+      - run: uv run pytest -m integration
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:5432/jobradar
+
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.12"
+      - run: uv sync
+        working-directory: backend
+      - run: uv run python -m app.export_openapi
+        working-directory: backend
+      - run: git diff --exit-code -- backend/openapi.json
