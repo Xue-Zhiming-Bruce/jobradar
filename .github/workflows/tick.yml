@@ -1,0 +1,92 @@
+# Tick: one scheduled call to `POST /internal/tick`, so the digest does not depend
+# on anyone opening the app. Nothing else: no deploy, no test.
+#
+# Triggers are one daily cron and a manual dispatch, and nothing else: the secret
+# is out of reach of every pull request, and no other event can start this job.
+#
+# RED UNTIL #16 IS EXPECTED. The job reads the repository secret `TICK_SECRET`
+# (the value `app/routes/internal.py` reads from the `TICK_SECRET` variable, which
+# the README says has no default: unset means every tick is 401) and the repository
+# variable `JOBRADAR_URL` (#16 points it at the deployed app). Until #16 exists
+# both are unset, so the job exits non-zero with a `::error::` naming the missing
+# one and sends no request at all. That is the intended signal, not a broken
+# workflow: a silently green cron is worse than no cron, and neither input is
+# turned into a skip. No secret value is in this file -- both inputs arrive at
+# runtime -- and no step enables shell tracing or a verbose transfer, so neither
+# value can reach the log.
+#
+# The local equivalent of this job, with the app on port 8123 (8000 belongs to
+# compose) and a throwaway secret, exactly as the README's MCP demo starts it:
+#
+#   cd backend && TICK_SECRET=throwaway-local-secret uv run uvicorn app.main:app --port 8123
+#
+#   curl --fail-with-body --silent --show-error --max-time 60 \
+#     --request POST --header "X-Tick-Secret: throwaway-local-secret" \
+#     http://127.0.0.1:8123/internal/tick
+#   curl --silent --show-error --max-time 60 http://127.0.0.1:8123/runs/1
+#
+# The first is the call this job makes, and it has to answer 202: the endpoint
+# fails a wrong or absent secret with 401, a run already in progress with 409 and
+# an unrecorded run with 500, and `--fail-with-body` fails the step on every one
+# of them. It answers 202 while the run continues in the background, so the second
+# curl is where that run's outcome is read -- not this job's business.
+#
+# That the YAML itself is valid -- empty output and exit 0 on both files:
+#
+#   python3 -c 'import yaml, sys; [yaml.safe_load(open(path)) for path in sys.argv[1:]]' .github/workflows/ci.yml .github/workflows/tick.yml
+#
+# The stronger check, which knows Actions' own schema:
+#
+#   docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest
+#
+# The schedule is best-effort. GitHub Actions cron drifts by minutes to hours and
+# can skip a run entirely, so a missed or late run is expected and the in-app
+# "Run digest now" button is the reliable path
+# (_docs/decisions/2026-10-11-deploy-and-repo.md).
+
+name: Tick
+
+on:
+  schedule:
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      # Both inputs are checked before anything is sent, so a cron with no
+      # configuration is loudly red instead of quietly doing nothing. The two
+      # annotations name whichever input is missing; a failing step stops the job,
+      # so the request below never runs.
+      - name: Require TICK_SECRET and JOBRADAR_URL
+        env:
+          TICK_SECRET: ${{ secrets.TICK_SECRET }}
+          JOBRADAR_URL: ${{ vars.JOBRADAR_URL }}
+        run: |
+          missing=0
+          if [ -z "${TICK_SECRET}" ]; then
+            echo "::error::The repository secret TICK_SECRET is unset or empty."
+            missing=1
+          fi
+          if [ -z "${JOBRADAR_URL}" ]; then
+            echo "::error::The repository variable JOBRADAR_URL is unset or empty."
+            missing=1
+          fi
+          if [ "${missing}" -ne 0 ]; then
+            echo "::error::No request was sent. Set both under Settings > Secrets and variables > Actions; until #16 deploys the app and sets JOBRADAR_URL this job is red on purpose."
+            exit 1
+          fi
+
+      - name: Start one run
+        env:
+          TICK_SECRET: ${{ secrets.TICK_SECRET }}
+          JOBRADAR_URL: ${{ vars.JOBRADAR_URL }}
+        run: |
+          curl --fail-with-body --silent --show-error --max-time 60 \
+            --request POST \
+            --header "X-Tick-Secret: ${TICK_SECRET}" \
+            "${JOBRADAR_URL}/internal/tick"
