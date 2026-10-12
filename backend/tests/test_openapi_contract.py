@@ -26,7 +26,6 @@ def test_contract_describes_the_health_check_and_the_resume_upload() -> None:
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
 
     assert {"openapi", "info", "paths"} <= set(contract)
-    assert list(contract["paths"]) == ["/healthz", "/resume"]
 
     ok_response = contract["paths"]["/healthz"]["get"]["responses"]["200"]
     assert ok_response["content"]["application/json"]["schema"]
@@ -42,6 +41,47 @@ def test_contract_describes_the_health_check_and_the_resume_upload() -> None:
     assert body["properties"]["file"]["contentMediaType"] == "application/octet-stream"
     created = upload["responses"]["201"]["content"]["application/json"]["schema"]
     assert created["$ref"].endswith("ResumeUploaded")
+
+
+def test_contract_lists_every_registered_path_in_registration_order() -> None:
+    contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+
+    assert list(contract["paths"]) == [
+        "/healthz",
+        "/resume",
+        "/watchlist",
+        "/watchlist/{id}",
+    ]
+
+
+def test_contract_describes_the_watchlist_routes() -> None:
+    contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    schemas = contract["components"]["schemas"]
+    listed = contract["paths"]["/watchlist"]["get"]
+    created = contract["paths"]["/watchlist"]["post"]
+    removed = contract["paths"]["/watchlist/{id}"]["delete"]
+
+    array_schema = listed["responses"]["200"]["content"]["application/json"]["schema"]
+    assert array_schema["type"] == "array"
+    company_ref = array_schema["items"]["$ref"]
+    company = schemas[company_ref.rsplit("/", 1)[-1]]
+    assert set(company["properties"]) == {"id", "name", "slug", "is_active"}
+
+    # The same company body `POST` answers with, and the refusals it answers instead.
+    assert created["requestBody"]["required"] is True
+    body_ref = created["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    assert schemas[body_ref.rsplit("/", 1)[-1]]["required"] == ["name", "slug"]
+    assert set(created["responses"]) == {"201", "404", "409", "422", "502"}
+    assert created["responses"]["201"]["content"]["application/json"]["schema"]["$ref"] == (
+        company_ref
+    )
+
+    # The id is a path parameter and an integer, and the delete answers with no body.
+    assert set(removed["responses"]) == {"204", "404", "422"}
+    assert "content" not in removed["responses"]["204"]
+    (parameter,) = removed["parameters"]
+    assert parameter["in"] == "path"
+    assert parameter["schema"]["type"] == "integer"
 
 
 def test_contract_carries_no_environment_specific_values() -> None:

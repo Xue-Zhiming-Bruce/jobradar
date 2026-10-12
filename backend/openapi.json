@@ -67,6 +67,106 @@
           }
         }
       }
+    },
+    "/watchlist": {
+      "get": {
+        "tags": [
+          "watchlist"
+        ],
+        "summary": "List the watched companies",
+        "description": "Every company on the watchlist, in ascending id order, active or not.\n\nNo filter and no paging: one user's watchlist is short, and an inactive\ncompany is still a company to show.",
+        "operationId": "list_watchlist_watchlist_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/WatchedCompany"
+                  },
+                  "type": "array",
+                  "title": "Response List Watchlist Watchlist Get"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "watchlist"
+        ],
+        "summary": "Watch a company's Greenhouse board",
+        "description": "Add one company, once its board has answered and only if its slug is new.\n\nThe board is asked before anything is written, and every `POST` asks it once:\na body that cannot be used never reaches this function, and a slug that is\nalready watched is refused only after the source has spoken for it.",
+        "operationId": "add_company_watchlist_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompanyCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchedCompany"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No board goes by that slug, or no company has that id"
+          },
+          "409": {
+            "description": "The slug is already on the watchlist"
+          },
+          "422": {
+            "description": "The body, or the path, is not something this route can use"
+          },
+          "502": {
+            "description": "The board could not be read: it is down, slow or malformed"
+          }
+        }
+      }
+    },
+    "/watchlist/{id}": {
+      "delete": {
+        "tags": [
+          "watchlist"
+        ],
+        "summary": "Stop watching a company",
+        "description": "Delete exactly that company, and answer `204` with no body when it went.\n\nThe id is a path parameter and an `int`: a value that is not one never\nreaches this function and is refused by the path's own validation as `422`.\nAn id that finds no row is a `404` and deletes nothing.",
+        "operationId": "remove_company_watchlist__id__delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No board goes by that slug, or no company has that id"
+          },
+          "422": {
+            "description": "The body, or the path, is not something this route can use"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -85,6 +185,25 @@
           "file"
         ],
         "title": "Body_upload_resume_resume_post"
+      },
+      "CompanyCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "slug"
+        ],
+        "title": "CompanyCreate",
+        "description": "Body of an addition: the name to show, and the board slug to poll.\n\nBoth fields are required strings, and a string that carries nothing but\nwhitespace is refused as well: the name labels a row a person reads, and the\nslug is what the source is asked about. The values are left exactly as they\nwere sent; normalising the slug is `app.models.Company`'s, not this model's."
       },
       "Health": {
         "properties": {
@@ -128,6 +247,35 @@
         ],
         "title": "ResumeUploaded",
         "description": "Body of a successful upload: which resume is now the active one."
+      },
+      "WatchedCompany": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "is_active"
+        ],
+        "title": "WatchedCompany",
+        "description": "One watchlist entry as this API renders it: four fields, and no timestamp.\n\nThe same body `POST` answers with, so a client reads one shape for a company\nwherever it sees one. `created_at` is stored and not exposed."
       }
     }
   }
