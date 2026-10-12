@@ -81,10 +81,10 @@ def run_pipeline(
     """Walk the watchlist once for the run `run_id` names, and count what it did.
 
     Both collaborators are arguments -- the source is the callable a board adapter
-    exports and the scorer is one per run, because its cap is (`app.matching.scorer`)
-    -- so this module reaches no socket, knows no payload shape and reads no
-    configuration. Anything either collaborator raises escapes this function the
-    way it was raised: #9's `_run` is what turns it into the run row's failure.
+    exports and the scorer is one per run, the way its own cap requires -- so this
+    module reaches no socket, knows no payload shape and reads no configuration.
+    Anything either collaborator raises escapes this function the way it was
+    raised: #9's `_run` is what turns it into the run row's failure.
     """
     resume_text = resume.active_resume_text()
     if resume_text is None or not resume_text.strip():
@@ -147,10 +147,8 @@ def _stored_postings(created_ids: list[int]) -> list[tuple[int, SourcePosting]]:
     if not created_ids:
         return []
     with db.session_scope() as session:
-        return [
-            (row.id, _source_posting(row))
-            for row in (session.get(Posting, posting_id) for posting_id in created_ids)
-        ]
+        rows = [session.get(Posting, posting_id) for posting_id in created_ids]
+        return [(row.id, _source_posting(row)) for row in rows]
 
 
 def _source_posting(row: Posting) -> SourcePosting:

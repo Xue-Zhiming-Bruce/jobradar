@@ -236,7 +236,7 @@ def _result() -> MatchResult:
 
 
 def _company(slug: str = "acme", *, name: str | None = None, is_active: bool = True) -> int:
-    """One watchlist company, flushed so its id can name its postings, and its id."""
+    """One watchlist company, flushed so its id can name its postings: returns that id."""
     with db.session_scope() as session:
         company = Company(name=name or slug.capitalize(), slug=slug, is_active=is_active)
         session.add(company)
@@ -347,7 +347,7 @@ def test_one_fetch_per_active_company_with_the_stored_slug_in_ascending_id_order
 
 def test_an_inactive_company_is_never_fetched(engine: Engine) -> None:
     """The inactive company's board raises: reaching for it fails this case, not the run."""
-    watched = _company("acme")
+    _company("acme")
     stopped = _company("dead", is_active=False)
     source = FakeSource(
         {"acme": [_posting("1")]}, failing={"dead": SourceError("the inactive board was fetched")}
@@ -401,9 +401,7 @@ def test_no_posting_row_exists_that_ingest_did_not_create(engine: Engine) -> Non
 # Only this run's new postings are matched: a stored posting is offered to neither writer.
 
 
-def test_a_second_run_over_an_unchanged_board_offers_nothing(
-    engine: Engine,
-) -> None:
+def test_a_second_run_over_an_unchanged_board_offers_nothing(engine: Engine) -> None:
     company = _company("acme")
     payload = [_posting("1"), _posting("2")]
     source = FakeSource({"acme": payload})
