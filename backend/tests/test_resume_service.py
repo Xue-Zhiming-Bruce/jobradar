@@ -9,12 +9,20 @@ default one, it only checks where the default points.
 The reader is the other half: `active_resume_text()` is the one place the stored
 text comes back out, and its cases take the shared `engine` fixture so they run
 on SQLite and on PostgreSQL.
+
+The history is the reader's other half: the rows behind the routes are read,
+activated and deleted through this module, so the cases that assert the state
+they leave -- exactly one active row, which one it is, and what a delete does to
+the row and to the file -- take the same `engine` fixture and run on both
+engines. No case here goes through a route.
 """
 
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
 from app import db
@@ -210,3 +218,181 @@ def test_the_reader_opens_one_session_per_call(
 
     assert resume.active_resume_text() is None
     assert len(calls) == 1
+
+
+# The history: the rows the three routes read, activate and delete.
+
+# Two instants a day apart, so "newest first" has something to sort, and the
+# tie-break has two rows written in the same one.
+EARLY = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+LATE = datetime(2024, 1, 2, 12, 0, tzinfo=UTC)
+
+
+def _stored(
+    filename: str = "older.txt",
+    *,
+    uploaded_at: datetime | None = None,
+    stored_path: Path | None = None,
+    text: str = "an older, inactive resume",
+) -> int:
+    """One inactive `resume` row written through the app's own session, and its id."""
+    with db.session_scope() as session:
+        row = Resume(
+            filename=filename,
+            content_type=resume.TEXT_PLAIN,
+            text=text,
+            stored_path=str(stored_path or Path("/tmp") / filename),
+            is_active=False,
+        )
+        if uploaded_at is not None:
+            row.uploaded_at = uploaded_at
+        session.add(row)
+        session.flush()
+        return row.id
+
+
+def _active_ids() -> list[int]:
+    """Every id of an active row, read through the app's own session -- never more than one."""
+    with db.session_scope() as session:
+        return list(session.scalars(select(Resume.id).where(Resume.is_active.is_(True))))
+
+
+def test_the_history_is_empty_before_the_first_upload(engine: Engine) -> None:
+    assert resume.resume_rows() == []
+
+
+def test_the_history_reads_newest_first_with_the_tie_broken_by_id(engine: Engine) -> None:
+    """The order, and rows a caller can still read: the session they came from is closed."""
+    older = _stored("older.txt", uploaded_at=EARLY)
+    first_of_the_instant = _stored("first.txt", uploaded_at=LATE)
+    second_of_the_instant = _stored("second.txt", uploaded_at=LATE)
+
+    rows = resume.resume_rows()
+
+    assert [row.id for row in rows] == [second_of_the_instant, first_of_the_instant, older]
+    assert [row.filename for row in rows] == ["second.txt", "first.txt", "older.txt"]
+    assert [row.is_active for row in rows] == [False, False, False]
+
+
+def test_activating_an_older_row_deactivates_the_one_that_was_active(engine: Engine) -> None:
+    """One transaction, so exactly one row is active afterwards and it is the one named."""
+    older = _stored("older.txt", uploaded_at=EARLY)
+    newest = resume.record_active_resume(
+        "newest.txt", resume.TEXT_PLAIN, RESUME_TEXT_SENTINEL, Path("/tmp/newest.txt")
+    )
+    assert _active_ids() == [newest]
+
+    activated = resume.activate_resume(older)
+
+    assert activated is not None
+    assert (activated.id, activated.is_active) == (older, True)
+    assert _active_ids() == [older]
+    assert len(resume.resume_rows()) == 2  # the superseded row is history, not a casualty
+
+
+def test_activating_the_row_that_is_already_active_changes_nothing(engine: Engine) -> None:
+    """Idempotent: the same row comes back, and still exactly one row is active."""
+    active = resume.record_active_resume(
+        "resume.txt", resume.TEXT_PLAIN, RESUME_TEXT_SENTINEL, Path("/tmp/resume.txt")
+    )
+
+    first = resume.activate_resume(active)
+    second = resume.activate_resume(active)
+
+    assert first is not None and second is not None
+    assert (first.id, second.id) == (active, active)
+    assert second.is_active is True
+    assert _active_ids() == [active]
+
+
+def test_activating_an_id_with_no_row_writes_nothing(engine: Engine) -> None:
+    active = resume.record_active_resume(
+        "resume.txt", resume.TEXT_PLAIN, RESUME_TEXT_SENTINEL, Path("/tmp/resume.txt")
+    )
+
+    assert resume.activate_resume(active + 100) is None
+
+    assert _active_ids() == [active]
+    assert [row.id for row in resume.resume_rows()] == [active]
+
+
+def test_a_delete_removes_the_row_and_the_file_it_names(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads"))
+    path = resume.save_upload(b"synthetic resume bytes", resume.TEXT_PLAIN)
+    stored = resume.record_active_resume(
+        "resume.txt", resume.TEXT_PLAIN, RESUME_TEXT_SENTINEL, path
+    )
+    assert path.is_file()
+
+    assert resume.delete_resume(stored) is True
+
+    assert resume.resume_rows() == []
+    assert _active_ids() == []
+    assert not path.exists()
+
+
+def test_a_delete_whose_file_is_already_gone_still_removes_the_row(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row is the record and the file is derived from it: a missing file does not block it."""
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads"))
+    path = resume.save_upload(b"synthetic resume bytes", resume.TEXT_PLAIN)
+    stored = resume.record_active_resume(
+        "resume.txt", resume.TEXT_PLAIN, RESUME_TEXT_SENTINEL, path
+    )
+    path.unlink()
+
+    assert resume.delete_resume(stored) is True
+
+    assert resume.resume_rows() == []
+
+
+@pytest.mark.parametrize("spelling", ["sibling", "traversal"], ids=["sibling", "traversal"])
+def test_a_delete_never_unlinks_a_path_outside_the_uploads_directory(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spelling: str
+) -> None:
+    """No writer in this app stores such a path, so the delete must not follow one."""
+    uploads = tmp_path / "uploads"
+    monkeypatch.setenv("UPLOADS_DIR", str(uploads))
+    outside = tmp_path / "outside.txt"
+    outside.write_text("a file no upload wrote")
+    stored = _stored(
+        "seeded.txt",
+        stored_path=outside if spelling == "sibling" else uploads / ".." / "outside.txt",
+    )
+
+    assert resume.delete_resume(stored) is True
+
+    assert resume.resume_rows() == []
+    assert outside.read_text() == "a file no upload wrote"
+
+
+def test_a_delete_whose_unlink_fails_leaves_the_row_and_its_text(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unlink runs first, so a failure of its own never leaves a row half-deleted."""
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads"))
+    path = resume.save_upload(b"synthetic resume bytes", resume.TEXT_PLAIN)
+    stored = resume.record_active_resume(
+        "resume.txt", resume.TEXT_PLAIN, RESUME_TEXT_SENTINEL, path
+    )
+
+    with monkeypatch.context() as failing_unlink:
+
+        def refuse(self: Path, missing_ok: bool = False) -> None:
+            raise OSError("the stored file could not be unlinked")
+
+        failing_unlink.setattr(Path, "unlink", refuse)
+        with pytest.raises(OSError):
+            resume.delete_resume(stored)
+
+    assert [(row.id, row.text) for row in resume.resume_rows()] == [
+        (stored, RESUME_TEXT_SENTINEL)
+    ]
+    assert path.is_file()  # and nothing was removed from disk either
+
+    path.unlink()  # the file is gone by the retry, which the missing-file case above covers
+    assert resume.delete_resume(stored) is True
+    assert resume.resume_rows() == []

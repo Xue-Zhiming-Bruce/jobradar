@@ -1,5 +1,6 @@
 """Reading a resume out of an upload, reading back the active one, and writing the file
-where the client cannot reach.
+where the client cannot reach, plus the history the upload supersedes: list it,
+make an older row active again, and delete one -- row and stored file together.
 
 `POST /resume` is the one endpoint that takes a file, and this module is where
 that file is judged: the declared media type and the bytes both have to name a
@@ -19,7 +20,8 @@ upload, and its absence is what `tests/test_app_main.py` checks.
 A resume's text is user data: it is stored, and nothing in this module logs it,
 puts it in an error message or returns it to a client. The readers below name the
 file's media type, never its contents -- `active_resume_text` hands the text to
-its caller and to nobody else.
+its caller and to nobody else, and `resume_rows` hands out rows for the routes to
+render without ever naming the text column.
 """
 
 import os
@@ -224,6 +226,88 @@ def active_resume_text() -> str | None:
         return session.scalars(
             select(Resume.text).where(Resume.is_active.is_(True))
         ).one_or_none()
+
+
+def resume_rows() -> list[Resume]:
+    """Every stored resume row, newest first, and `[]` when there are none.
+
+    One `session_scope()` per call, and the order is `uploaded_at` descending
+    with the id descending under it -- the shape `app.routes.matches` lists with:
+    two uploads committed in the same instant still have one order, newest row
+    first. The rows are detached before the commit, which would otherwise expire
+    every attribute: the caller renders them, and a renderer that reads an
+    expired row outside its session gets an error instead of a value.
+    """
+    with db.session_scope() as session:
+        rows = list(
+            session.scalars(
+                select(Resume).order_by(Resume.uploaded_at.desc(), Resume.id.desc())
+            )
+        )
+        session.expunge_all()
+        return rows
+
+
+def activate_resume(resume_id: int) -> Resume | None:
+    """Make that row the active resume and return it, or `None` when no row has that id.
+
+    The row that is active now is deactivated in the same transaction as this
+    update, which is what the partial index `uq_resume_one_active` requires: two
+    active rows are never visible, not even between the two statements. Exactly
+    one row is active afterwards and it is the one the id names. Activating the
+    row that is already active rewrites the same state and is not an error, so a
+    client may send the same request twice. Nothing else about the row -- its
+    text, its file, its `uploaded_at` -- is touched.
+
+    The returned row is detached before the commit expires it, for the reason
+    `resume_rows` gives: its renderer reads it outside this session.
+    """
+    with db.session_scope() as session:
+        target = session.get(Resume, resume_id)
+        if target is None:
+            return None
+        session.execute(update(Resume).where(Resume.is_active.is_(True)).values(is_active=False))
+        target.is_active = True
+        session.flush()  # both writes are in the transaction, and the index's verdict is in
+        session.expunge(target)
+        return target
+
+
+def delete_resume(resume_id: int) -> bool:
+    """Delete one resume row and the file its `stored_path` names; `False` when no row has it.
+
+    The file goes first and the row second, so nothing is ever half-deleted: an
+    `OSError` other than `FileNotFoundError` escapes this function, the session
+    rolls back, and the row with its text is left exactly as it was. A retry
+    after that file is gone takes `_remove_stored_file`'s missing-file path and
+    succeeds. Deleting the active resume is allowed and leaves no active row at
+    all, which is the state `pipeline.NO_ACTIVE_RESUME` already covers.
+    """
+    with db.session_scope() as session:
+        resume = session.get(Resume, resume_id)
+        if resume is None:
+            return False
+        _remove_stored_file(resume.stored_path)
+        session.delete(resume)
+        return True
+
+
+def _remove_stored_file(stored_path: str) -> None:
+    """Unlink the file that path names, when it is inside `uploads_dir()` and still there.
+
+    A file already gone does not block the delete: the row is the record and the
+    file is derived from it. A path that does not resolve inside the uploads
+    directory is never unlinked -- `save_upload` writes nothing else, so such a
+    value is not a file this app put there, and removing it would turn a delete
+    into deleting whatever path a row happens to hold. The row still goes.
+    """
+    path = Path(stored_path).resolve()
+    if not path.is_relative_to(uploads_dir().resolve()):
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _is_word_document(data: bytes) -> bool:
