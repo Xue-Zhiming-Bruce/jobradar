@@ -79,6 +79,13 @@ so deleting the host build changes nothing:
 The page still appears on <http://localhost:8000/>. `frontend/dist` on the host
 belongs to `npm run dev`; the image is where the served build comes from.
 
+One detail comes with serving a UI at `/`: a request that names an API path with
+a method that path does not serve (`GET /resume`, say) is answered by the mount
+with `404` instead of the API's `405`, because a mount at `/` matches every path
+before a partial match can be reported. Every documented answer is unchanged:
+the paths in `backend/openapi.json` answer their own methods, and no path returns
+HTML.
+
 The image must hold source and the built page and nothing else. `ls -a` is not
 enough to prove that — it lists the top level only — so this check is recursive
 and prints nothing when the image is clean:
