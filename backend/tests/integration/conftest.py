@@ -81,7 +81,6 @@ THROWAWAY_POSTGRES = (
     "-e POSTGRES_USER=jobradar -e POSTGRES_PASSWORD=jobradar-throwaway "
     "-e POSTGRES_DB=jobradar postgres:17"
 )
-MARKED_COMMAND = "cd backend && uv run pytest -m integration"
 THROWAWAY_TEST_DATABASE_URL = (
     "postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:5433/jobradar"
 )
@@ -179,9 +178,10 @@ def database(test_database_url: str, monkeypatch: pytest.MonkeyPatch) -> Iterato
     asserted before anything is written, so a URL that is not PostgreSQL -- and a
     run that quietly fell back to SQLite -- fails here instead of passing.
 
-    The tables are dropped first, so a case starts with empty tables rather than
-    inheriting whatever a previous run left, and dropped again afterwards: the
-    suite owns these five table names in this database and leaves no trace.
+    The tables are dropped before the case starts, so it begins on empty tables
+    rather than inheriting whatever a previous run left, and dropped again
+    afterwards: the suite owns these five table names in this database and leaves
+    no trace.
     """
     monkeypatch.setenv("DATABASE_URL", test_database_url)
 

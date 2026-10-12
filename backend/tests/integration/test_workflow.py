@@ -243,7 +243,6 @@ def test_the_whole_workflow_from_the_upload_to_the_recorded_digest(
     rejected = by_title[REJECTED.title]
     assert rejected["score"] == 0
     assert rejected["reason"] == REJECTION_REASON_PREFIX + f"title term '{REJECTION_TERM}'"
-    assert rejected["reason"].startswith(REJECTION_REASON_PREFIX)
     assert rejected["gaps"] == []
 
     survivor = by_title[SURVIVOR.title]
