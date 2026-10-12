@@ -397,6 +397,22 @@ def test_a_fixture_resume_holding_a_secret_is_still_caught(tmp_path: Path) -> No
     assert scan(root) == ["backend/tests/fixtures/synthetic-resume.pdf (environment value)"]
 
 
+@pytest.mark.parametrize(
+    "path",
+    [".env.example", "backend/tests/fixtures/blank-page.pdf"],
+    ids=["the example environment file", "a synthetic resume fixture"],
+)
+def test_an_exempt_path_holding_a_credential_is_still_caught(tmp_path: Path, path: str) -> None:
+    """Neither exemption hides content: only the one path rule each is switched off."""
+    planted = _key("sk-", "0" * 32)
+    root = _index(tmp_path, {path: planted})
+
+    violations = scan(root)
+
+    assert violations == [f"{path} (openai-style key)"]
+    assert planted not in "\n".join(violations)
+
+
 def test_the_documented_example_environment_file_is_allowed(tmp_path: Path) -> None:
     root = _index(tmp_path, {".env.example": _assignment("TICK_SECRET", "")})
 
@@ -583,7 +599,9 @@ def test_a_gitignored_file_staged_with_force_is_caught(tmp_path: Path) -> None:
 
 def test_a_working_tree_edit_is_never_read(tmp_path: Path) -> None:
     root = _index(tmp_path, {"config.py": "# nothing here\n"})
-    (root / "config.py").write_text(_assignment(_smtp_password_name(), "hunter2"), encoding="utf-8")
+    (root / "config.py").write_text(
+        _assignment(_smtp_password_name(), "hunter2"), encoding="utf-8"
+    )
 
     assert scan(root) == []
 
@@ -599,7 +617,16 @@ def test_a_local_env_database_and_upload_that_are_untracked_are_never_read(tmp_p
                 "into `UPLOADS_DIR`, a volume under compose and `~/.jobradar/uploads`\n"
                 "otherwise.\n"
             ),
-            "compose.yaml": _assignment("POSTGRES_PASSWORD", "jobradar-local-throwaway"),
+            "compose.yaml": "\n".join(
+                (
+                    _assignment("POSTGRES_PASSWORD", "jobradar-local-throwaway"),
+                    _assignment(
+                        "DATABASE_URL", _database_url("postgresql", "jobradar-local-throwaway")
+                    ),
+                    _assignment("TICK_SECRET", _join("${TICK_", "SECRET:-}")),
+                    _assignment("LLM_API_KEY", _join("${LLM_", "API_KEY:-}")),
+                )
+            ),
             ".env.example": _assignment("TICK_SECRET", ""),
         },
     )
