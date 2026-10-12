@@ -4,6 +4,19 @@ A daily digest of new job postings at companies you actually want to work for,
 matched against your resume, with a plain-English reason for each match. See
 `_docs/plan.md` for the full plan.
 
+## Frontend
+
+The app in `frontend/` is React and TypeScript, and its tests run against a
+mock backend, so they need no API, no key and no network.
+
+    cd frontend && npm install
+    cd frontend && npm test
+    cd frontend && npm run dev
+
+`npm test` is `vitest run`: it runs the whole suite under `frontend/src/` once
+and exits on its own. `npm run dev` serves the app with the mock backend
+answering in the browser.
+
 ## Backend
 
 ### Regenerating the OpenAPI contract
