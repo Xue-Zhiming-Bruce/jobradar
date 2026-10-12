@@ -167,6 +167,76 @@
           }
         }
       }
+    },
+    "/internal/tick": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Start one digest run",
+        "description": "Start one run, and answer `202` with the row this request wrote.\n\nThe caller is checked first, then the guard is claimed, then the row is\nwritten, then the work is handed over -- and the answer carries that row in\nstatus `running` rather than waiting for the work, which is what\n`GET /runs/{id}` is for. Nothing before the hand-over can leave the guard\nheld: a row that cannot be written, like work that cannot be started, is a\n`500` and gives the guard back, so the endpoint recovers instead of refusing\nevery later tick.",
+        "operationId": "tick_internal_tick_post",
+        "responses": {
+          "202": {
+            "description": "A run started: the run row this request wrote",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The request's shared internal header is missing, empty or wrong"
+          },
+          "409": {
+            "description": "A run is already in progress in this process"
+          },
+          "500": {
+            "description": "The run could not be recorded, or its work could not be started"
+          }
+        }
+      }
+    },
+    "/runs/{id}": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Read one digest run",
+        "description": "The run with that id, in whichever status it is in, exactly as the row holds it.\n\nThe id is a path parameter and an `int`: a value that is not one never\nreaches this function and is refused by the path's own validation as `422`.\nAn id that finds no row is a `404` and invents nothing.",
+        "operationId": "read_run_runs__id__get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSummary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No run has that id"
+          },
+          "422": {
+            "description": "The path value is not a run id"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -247,6 +317,66 @@
         ],
         "title": "ResumeUploaded",
         "description": "Body of a successful upload: which resume is now the active one."
+      },
+      "RunSummary": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "postings_seen": {
+            "type": "integer",
+            "title": "Postings Seen"
+          },
+          "matches_created": {
+            "type": "integer",
+            "title": "Matches Created"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "started_at",
+          "finished_at",
+          "error",
+          "postings_seen",
+          "matches_created"
+        ],
+        "title": "RunSummary",
+        "description": "One `run` row as this API renders it: its seven columns, and no derived field.\n\nThe same body a `202` from `POST /internal/tick` carries. `finished_at` and\n`error` are absent until the run ends, and both counts are 0 from the moment\nthe row is written: what the boards returned and how many matches\n`record_score` wrote (#34), never a score computed here."
       },
       "WatchedCompany": {
         "properties": {

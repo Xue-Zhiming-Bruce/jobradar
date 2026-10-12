@@ -51,6 +51,8 @@ def test_contract_lists_every_registered_path_in_registration_order() -> None:
         "/resume",
         "/watchlist",
         "/watchlist/{id}",
+        "/internal/tick",
+        "/runs/{id}",
     ]
 
 
@@ -82,6 +84,43 @@ def test_contract_describes_the_watchlist_routes() -> None:
     (parameter,) = removed["parameters"]
     assert parameter["in"] == "path"
     assert parameter["schema"]["type"] == "integer"
+
+
+def test_contract_describes_the_tick_and_the_run_it_started() -> None:
+    contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    schemas = contract["components"]["schemas"]
+    tick = contract["paths"]["/internal/tick"]["post"]
+    read = contract["paths"]["/runs/{id}"]["get"]
+
+    # One shape for a run wherever a client meets one: the `202` answers with the
+    # body the read answers with, and that body is the row's seven columns.
+    started = tick["responses"]["202"]["content"]["application/json"]["schema"]
+    summary = read["responses"]["200"]["content"]["application/json"]["schema"]
+    assert started["$ref"] == summary["$ref"]
+    run = schemas[started["$ref"].rsplit("/", 1)[-1]]
+    assert set(run["properties"]) == {
+        "id",
+        "status",
+        "started_at",
+        "finished_at",
+        "error",
+        "postings_seen",
+        "matches_created",
+    }
+    assert run["required"] == list(run["properties"])
+
+    # Every status each route answers, and the tick's refusals are answers, not
+    # omissions: a client reads them here instead of trying them out.
+    assert set(tick["responses"]) == {"202", "401", "409", "500"}
+    assert set(read["responses"]) == {"200", "404", "422"}
+
+    # The run's id is a path parameter and an integer, and the tick carries no
+    # parameter at all: what it must send is checked at the door, not by the
+    # request's own validation.
+    (parameter,) = read["parameters"]
+    assert parameter["in"] == "path"
+    assert parameter["schema"]["type"] == "integer"
+    assert "parameters" not in tick
 
 
 def test_contract_carries_no_environment_specific_values() -> None:

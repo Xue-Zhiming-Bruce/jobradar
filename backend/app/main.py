@@ -1,8 +1,9 @@
 """The JobRadar API.
 
-So far the health check, the resume upload and the watchlist; the rest of the
-domain routes arrive in later tasks. Importing this module builds an app object
-and nothing else: no configuration, no database, no files.
+So far the health check, the resume upload, the watchlist, the tick that starts a
+digest run and the read of that run; the rest of the domain routes arrive in
+later tasks. Importing this module builds an app object and nothing else: no
+configuration, no database, no files.
 """
 
 from collections.abc import AsyncIterator
@@ -14,7 +15,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.db import init_db
+from app.routes.internal import router as internal_router
 from app.routes.resume import router as resume_router
+from app.routes.runs import router as runs_router
 from app.routes.watchlist import router as watchlist_router
 
 API_TITLE = "JobRadar API"
@@ -61,3 +64,5 @@ async def healthz() -> Health:
 
 app.include_router(resume_router)
 app.include_router(watchlist_router)
+app.include_router(internal_router)
+app.include_router(runs_router)

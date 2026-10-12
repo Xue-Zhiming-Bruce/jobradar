@@ -1,4 +1,5 @@
-"""Reading a resume out of an upload, and writing the file where the client cannot reach.
+"""Reading a resume out of an upload, reading back the active one, and writing the file
+where the client cannot reach.
 
 `POST /resume` is the one endpoint that takes a file, and this module is where
 that file is judged: the declared media type and the bytes both have to name a
@@ -16,8 +17,9 @@ public. Nothing here creates it at import: the directory appears on the first
 upload, and its absence is what `tests/test_app_main.py` checks.
 
 A resume's text is user data: it is stored, and nothing in this module logs it,
-puts it in an error message or returns it. The readers below name the file's
-media type, never its contents.
+puts it in an error message or returns it to a client. The readers below name the
+file's media type, never its contents -- `active_resume_text` hands the text to
+its caller and to nobody else.
 """
 
 import os
@@ -28,7 +30,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from pypdf import PdfReader
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from app import db
 from app.models import Resume
@@ -201,6 +203,27 @@ def record_active_resume(filename: str, content_type: str, text: str, stored_pat
         session.add(resume)
         session.flush()  # the row's id, and the write, exist before the commit
         return resume.id
+
+
+def active_resume_text() -> str | None:
+    """The text of the one active resume, or `None` when no resume is active yet.
+
+    One `session_scope()` per call -- one unit of work, committed and closed before
+    this returns -- and one column of the one row the partial index
+    `uq_resume_one_active` allows to be active: no other row and no other column is
+    read, because a caller that wants the text is not asking for the filename or
+    the file's path. The text comes back exactly as it was stored: not truncated,
+    not summarised, not escaped. The caller is #34, which reads it once per run,
+    before the first board is called.
+
+    A resume's text is user data, so nothing here logs it, puts it in an error or
+    returns it to a client: this function is a reader, and the value goes to its
+    caller.
+    """
+    with db.session_scope() as session:
+        return session.scalars(
+            select(Resume.text).where(Resume.is_active.is_(True))
+        ).one_or_none()
 
 
 def _is_word_document(data: bytes) -> bool:
