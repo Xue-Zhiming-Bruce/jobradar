@@ -41,6 +41,7 @@ INDEX_HTML = (
 _CONTRACT_REQUESTS = [
     ("GET", "/healthz", None, 200, {"status": "ok"}),
     ("POST", "/resume", None, 422, None),
+    ("PATCH", "/resume/1", {"is_active": True}, 404, {"detail": "There is no resume with id 1"}),
     ("GET", "/watchlist", None, 200, []),
     ("DELETE", "/watchlist/1", None, 404, {"detail": "There is no watched company with id 1"}),
     ("POST", "/internal/tick", None, 401, None),
@@ -130,7 +131,7 @@ def test_every_contract_path_is_answered_by_its_own_route(
         assert response.json() == body, f"{path} was answered by the mount: {response.text}"
 
 
-def test_the_contract_paths_are_the_eight_the_contract_names() -> None:
+def test_the_contract_paths_are_the_nine_the_contract_names() -> None:
     """The requests above are the committed contract's paths, not a copy that drifted."""
     document = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
     requested = {path.replace("/1", "/{id}") for _, path, _, _, _ in _CONTRACT_REQUESTS}

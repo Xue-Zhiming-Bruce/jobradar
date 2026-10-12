@@ -49,6 +49,7 @@ def test_contract_lists_every_registered_path_in_registration_order() -> None:
     assert list(contract["paths"]) == [
         "/healthz",
         "/resume",
+        "/resume/{id}",
         "/watchlist",
         "/watchlist/{id}",
         "/internal/tick",
@@ -56,6 +57,65 @@ def test_contract_lists_every_registered_path_in_registration_order() -> None:
         "/matches",
         "/matches/{id}",
     ]
+
+
+def test_contract_describes_the_resume_history_a_client_reads_and_changes() -> None:
+    contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    schemas = contract["components"]["schemas"]
+    listed = contract["paths"]["/resume"]["get"]
+    activated = contract["paths"]["/resume/{id}"]["patch"]
+    removed = contract["paths"]["/resume/{id}"]["delete"]
+
+    # One shape for a resume wherever a client meets one: the list's items are
+    # the body the activation answers with, and that body is the row's five
+    # public fields -- no text, and no path where the server put the file.
+    array_schema = listed["responses"]["200"]["content"]["application/json"]["schema"]
+    assert array_schema["type"] == "array"
+    summary_ref = array_schema["items"]["$ref"]
+    summary = schemas[summary_ref.rsplit("/", 1)[-1]]
+    assert set(summary["properties"]) == {
+        "id",
+        "filename",
+        "content_type",
+        "uploaded_at",
+        "is_active",
+    }
+    assert summary["required"] == list(summary["properties"])
+    assert summary["properties"]["uploaded_at"]["format"] == "date-time"
+    assert {"text", "stored_path"} & set(summary["properties"]) == set()
+    assert activated["responses"]["200"]["content"]["application/json"]["schema"][
+        "$ref"
+    ] == summary_ref
+    # The upload keeps answering with #3's own body, which this task leaves alone.
+    created = contract["paths"]["/resume"]["post"]["responses"]["201"]
+    assert created["content"]["application/json"]["schema"]["$ref"].endswith("ResumeUploaded")
+
+    # Every status each of the three routes answers, and a delete that answers
+    # with no body at all.
+    assert set(listed["responses"]) == {"200"}
+    assert set(activated["responses"]) == {"200", "404", "422"}
+    assert set(removed["responses"]) == {"204", "404", "422"}
+    assert "content" not in removed["responses"]["204"]
+
+    # The body an activation takes expresses one thing only: make this one
+    # active. A deactivation is not in `_docs/plan.md`, so it is not expressible.
+    assert activated["requestBody"]["required"] is True
+    body_ref = activated["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    body = schemas[body_ref.rsplit("/", 1)[-1]]
+    only_true = {
+        key: value
+        for key, value in body["properties"]["is_active"].items()
+        if key in {"const", "enum"}
+    }
+    assert only_true in ({"const": True}, {"enum": [True]})
+    assert body["required"] == ["is_active"]
+    assert body["additionalProperties"] is False
+
+    # Both ids are path parameters and integers, so `abc` is refused by the path.
+    for route in (activated, removed):
+        (parameter,) = route["parameters"]
+        assert parameter["in"] == "path"
+        assert parameter["schema"]["type"] == "integer"
 
 
 def test_contract_describes_the_watchlist_routes() -> None:

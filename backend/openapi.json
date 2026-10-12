@@ -28,6 +28,30 @@
       }
     },
     "/resume": {
+      "get": {
+        "tags": [
+          "resume"
+        ],
+        "summary": "List every stored resume",
+        "description": "Every `resume` row, newest first, and `[]` when none was ever uploaded.\n\nNo filter and no paging: one person's resumes are few, and every upload is\nhistory worth showing -- the active one first among them, since it is the\nnewest until an older one is activated again. The order and the reading of\nthe rows are `app.services.resume.resume_rows`'s.",
+        "operationId": "list_resumes_resume_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ResumeSummary"
+                  },
+                  "type": "array",
+                  "title": "Response List Resumes Resume Get"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "resume"
@@ -64,6 +88,85 @@
           },
           "422": {
             "description": "The upload is corrupt, carries no text, or is not a named file part"
+          }
+        }
+      }
+    },
+    "/resume/{id}": {
+      "patch": {
+        "tags": [
+          "resume"
+        ],
+        "summary": "Make one stored resume the active one",
+        "description": "Make that resume the active one, and answer with it as the list renders it.\n\nThe id is a path parameter and an `int`: a value that is not one never\nreaches this function and is refused by the path's own validation as `422`.\nA body that says anything but \"active\" is refused by `ResumeActivation` the\nsame way, before any write. An id that finds no row is a `404` and writes\nnothing. The row that was active goes inactive in the same transaction, so\none row is active afterwards and it is the one the path names; sending the\nrequest again for the row that is already active is the same answer twice.",
+        "operationId": "activate_resume_resume__id__patch",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResumeActivation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResumeSummary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No resume has that id"
+          },
+          "422": {
+            "description": "The body, or the path, is not something this route can use"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "resume"
+        ],
+        "summary": "Delete one stored resume and its file",
+        "description": "Delete exactly that resume -- its row and the file it names -- and answer `204`.\n\nThe id is a path parameter and an `int`, refused by the path's own validation\nas `422` when it is not one, and an id that finds no row is a `404` that\nwrites nothing. Deleting the active resume is allowed: it leaves no active\nrow, which is a state the app already handles. Nothing about the resume is\nanswered: `204` carries no body, so no part of the row -- the text above all\n-- can ride along on it.",
+        "operationId": "delete_resume_resume__id__delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No resume has that id"
+          },
+          "422": {
+            "description": "The body, or the path, is not something this route can use"
           }
         }
       }
@@ -439,6 +542,57 @@
         ],
         "title": "MatchVerdict",
         "description": "Body of a verdict: the one value this endpoint records, and no other field.\n\n`state` is a `Literal` of the two verdicts the owner has, so anything else --\n`\"new\"`, `\"\"`, a number, nothing at all -- is refused by this model's own\nvalidation as `422` and never reaches the row. Re-opening a match as `new` is\nnot in `_docs/plan.md`, and the column's own vocabulary is the model's\n(`ck_match_state_values`) rather than this endpoint's."
+      },
+      "ResumeActivation": {
+        "properties": {
+          "is_active": {
+            "type": "boolean",
+            "const": true,
+            "title": "Is Active"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "is_active"
+        ],
+        "title": "ResumeActivation",
+        "description": "Body of an activation: the one value this endpoint accepts, and no other field.\n\n`is_active` is a `Literal` of `True` -- the `MatchVerdict` precedent -- so\nonly \"make this one active\" is expressible and `{\"is_active\": false}` is\nrefused by this model's own validation as `422`. The model forbids extra\nfields as well: deactivation is not in `_docs/plan.md`, and a body carrying\nanything else is a request this route does not understand rather than a\nwrite it performs while ignoring what it was sent."
+      },
+      "ResumeSummary": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "content_type": {
+            "type": "string",
+            "title": "Content Type"
+          },
+          "uploaded_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Uploaded At"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "filename",
+          "content_type",
+          "uploaded_at",
+          "is_active"
+        ],
+        "title": "ResumeSummary",
+        "description": "One `resume` row as the history routes render it: five fields, and no text.\n\nThe same body `GET /resume` lists and `PATCH /resume/{id}` answers with, so a\nclient reads one shape for a resume wherever it meets one. `text` and\n`stored_path` are deliberately not here: the text is user data and the path\nis where the server put the file, and neither is the client's business.\n`is_active` is the row's own column, not a property of the order: it is true\nfor exactly one row, the one a run would score against."
       },
       "ResumeUploaded": {
         "properties": {
