@@ -37,6 +37,10 @@ _EXPECTED_EXTENSIONS = {
     resume.TEXT_PLAIN: ".txt",
     resume.APPLICATION_PDF: ".pdf",
     resume.DOCX: ".docx",
+    # The two scan images #27 reads: the stored file keeps the format's own
+    # extension the way every other upload does.
+    resume.IMAGE_PNG: ".png",
+    resume.IMAGE_JPEG: ".jpg",
 }
 
 

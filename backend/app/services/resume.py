@@ -10,6 +10,13 @@ under `uploads_dir()` with a name this module generates -- the client's
 raises a `ResumeRejected` naming what was wrong; the route turns that into the
 HTTP answer.
 
+A scan is one of those formats: a PNG, a JPEG or an image-only PDF carries no
+text layer, so `extract_text` refuses it as blank like any other file without
+text, and `OCR_CONTENT_TYPES` is what tells the route which of those refusals is
+a scan worth reading by a model. `scan_images` is the other half -- the page
+images of that upload, bounded and normalised -- and it is as model-free and
+key-free as the rest of this module.
+
 `UPLOADS_DIR` and `MAX_UPLOAD_BYTES` are read here and in no other module, the
 way the database URL is read in `app/db.py` only. Unset means the defaults below,
 and the default uploads directory is deliberately outside the repository --
@@ -34,6 +41,7 @@ from io import BytesIO
 from pathlib import Path
 from xml.etree import ElementTree
 
+from PIL import Image
 from pypdf import PdfReader
 from sqlalchemy import select, update
 
@@ -52,17 +60,42 @@ DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 TEXT_PLAIN = "text/plain"
 APPLICATION_PDF = "application/pdf"
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+IMAGE_PNG = "image/png"
+IMAGE_JPEG = "image/jpeg"
 
-# The three formats this app reads, spelled the one way the column and the
-# contract store them: a client's header is canonicalised to one of these.
-SUPPORTED_CONTENT_TYPES = (TEXT_PLAIN, APPLICATION_PDF, DOCX)
+# The formats this app reads, spelled the one way the column and the contract
+# store them: a client's header is canonicalised to one of these.
+SUPPORTED_CONTENT_TYPES = (TEXT_PLAIN, APPLICATION_PDF, DOCX, IMAGE_PNG, IMAGE_JPEG)
 
-_EXTENSIONS = {TEXT_PLAIN: ".txt", APPLICATION_PDF: ".pdf", DOCX: ".docx"}
+# The formats a scan is written in: the two images, and the PDF a scanner fills
+# with them. The route asks a model to read a file of one of these when its own
+# readers found no text, and only then: a blank text file or DOCX is no scan, so
+# its refusal stays a refusal.
+OCR_CONTENT_TYPES = (APPLICATION_PDF, IMAGE_PNG, IMAGE_JPEG)
 
-# What the bytes of a PDF and of an OOXML package start with, and the part a
-# Word document has and an Excel workbook (`xl/workbook.xml`) does not.
+_EXTENSIONS = {
+    TEXT_PLAIN: ".txt",
+    APPLICATION_PDF: ".pdf",
+    DOCX: ".docx",
+    IMAGE_PNG: ".png",
+    IMAGE_JPEG: ".jpg",
+}
+
+# What the bytes of a PDF, an OOXML package or one of the two scan images start
+# with, and the part a Word document has and an Excel workbook
+# (`xl/workbook.xml`) does not.
 _PDF_MAGIC = b"%PDF"
 _ZIP_MAGIC = b"PK\x03\x04"
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_JPEG_MAGIC = b"\xff\xd8\xff"
+
+# At most this many page images reach one request, and none of them has a long
+# edge over this many pixels: the cap bounds the payload a scan can make the way
+# the upload limit bounds its bytes. Reading a longer scan in full is its own
+# decision, and both are module constants rather than settings because nothing
+# about a deployment changes either number.
+OCR_MAX_IMAGES = 5
+OCR_MAX_IMAGE_EDGE = 1600
 _WORD_DOCUMENT_PART = "word/document.xml"
 _WORD_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
@@ -129,8 +162,8 @@ def content_type_of(declared: str | None, data: bytes) -> str:
     media_type = declared_content_type(declared)
     if media_type not in SUPPORTED_CONTENT_TYPES:
         raise UnsupportedResume(
-            f"Unsupported resume type '{media_type or 'none'}': send a PDF, a DOCX "
-            f"or a plain text file"
+            f"Unsupported resume type '{media_type or 'none'}': send a PDF, a DOCX, a "
+            f"PNG, a JPEG or a plain text file"
         )
     if media_type == APPLICATION_PDF and not data.startswith(_PDF_MAGIC):
         raise UnsupportedResume(
@@ -141,6 +174,14 @@ def content_type_of(declared: str | None, data: bytes) -> str:
             f"Unsupported resume type '{media_type}': the file's bytes are not a "
             f"Word document"
         )
+    if media_type == IMAGE_PNG and not data.startswith(_PNG_MAGIC):
+        raise UnsupportedResume(
+            f"Unsupported resume type '{media_type}': the file's bytes are not a PNG image"
+        )
+    if media_type == IMAGE_JPEG and not data.startswith(_JPEG_MAGIC):
+        raise UnsupportedResume(
+            f"Unsupported resume type '{media_type}': the file's bytes are not a JPEG image"
+        )
     return media_type
 
 
@@ -150,12 +191,17 @@ def extract_text(content_type: str, data: bytes) -> str:
     Every reader failure is this app's own 422 rather than the reader's
     exception: a truncated PDF and a text file that is not UTF-8 are corrupt
     uploads, not server errors. Blank is a rejection of its own, so a file that
-    parses but says nothing is told apart from one that is broken.
+    parses but says nothing is told apart from one that is broken -- and an image
+    is decided here, at once: it has no text layer to read, and the bytes still
+    have to be an image, so a truncated PNG or JPEG is the corrupt upload this
+    reader refuses rather than something a model is asked about.
     """
     readers = {
         TEXT_PLAIN: _text_file_text,
         APPLICATION_PDF: _pdf_text,
         DOCX: _word_document_text,
+        IMAGE_PNG: _image_text,
+        IMAGE_JPEG: _image_text,
     }
     try:
         text = readers[content_type](data)
@@ -165,11 +211,50 @@ def extract_text(content_type: str, data: bytes) -> str:
         raise UnreadableResume(
             f"The {content_type} file is corrupt or truncated: it could not be read"
         ) from error
+    return require_text(content_type, text)
+
+
+def require_text(content_type: str, text: str) -> str:
+    """The text that was read, or the refusal naming why there is none.
+
+    The blank rule, in one place: `extract_text`'s tail is this call, so a file
+    that parses but says nothing is refused with the same `422` and the same
+    message whether its own reader answered it or a model read it from a scan.
+    """
     if not text.strip():
         raise ResumeWithoutText(
             f"No text found in the {content_type} file: it is blank, or carries no text layer"
         )
     return text
+
+
+def scan_images(content_type: str, data: bytes) -> list[bytes]:
+    """The page images of a scan, each re-encoded as a PNG with a long edge of at most 1600 px.
+
+    A PNG or a JPEG upload is its own one page image; a PDF contributes the images
+    its pages carry, in page order, which is what a scan is. Only the first
+    `OCR_MAX_IMAGES` are read, so no upload can make an unbounded request, and the
+    format is normalised here so nothing downstream depends on how the scanner
+    stored the stream. A PDF whose pages hold no readable image is `[]` -- there
+    is no image to send and no request to make.
+
+    The bytes are user data and this function neither logs them nor returns them
+    to a client: they are request payloads and nothing else. What will not load as
+    an image at all is `UnreadableResume`, the `422` a truncated PDF already gets:
+    a corrupt upload and not a model failure.
+    """
+    try:
+        if content_type in (IMAGE_PNG, IMAGE_JPEG):
+            return [_png_page(_decoded_image(data))]
+        if content_type == APPLICATION_PDF:
+            return _pdf_page_images(data)
+        return []
+    except ResumeRejected:
+        raise
+    except Exception as error:  # Pillow's and pypdf's own error family, at a trust boundary
+        raise UnreadableResume(
+            f"The {content_type} file is corrupt or truncated: it could not be read"
+        ) from error
 
 
 def save_upload(data: bytes, content_type: str) -> Path:
@@ -369,6 +454,55 @@ def _text_file_text(data: bytes) -> str:
         return data.decode("utf-8")
     except UnicodeDecodeError as error:
         raise UnreadableResume("The text/plain file is not valid UTF-8") from error
+
+
+def _image_text(data: bytes) -> str:
+    """A scan reads as blank: an image carries no text layer, so the reader answers nothing.
+
+    It is still decoded here, so the bytes have to be an image before any model
+    is reached: `extract_text` turns a truncated PNG or JPEG into the same 422 a
+    truncated PDF gets. The scan is decoded once more where its request is built,
+    which costs milliseconds against the seconds the model call takes.
+    """
+    _decoded_image(data)
+    return ""
+
+
+def _decoded_image(data: bytes) -> Image.Image:
+    """One image, fully decoded: a truncated PNG or JPEG fails here rather than upstream."""
+    image = Image.open(BytesIO(data))
+    image.load()
+    return image
+
+
+def _pdf_page_images(data: bytes) -> list[bytes]:
+    """A PDF's page images, in page order, at most `OCR_MAX_IMAGES` of them.
+
+    The pages past the cap are not decoded at all: nothing reads them, and a
+    scan's later pages would otherwise be work nobody asked for.
+    """
+    images: list[bytes] = []
+    for page in PdfReader(BytesIO(data)).pages:
+        for found in page.images:
+            images.append(_png_page(found.image))
+            if len(images) == OCR_MAX_IMAGES:
+                return images
+    return images
+
+
+def _png_page(image: Image.Image) -> bytes:
+    """One page image as a PNG, its long edge at most `OCR_MAX_IMAGE_EDGE` px.
+
+    One format reaches the model whatever the scanner stored: a CMYK JPEG, a
+    palette PNG and a one-bit fax are all RGB, greyscale or converted to it, and
+    a large page is scaled down rather than sent whole.
+    """
+    if image.mode not in ("L", "RGB"):
+        image = image.convert("RGB")
+    image.thumbnail((OCR_MAX_IMAGE_EDGE, OCR_MAX_IMAGE_EDGE))
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def _pdf_text(data: bytes) -> str:

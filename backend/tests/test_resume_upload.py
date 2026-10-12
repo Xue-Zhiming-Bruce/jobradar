@@ -52,7 +52,9 @@ DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 SMALL_LIMIT = 1024
 
 _UNSUPPORTED_DECLARED_TYPES = [
-    ("diagram.png", b"\x89PNG\r\n\x1a\n", "image/png"),
+    # A scan format this file's own task does not accept: it is still a `415` now
+    # that a scan can be read, and #53 is where TIFF, HEIC and WebP arrive.
+    ("scan.tiff", b"II*\x00", "image/tiff"),
     ("archive.zip", b"PK\x03\x04", "application/zip"),
     ("rows.csv", b"title,company\n", "text/csv"),
     # Real PDF bytes under a type nobody promised to read: refused as well,
@@ -262,17 +264,21 @@ def test_bytes_that_contradict_a_supported_type_are_rejected_with_415(
 ) -> None:
     """Flipping only the client's Content-Type string must not get a file in.
 
-    Neither body is the format it claims: plain words named `application/pdf`, and
-    a ZIP that is an Excel workbook (`xl/workbook.xml`, no `word/document.xml`)
-    named as a Word document.
+    Neither body is the format it claims: plain words named `application/pdf`, a
+    ZIP that is an Excel workbook (`xl/workbook.xml`, no `word/document.xml`)
+    named as a Word document, and a third pair of plain words named `image/png` --
+    a scan format now, so its bytes are what keeps a text body out.
     """
     not_a_pdf = refusal(
         upload(client, "resume.pdf", b"plain words, no PDF header", "application/pdf"), 415
     )
     not_a_docx = refusal(upload(client, "resume.docx", xlsx_bytes(), DOCX), 415)
+    not_a_scan = refusal(upload(client, "diagram.png", SENTINEL.encode(), "image/png"), 415)
 
     assert "application/pdf" in not_a_pdf
     assert DOCX in not_a_docx
+    assert "image/png" in not_a_scan
+    assert SENTINEL not in not_a_scan  # the refusal names the type, never the content
     assert rows() == []
     assert stored_files(uploads_dir) == []
 
@@ -377,7 +383,6 @@ def test_a_pdf_without_a_text_layer_is_rejected_and_one_with_text_is_not(
     accepted = upload(client, "resume.pdf", SENTENCE_BEARING_PDF.read_bytes(), "application/pdf")
     assert accepted.status_code == 201
     assert len(rows()) == 1
-
 
 @pytest.mark.parametrize("data", [b"", b"   \n\t  ", b"\n\n"], ids=["empty", "spaces", "newlines"])
 def test_a_text_file_with_no_text_is_rejected_with_422(
