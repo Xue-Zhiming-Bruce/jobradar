@@ -26,3 +26,12 @@ package = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# `tests/integration/` is the one suite that needs a real PostgreSQL server, so
+# it is excluded from the default run by its marker rather than by its path: the
+# directory is still collected (and reported as deselected, which is how the
+# default run shows it exists), and `pytest -m integration` -- a command-line
+# `-m` replaces this one -- runs it alone.
+addopts = "-m 'not integration'"
+markers = [
+    "integration: drives the real app end to end against a real PostgreSQL server; runs only under `pytest -m integration`",
+]
