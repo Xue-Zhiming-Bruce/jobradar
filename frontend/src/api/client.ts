@@ -45,6 +45,27 @@ export type RunSummary = {
   matchesCreated: number
 }
 
+/**
+ * One stored match, as the UI reads it.
+ *
+ * `created_at` keeps the contract's own name and stays the ISO string it sends,
+ * never a `Date`.
+ */
+export type Match = {
+  id: number
+  companyName: string
+  title: string
+  url: string
+  score: number
+  reason: string
+  gaps: string[]
+  state: string
+  createdAt: string
+}
+
+/** The two verdicts `PATCH /matches/{id}` accepts: `MatchVerdict` in the contract. */
+export type MatchState = 'saved' | 'dismissed'
+
 /** A non-2xx answer: `message` is the server's own `detail`, and nothing else. */
 export class ApiError extends Error {
   readonly status: number
@@ -80,6 +101,18 @@ type WireRunSummary = {
   matches_created: number
 }
 
+type WireMatch = {
+  id: number
+  company_name: string
+  title: string
+  url: string
+  score: number
+  reason: string
+  gaps: string[]
+  state: string
+  created_at: string
+}
+
 const decodeCompany = (wire: WireCompany): WatchedCompany => ({
   id: wire.id,
   name: wire.name,
@@ -92,6 +125,18 @@ const decodeResume = (wire: WireResumeUploaded): ResumeUploaded => ({
   filename: wire.filename,
   contentType: wire.content_type,
   isActive: wire.is_active,
+})
+
+const decodeMatch = (wire: WireMatch): Match => ({
+  id: wire.id,
+  companyName: wire.company_name,
+  title: wire.title,
+  url: wire.url,
+  score: wire.score,
+  reason: wire.reason,
+  gaps: wire.gaps,
+  state: wire.state,
+  createdAt: wire.created_at,
 })
 
 const decodeRun = (wire: WireRunSummary): RunSummary => ({
@@ -123,8 +168,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.status === 204 ? (undefined as T) : ((await response.json()) as T)
 }
 
-const sendJson = (body: unknown): RequestInit => ({
-  method: 'POST',
+const sendJson = (body: unknown, method: 'POST' | 'PATCH' = 'POST'): RequestInit => ({
+  method,
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(body),
 })
@@ -140,6 +185,15 @@ export async function addCompany(company: CompanyCreate): Promise<WatchedCompany
 
 export async function removeCompany(id: number): Promise<void> {
   await request<void>(`/watchlist/${id}`, { method: 'DELETE' })
+}
+
+export async function listMatches(): Promise<Match[]> {
+  return (await request<WireMatch[]>('/matches')).map(decodeMatch)
+}
+
+/** Records one verdict and answers the row as `PATCH /matches/{id}` read it after the write. */
+export async function setMatchState(id: number, state: MatchState): Promise<Match> {
+  return decodeMatch(await request<WireMatch>(`/matches/${id}`, sendJson({ state }, 'PATCH')))
 }
 
 export async function uploadResume(file: File): Promise<ResumeUploaded> {

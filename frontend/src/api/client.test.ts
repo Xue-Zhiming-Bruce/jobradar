@@ -5,13 +5,28 @@ import {
   ApiError,
   addCompany,
   getRun,
+  listMatches,
   listWatchlist,
   removeCompany,
+  setMatchState,
   startTick,
   uploadResume,
 } from './client'
 
 const refused = 'The slug is already watched'
+
+/** One `MatchSummary` as `GET /matches` sends it: all nine fields, in the wire's names. */
+const matchRow = {
+  id: 7,
+  company_name: 'Acme',
+  title: 'Backend engineer',
+  url: 'https://boards.greenhouse.io/acme/jobs/7',
+  score: 88,
+  reason: 'Python and FastAPI line up with this role',
+  gaps: ['No Kubernetes', 'No Go'],
+  state: 'new',
+  created_at: '2026-05-01T09:00:00+00:00',
+}
 
 const rejecting = (status: number, message = refused) => () =>
   HttpResponse.json({ detail: message }, { status })
@@ -85,6 +100,51 @@ describe('the wire is decoded into the UI', () => {
     })
   })
 
+  it('listMatches keeps createdAt an ISO string and renames only company_name', async () => {
+    server.use(http.get('/matches', () => HttpResponse.json([matchRow])))
+
+    expect(await listMatches()).toEqual([
+      {
+        id: 7,
+        companyName: 'Acme',
+        title: 'Backend engineer',
+        url: 'https://boards.greenhouse.io/acme/jobs/7',
+        score: 88,
+        reason: 'Python and FastAPI line up with this role',
+        gaps: ['No Kubernetes', 'No Go'],
+        state: 'new',
+        createdAt: '2026-05-01T09:00:00+00:00',
+      },
+    ])
+  })
+
+  it('setMatchState sends the verdict to PATCH /matches/7 and decodes the answer', async () => {
+    const requests: { method: string; path: string; body: unknown }[] = []
+    server.use(
+      http.patch('/matches/:id', async ({ request }) => {
+        requests.push({
+          method: request.method,
+          path: new URL(request.url).pathname,
+          body: await request.json(),
+        })
+        return HttpResponse.json({ ...matchRow, state: 'saved' })
+      }),
+    )
+
+    expect(await setMatchState(7, 'saved')).toEqual({
+      id: 7,
+      companyName: 'Acme',
+      title: 'Backend engineer',
+      url: 'https://boards.greenhouse.io/acme/jobs/7',
+      score: 88,
+      reason: 'Python and FastAPI line up with this role',
+      gaps: ['No Kubernetes', 'No Go'],
+      state: 'saved',
+      createdAt: '2026-05-01T09:00:00+00:00',
+    })
+    expect(requests).toEqual([{ method: 'PATCH', path: '/matches/7', body: { state: 'saved' } }])
+  })
+
   it('startTick answers with the run it started, and sends no secret', async () => {
     const requests: Request[] = []
     server.use(
@@ -134,6 +194,19 @@ describe('a 204 is empty and a non-2xx is an error', () => {
     expect(failure.status).toBe(404)
   })
 
+  it('setMatchState rejects on a 404 with the server detail, and logs nothing', async () => {
+    const spies = ['log', 'info', 'warn', 'error'].map((name) => vi.spyOn(console, name as 'log'))
+    const message = 'There is no match with id 7'
+    server.use(http.patch('/matches/:id', rejecting(404, message)))
+
+    const failure = await rejection(() => setMatchState(7, 'saved'))
+
+    expect(failure.message).toBe(message)
+    expect(failure.status).toBe(404)
+    expect(spies.flatMap((spy) => spy.mock.calls)).toEqual([])
+    spies.forEach((spy) => spy.mockRestore())
+  })
+
   it.each([
     ['a 409 on the duplicate slug', 409, 'The slug \'acme\' is already watched'],
     ['a 415 on the declared type', 415, 'The declared type is not a resume'],
@@ -155,6 +228,8 @@ describe('a 204 is empty and a non-2xx is an error', () => {
     ['addCompany', (): Promise<unknown> => addCompany({ name: 'Acme', slug: 'acme' })],
     ['removeCompany', (): Promise<unknown> => removeCompany(9)],
     ['uploadResume', (): Promise<unknown> => uploadResume(new File(['x'], 'resume.txt'))],
+    ['listMatches', (): Promise<unknown> => listMatches()],
+    ['setMatchState', (): Promise<unknown> => setMatchState(9, 'saved')],
     ['startTick', (): Promise<unknown> => startTick()],
     ['getRun', (): Promise<unknown> => getRun(9)],
   ])('%s rejects rather than returning the error body as data', async (_name, call) => {
@@ -162,6 +237,8 @@ describe('a 204 is empty and a non-2xx is an error', () => {
       http.all('/watchlist', rejecting(500)),
       http.all('/watchlist/:id', rejecting(500)),
       http.all('/resume', rejecting(500)),
+      http.all('/matches', rejecting(500)),
+      http.all('/matches/:id', rejecting(500)),
       http.all('/internal/tick', rejecting(500)),
       http.all('/runs/:id', rejecting(500)),
     )
