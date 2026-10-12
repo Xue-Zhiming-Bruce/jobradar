@@ -115,6 +115,8 @@ async function detailOf(response: Response): Promise<string> {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  // Resolved against the app's own origin: a bare relative path cannot be sent
+  // by the test runner, which has no document to resolve one against.
   const response = await fetch(new URL(path, location.origin), init)
   if (!response.ok) throw new ApiError(response.status, await detailOf(response))
   // `204` carries no body, and reading one would throw.
