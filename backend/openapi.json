@@ -237,6 +237,81 @@
           }
         }
       }
+    },
+    "/matches": {
+      "get": {
+        "tags": [
+          "matches"
+        ],
+        "summary": "List every stored match",
+        "description": "Every `match` row, newest first, and `[]` when there are none.\n\nNo filter, no search and no paging: `_docs/plan.md` asks only that the UI\nbrowse matches, and one user's matches are few. The order is `created_at`\ndescending with the id descending under it, so two rows written in the same\ninstant -- which `created_at`'s default makes possible -- still have one\norder, newest row first.",
+        "operationId": "list_matches_matches_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MatchSummary"
+                  },
+                  "type": "array",
+                  "title": "Response List Matches Matches Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/matches/{id}": {
+      "patch": {
+        "tags": [
+          "matches"
+        ],
+        "summary": "Record the owner's verdict on one match",
+        "description": "Write the owner's `saved` or `dismissed` verdict on that match, and answer with it.\n\nThe id is a path parameter and an `int`: a value that is not one never\nreaches this function and is refused by the path's own validation as `422`.\nA body whose `state` is neither of the two verdicts is refused by\n`MatchVerdict` the same way. An id that finds no row is a `404` and writes\nnothing. What is written is `state` and nothing else, and the answer is the\nrow as `GET /matches` renders it, read after the write -- so the same verdict\nsent twice is the same answer twice and one row the whole time.",
+        "operationId": "record_verdict_matches__id__patch",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MatchVerdict"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchSummary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No match has that id"
+          },
+          "422": {
+            "description": "The body, or the path, is not something this route can use"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -288,6 +363,82 @@
         ],
         "title": "Health",
         "description": "Body of `GET /healthz`."
+      },
+      "MatchSummary": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "company_name": {
+            "type": "string",
+            "title": "Company Name"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "score": {
+            "type": "integer",
+            "title": "Score"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "gaps": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Gaps"
+          },
+          "state": {
+            "type": "string",
+            "title": "State"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "company_name",
+          "title",
+          "url",
+          "score",
+          "reason",
+          "gaps",
+          "state",
+          "created_at"
+        ],
+        "title": "MatchSummary",
+        "description": "One `match` row as this API renders it: the row, plus the names it points at.\n\nThe same body both routes carry, so a client reads one shape for a match\nwherever it meets one. Nine fields and no tenth: `notified_at` stays on the\nrow, because when an alert went out is the digest's business and not the\nscreen's, and nothing here is computed -- `score`, `reason` and `state` are\nthe row's own, `gaps` is the list #8 stored as JSON text, and `id` is what\n`PATCH /matches/{id}` takes."
+      },
+      "MatchVerdict": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "saved",
+              "dismissed"
+            ],
+            "title": "State"
+          }
+        },
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "title": "MatchVerdict",
+        "description": "Body of a verdict: the one value this endpoint records, and no other field.\n\n`state` is a `Literal` of the two verdicts the owner has, so anything else --\n`\"new\"`, `\"\"`, a number, nothing at all -- is refused by this model's own\nvalidation as `422` and never reaches the row. Re-opening a match as `new` is\nnot in `_docs/plan.md`, and the column's own vocabulary is the model's\n(`ck_match_state_values`) rather than this endpoint's."
       },
       "ResumeUploaded": {
         "properties": {

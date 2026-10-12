@@ -53,6 +53,8 @@ def test_contract_lists_every_registered_path_in_registration_order() -> None:
         "/watchlist/{id}",
         "/internal/tick",
         "/runs/{id}",
+        "/matches",
+        "/matches/{id}",
     ]
 
 
@@ -121,6 +123,53 @@ def test_contract_describes_the_tick_and_the_run_it_started() -> None:
     assert parameter["in"] == "path"
     assert parameter["schema"]["type"] == "integer"
     assert "parameters" not in tick
+
+
+def test_contract_describes_the_matches_a_client_reads_and_updates() -> None:
+    contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    schemas = contract["components"]["schemas"]
+    listed = contract["paths"]["/matches"]["get"]
+    updated = contract["paths"]["/matches/{id}"]["patch"]
+
+    # One shape for a match wherever a client meets one: the list's items are the
+    # body the update answers with, and that body is the row's own nine fields.
+    array_schema = listed["responses"]["200"]["content"]["application/json"]["schema"]
+    assert array_schema["type"] == "array"
+    match_ref = array_schema["items"]["$ref"]
+    summary = schemas[match_ref.rsplit("/", 1)[-1]]
+    assert set(summary["properties"]) == {
+        "id",
+        "company_name",
+        "title",
+        "url",
+        "score",
+        "reason",
+        "gaps",
+        "state",
+        "created_at",
+    }
+    assert summary["required"] == list(summary["properties"])
+    # The stored JSON text is decoded before it is served, so the field is a list
+    # of strings on the wire rather than the column's own `{"type": "string"}`.
+    assert summary["properties"]["gaps"]["type"] == "array"
+    assert summary["properties"]["gaps"]["items"] == {"type": "string"}
+    assert updated["responses"]["200"]["content"]["application/json"]["schema"][
+        "$ref"
+    ] == match_ref
+
+    # The only values a verdict may carry, and every status the update answers.
+    assert set(listed["responses"]) == {"200"}
+    assert set(updated["responses"]) == {"200", "404", "422"}
+    assert updated["requestBody"]["required"] is True
+    body_ref = updated["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    body = schemas[body_ref.rsplit("/", 1)[-1]]
+    assert body["properties"]["state"]["enum"] == ["saved", "dismissed"]
+    assert body["required"] == ["state"]
+
+    # The id is a path parameter and an integer, so `abc` is refused by the path.
+    (parameter,) = updated["parameters"]
+    assert parameter["in"] == "path"
+    assert parameter["schema"]["type"] == "integer"
 
 
 def test_contract_carries_no_environment_specific_values() -> None:
