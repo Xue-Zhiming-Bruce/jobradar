@@ -224,7 +224,8 @@ def test_the_whole_workflow_from_the_upload_to_the_recorded_digest(
     # The same row the 202 carried is readable at `GET /runs/{id}`: the work has
     # already been handed over, so this read may catch the counts it has written
     # by now -- the row's identity, not its mid-run counts, is what is asserted.
-    assert client.get(f"/runs/{started['id']}").json()["id"] == started["id"]
+    read = client.get(f"/runs/{started['id']}").json()
+    assert (read["id"], read["started_at"]) == (started["id"], started["started_at"])
 
     finished = wait_for_terminal(client, started["id"])
     assert finished["status"] == "succeeded"
