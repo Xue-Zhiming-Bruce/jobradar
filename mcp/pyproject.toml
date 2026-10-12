@@ -1,0 +1,29 @@
+[project]
+name = "jobradar-mcp"
+version = "0.1.0"
+description = "JobRadar MCP server: five bounded tools that drive the app over HTTP."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "httpx2>=2.13,<3.0",
+    "mcp>=2.3,<3.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0,<9.0",
+]
+
+# This project is a server, not a distributable package: uv installs dependencies
+# only and never builds or installs this project itself.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# The `live` case starts the real app in a subprocess, so it is excluded from the
+# default run by its marker the way the backend excludes `integration`.
+addopts = "-m 'not live'"
+markers = [
+    "live: drives a locally started app over a real socket; runs only under `pytest -m live`",
+]
