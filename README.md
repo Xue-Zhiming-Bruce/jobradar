@@ -126,8 +126,12 @@ serves both, so there is one origin, no CORS and no second service.
   compose network reaches it. Healthcheck: `pg_isready`.
 
 `docker compose ps` shows both as `healthy`. The tables are created by the app's
-own `init_db()` at startup: no migration step, no seed step and no
-`docker compose exec` before the API serves.
+own `init_db()` at startup, which is all a database that does not exist yet
+needs: no seed step and no `docker compose exec` before the API serves. A
+database that already holds rows is brought to the schema `backend/app/models.py`
+declares by `uv run alembic upgrade head` from a checkout -- the container does
+not run it, see **Changing the schema** under Backend -- and a change to the
+models ships as a revision.
 
 ### Where the data lives
 
@@ -316,6 +320,47 @@ Regenerate it with this one command:
 The output is deterministic — no timestamps, absolute paths, hostnames or
 versions read at runtime — so running the command on a fresh clone rewrites the
 file byte for byte identically, and running it twice leaves `git status` clean.
+
+### Changing the schema
+
+`backend/app/models.py` is the only place the schema is declared. `init_db()`
+creates the five tables in a database that does not exist yet; the revision
+history in `backend/migrations/versions/` brings a database that already holds
+rows to the same five tables, and `backend/tests/test_migrations.py` holds the
+two to each other, on SQLite and on PostgreSQL.
+
+The sequence for a change to the models, from `backend/`:
+
+1. Edit `backend/app/models.py`.
+2. `cd backend && uv run alembic revision --autogenerate -m "<message>"`
+3. **Read the generated revision** and hand-write what autogenerate does not
+   detect: a changed CHECK constraint — the score range, or either vocabulary —
+   and a re-typed column.
+4. `cd backend && uv run alembic upgrade head`
+5. Commit the revision **in the same commit as the model change**.
+
+Step 3 is the one that is easy to skip and expensive to have skipped: autogenerate
+renders tables, columns, indexes and foreign keys from the models, and it does not
+compare CHECK constraints or a column's type. A change it cannot see at all — a
+score range moved from 100 to 90, nothing else — writes no revision, because an
+empty one is discarded rather than committed; write that one by hand with
+`uv run alembic revision -m "<message>"` and fill in the `op.*` calls yourself.
+
+**A database that already exists.** The local `backend/data/jobradar.db`, the
+compose volume and the deployed Neon database are all brought to the current
+schema by the same command, run from a checkout:
+
+    cd backend && DATABASE_URL=<the compose or Neon URL> uv run alembic upgrade head
+
+It is run from `backend/` because that is where `alembic.ini` and `migrations/`
+are, and with `DATABASE_URL` set because that is the one connection input the
+revision environment reads — unset, the command would run against the local
+SQLite file. `uv run alembic current` says which revision the database is at. The
+image carries neither `alembic.ini` nor `migrations/` and runs no migration at
+startup, so the step is manual until #47 ships both; on a database that already
+holds rows it creates only what is missing and leaves every row as it was, so it
+is safe to re-run. `uv run alembic downgrade base` drops all five tables: it is
+destructive, and it is meant for the disposable databases of local development.
 
 ## Frontend
 
@@ -553,9 +598,15 @@ Each with what it costs, because a limitation without a consequence is a slogan.
   inactivity, so a late or missing digest is expected rather than a fault. That is
   why the in-app **"Run digest now"** button is the reliable path, and why the
   demo uses it (`_docs/decisions/2026-10-11-deploy-and-repo.md`).
-- **There is no migration step.** The tables are created by the app's own
-  `init_db()` at startup, so a schema change reaches a brand-new database but not
-  one that already holds data: changing a column on the latter needs #21.
+- **A deployed database is migrated by hand, until #47.** `init_db()` creates the
+  tables in a database that does not exist yet, and `cd backend &&
+  DATABASE_URL=<the URL> uv run alembic upgrade head` adopts one that already
+  holds rows, but the image carries neither `alembic.ini` nor `migrations/` and
+  runs no migration at startup, so that command is run from a checkout: a schema
+  change reaches a brand-new database on deploy and one that already holds rows
+  only when someone runs it. #47 ships the files and the startup step. And
+  `downgrade base` is destructive -- it drops the five tables -- which is
+  acceptable only while the databases in existence are disposable.
 - **The free tier sleeps.** `_docs/plan.md`'s "Known constraints" records that a
   Render free instance spins down after 15 minutes idle and takes about a minute
   to wake, so the first request after a quiet period is slow. That is the free
