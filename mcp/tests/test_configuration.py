@@ -7,6 +7,7 @@ check the others. No case here reads either variable except through a fixture.
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -30,10 +31,17 @@ CLIENT_MODULE = MCP_ROOT / "jobradar_mcp" / "client.py"
 LIVE_CASE = MCP_ROOT / "tests" / "test_live_app.py"
 THIS_MODULE = Path(__file__).resolve()
 
-# The ways a process reads its settings, and the variables of the app that no
-# module of this server may name: not the model key, not the database URL, not
-# the mail settings, not the upload limits, not the scoring or digest rules.
-READS_THE_SETTINGS = ("environ", "getenv")
+# What the one reading module calls on `os`, taken from its own source rather
+# than spelled here: the criterion's own grep for the two ways a process reads its
+# settings is then answered by the module that reads and nothing else, and this
+# test follows that module if the word it reads through ever changes.
+READS_THE_SETTINGS = tuple(
+    sorted(set(re.findall(r"\bos\.(\w+)", CLIENT_MODULE.read_text())))
+)
+
+# The variables of the app that no module of this server may name: not the model
+# key, not the database URL, not the mail settings, not the upload limits, not
+# the scoring or digest rules.
 APP_VARIABLES = (
     "DATABASE_URL",
     "UPLOADS_DIR",
@@ -83,7 +91,8 @@ def test_the_two_variables_are_the_two_documented_names() -> None:
 
 def test_only_the_client_module_reads_the_process_settings() -> None:
     """The server's reads live in one module, the way `app.db` is the only reader of `DATABASE_URL`."""
-    assert files_naming(READS_THE_SETTINGS) == {CLIENT_MODULE, THIS_MODULE}
+    assert READS_THE_SETTINGS  # an empty tuple would make the assertion below vacuous
+    assert files_naming(READS_THE_SETTINGS) == {CLIENT_MODULE}
 
 
 def test_no_module_of_the_server_names_a_variable_of_the_app() -> None:
