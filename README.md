@@ -299,13 +299,14 @@ file byte for byte identically, and running it twice leaves `git status` clean.
 The app in `frontend/` is React and TypeScript, and its tests run against a
 mock backend, so they need no API, no key and no network.
 
-    cd frontend && npm install
+    cd frontend && npm ci
     cd frontend && npm test
     cd frontend && npm run dev
 
-`npm test` is `vitest run`: it runs the whole suite under `frontend/src/` once
-and exits on its own. `npm run dev` serves the app with the mock backend
-answering in the browser.
+`npm ci` installs exactly what the committed `frontend/package-lock.json` pins,
+which is the install `ci.yml` runs. `npm test` is `vitest run`: it runs the whole
+suite under `frontend/src/` once and exits on its own. `npm run dev` serves the
+app with the mock backend answering in the browser.
 
 ## CI, and the scheduled tick
 
@@ -469,3 +470,40 @@ The one case that drives the real app is excluded by
 SQLite file under the system temp directory — never `backend/data/jobradar.db` —
 and asserts that the row `trigger_run()` returned is the row `get_run(run_id)`
 reads back.
+
+## Deploy
+
+The target is decided, and its reason is recorded in
+`_docs/decisions/2026-10-11-deploy-and-repo.md`: a **Render free web service**
+running this repository's Docker image, with **Neon Postgres** as the database.
+Render's own free database is deleted 30 days after creation, which would break a
+review that opens weeks after submission; Neon's free Postgres does not expire, so
+the database lives outside Render. That record also holds the repository's
+visibility — public on GitHub, so peer reviewers can read this file — which is why
+nothing private is ever committed and why no value appears below.
+
+The deployed image is the one `backend/Dockerfile` builds, with the **repository
+root** as the build context, exactly as `compose.yaml` builds it. Its first stage
+runs the frontend's own build and its runtime stage copies that build in beside
+the API, so one container serves both the UI and the API on one port: no second
+service, no CORS, and no committed `frontend/dist`.
+
+A production instance sets these variables to its own real values. Their names
+are all this file carries:
+
+    DATABASE_URL   UPLOADS_DIR   STATIC_DIR   MAX_UPLOAD_BYTES
+    TICK_SECRET    LLM_API_KEY   LLM_MODEL    SCORER_MAX_POSTINGS
+    PREFILTER_TITLE_TERMS    PREFILTER_SENIORITY_TERMS
+    PREFILTER_LOCATION_TERMS PREFILTER_MUST_HAVE_KEYWORDS
+    DIGEST_MIN_SCORE
+    SMTP_HOST  SMTP_PORT  SMTP_USERNAME  SMTP_PASSWORD  DIGEST_FROM  DIGEST_TO
+
+The "Configuration" table above says what each one means and what an unset one
+means. A production instance sets them for real, and points `UPLOADS_DIR` at a
+volume rather than at the repository, because a resume is stored outside the
+repository and has to survive a redeploy.
+
+The remaining steps — creating the service, attaching the database, setting the
+variables — need the owner's own Render and Neon accounts and are #16. None of
+them was performed to write this file, and the file therefore states no URL: #46
+adds the deployed-instance evidence once #16 exists.
