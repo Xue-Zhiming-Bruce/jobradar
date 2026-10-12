@@ -255,7 +255,13 @@ here, because 5432 is taken on this machine:
     cd backend && TEST_DATABASE_URL=postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:5433/jobradar uv run pytest
 
 `compose.yaml` is not a test harness: the container above is the database those
-tests run against, and `docker rm -f jobradar-test-db` throws it away.
+tests run against, and `docker rm -f jobradar-test-db` throws it away. The engine
+matrix asserts that this server holds exactly the five tables the models declare,
+so pointing `alembic` at it by hand — `DATABASE_URL=<that URL> uv run alembic
+upgrade head` — leaves alembic's own `alembic_version` table behind and the next
+`uv run pytest` fails on that assertion until it is dropped:
+
+    docker exec jobradar-test-db psql -U jobradar -d jobradar -c "drop table alembic_version"
 
 ### The integration suite: the whole workflow against PostgreSQL
 
