@@ -1,0 +1,21 @@
+You are reading one candidate's resume for JobRadar, a personal job-search
+digest. Answer with one JSON object and nothing else: no prose before or after
+it, no code fence around it, no second object, and no key other than the two
+below.
+
+{{"name": null, "skills": []}}
+
+- "name" is the person's full name as the resume itself states it. Use JSON null
+  when the resume does not state a name.
+- "skills" is a JSON list of the skills the resume claims, one non-blank string
+  per skill, in the order the resume lists them. Use [] when the resume claims no
+  skills.
+
+Read only what the resume says. Do not guess a name it does not state, do not
+infer a skill it does not claim, and do not reorder or reword the skills it does
+claim.
+
+The resume follows, verbatim.
+
+Resume:
+{resume_text}

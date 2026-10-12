@@ -1156,15 +1156,21 @@ def test_scores_of_two_postings_are_two_rows(engine: Engine) -> None:
 # The module's boundaries: one place per variable, one writer, one model client.
 
 
-def test_the_key_the_model_and_the_cap_are_named_in_one_module_only() -> None:
-    """The one-place rule #7 proved for the rules, proved here for the model config."""
-    readers = sorted(
+def test_the_key_the_model_and_the_cap_are_read_in_one_module_only() -> None:
+    """The one-place rule #7 proved for the rules, proved here for the model config.
+
+    `scorer` is the one module that reads the three variables --
+    `test_only_the_three_readers_touch_the_environment` is that proof -- and the
+    resume parser #26 adds is the one module that names the key besides it, in
+    the refusal it raises before any request.
+    """
+    naming = sorted(
         path.relative_to(BACKEND_ROOT).as_posix()
         for path in (BACKEND_ROOT / "app").rglob("*.py")
         if any(name in path.read_text(encoding="utf-8") for name, _ in THE_THREE)
     )
 
-    assert readers == ["app/matching/scorer.py"]
+    assert naming == ["app/matching/resume_fields.py", "app/matching/scorer.py"]
 
 
 def test_only_the_three_readers_touch_the_environment() -> None:
@@ -1199,8 +1205,13 @@ def test_only_the_recorder_opens_a_session() -> None:
     assert opening == ["record_score"]
 
 
-def test_the_prefilter_reaches_no_network_and_the_scorer_is_the_one_model_client() -> None:
-    """#8's boundary: the prefilter still decides everything without a model or a key."""
+def test_the_prefilter_reaches_no_network_and_the_model_path_is_the_two_model_modules() -> None:
+    """#8's boundary: the prefilter still decides everything without a model or a key.
+
+    Two modules touch a network client and only these two: `scorer` owns the one
+    request, and the resume parser #26 adds holds the client it is handed and
+    sends it through `scorer.ask_model`.
+    """
     prefilter_source = (MATCHING_ROOT / "prefilter.py").read_text(encoding="utf-8")
     assert _imported_roots(prefilter_source) & NETWORK_MODULES == set()
     assert [term for term in MODEL_TERMS if term in prefilter_source] == []
@@ -1211,14 +1222,17 @@ def test_the_prefilter_reaches_no_network_and_the_scorer_is_the_one_model_client
         if _imported_roots(path.read_text(encoding="utf-8")) & NETWORK_MODULES
     )
 
-    assert importing_the_network == ["scorer.py"]
+    assert importing_the_network == ["resume_fields.py", "scorer.py"]
 
 
-def test_the_package_holds_only_the_prefilter_the_prompt_and_the_scorer() -> None:
+def test_the_package_holds_the_prefilter_the_scorer_the_parser_and_their_prompts() -> None:
     modules = sorted(path.name for path in MATCHING_ROOT.glob("*.py"))
 
-    assert modules == ["__init__.py", "prefilter.py", "scorer.py"]
-    assert sorted(path.name for path in MATCHING_ROOT.glob("*.txt")) == ["score_prompt.txt"]
+    assert modules == ["__init__.py", "prefilter.py", "resume_fields.py", "scorer.py"]
+    assert sorted(path.name for path in MATCHING_ROOT.glob("*.txt")) == [
+        "resume_prompt.txt",
+        "score_prompt.txt",
+    ]
 
 
 def test_both_docstrings_describe_the_real_scorer_that_is_here() -> None:
