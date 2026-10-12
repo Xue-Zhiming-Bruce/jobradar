@@ -148,6 +148,15 @@ this machine. Production credentials come from Render and Neon (#16) and never
 appear in this file. No resume, key or database file is ever committed; the data
 rules are in `_docs/process.md`.
 
+**Data rules.** A resume is uploaded to a running instance at runtime — never as
+part of the repository — and is stored outside it, in `UPLOADS_DIR` (a volume
+under compose, `~/.jobradar/uploads` otherwise), so it survives a redeploy. Its
+text is user data: it is never logged, never returned to a client and never
+committed, and neither is the database file. Secrets live in `.env`, which is
+gitignored, and in a deployment they arrive as the platform's environment
+variables (Render) and GitHub repository secrets. The names are the
+Configuration table below; no value ever appears in this file.
+
 ### Configuration
 
 `compose.yaml` passes every variable the app reads. Unset or empty means:
