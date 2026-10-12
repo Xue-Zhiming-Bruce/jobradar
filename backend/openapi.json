@@ -57,7 +57,7 @@
           "resume"
         ],
         "summary": "Upload the active resume",
-        "description": "Accept one file, extract its text, and store it as the single active resume.",
+        "description": "Accept one file, extract its text -- or read a scan -- and store it as the active resume.",
         "operationId": "upload_resume_resume_post",
         "requestBody": {
           "content": {
@@ -88,6 +88,12 @@
           },
           "422": {
             "description": "The upload is corrupt, carries no text, or is not a named file part"
+          },
+          "502": {
+            "description": "The scan could not be read: the model call timed out, failed, or answered something unusable"
+          },
+          "503": {
+            "description": "The model key is not configured, so a scan cannot be read"
           }
         }
       }
@@ -456,7 +462,7 @@
             "type": "string",
             "contentMediaType": "application/octet-stream",
             "title": "File",
-            "description": "A PDF, a DOCX or a UTF-8 text file"
+            "description": "A PDF, a DOCX, a PNG, a JPEG or a UTF-8 text file"
           }
         },
         "type": "object",

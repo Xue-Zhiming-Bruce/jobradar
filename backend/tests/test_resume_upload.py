@@ -369,14 +369,28 @@ def test_a_text_file_that_is_not_utf8_is_rejected_with_422(
 
 
 def test_a_pdf_without_a_text_layer_is_rejected_and_one_with_text_is_not(
-    client: TestClient, uploads_dir: Path
+    client: TestClient, uploads_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The blank-page PDF is a scan now, so what it meets is the key's absence, not a `422`.
+
+    #3 answered `422` "no text" here because a PDF with no text layer was nothing
+    this app could read. It is an OCR candidate since #27, and the one thing a
+    scan cannot do without is a model key, which this case deletes from the
+    environment on purpose: an unconfigured deployment answers `503` naming the
+    variable -- and never its value -- and stores nothing. The `422` "no text"
+    refusal itself is asserted in `tests/test_resume_scan.py`, where a reader is
+    installed and a key is set. The control half below is unchanged: a PDF that
+    carries text is still read by its own reader, with no model involved.
+    """
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+
     blank = refusal(
-        upload(client, "blank.pdf", BLANK_PAGE_PDF.read_bytes(), "application/pdf"), 422
+        upload(client, "blank.pdf", BLANK_PAGE_PDF.read_bytes(), "application/pdf"), 503
     )
 
-    assert "no text" in blank.lower()
+    assert "LLM_API_KEY" in blank
     assert rows() == []
+    assert stored_files(uploads_dir) == []
 
     # The control: the same app accepts the text-bearing fixture, so the refusal
     # above is about the text layer and not about every PDF.

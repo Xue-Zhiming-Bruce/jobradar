@@ -7,6 +7,17 @@ Success is `201` and names the new resume; rejections are `415` for a type this
 app cannot read, `413` for an upload over the limit and `422` for a file that is
 corrupt, carries no text or was not sent as a named file part.
 
+A scan is the one upload whose text is not in the file: a PNG, a JPEG or an
+image-only PDF is a scan, `app.services.resume` refuses it as blank like any
+other file without text, and this module asks a model to read its pages instead
+of refusing it. That call is `app.matching.resume_ocr`'s and the reader arrives
+through a second `Depends` seam, the way the parser does, so no case here needs a
+key, a socket or a model. Its failures are the two statuses a scan adds: `503`
+when no key is configured and `502` when the call or its answer failed, and a
+scan that yielded no text is still the `422` a text-less upload has always been.
+Nothing about a scan reaches a file except the upload itself: the page images are
+request payloads and the text is the row's.
+
 Three more routes read and change what the uploads left behind: `GET /resume`
 lists every stored resume newest first, `PATCH /resume/{id}` makes an older one
 the active resume and answers with it, and `DELETE /resume/{id}` removes one --
@@ -37,9 +48,11 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict
 
 from app.matching.resume_fields import LlmResumeParser, ResumeFieldParser, ResumeParseError
+from app.matching.resume_ocr import LlmResumeOcr, ResumeOcr, ResumeOcrError
 from app.matching.scorer import ScorerConfigurationError
 from app.models import Resume
 from app.services import resume as resume_service
@@ -120,12 +133,33 @@ def _rejection(rejected: resume_service.ResumeRejected) -> HTTPException:
 
 
 # The refusals this route answers with, named in the contract: a client reads the
-# status codes it has to handle without having to try them out.
+# status codes it has to handle without having to try them out. The last two are
+# the scan's own: the model key that is missing, and the call or the answer that
+# failed.
 REFUSAL_RESPONSES = {
     413: {"description": "The upload is larger than the configured limit"},
     415: {"description": "The declared type, or the bytes, are not a readable resume"},
     422: {"description": "The upload is corrupt, carries no text, or is not a named file part"},
+    502: {
+        "description": (
+            "The scan could not be read: the model call timed out, failed, or "
+            "answered something unusable"
+        )
+    },
+    503: {"description": "The model key is not configured, so a scan cannot be read"},
 }
+
+
+def get_resume_ocr() -> ResumeOcr:
+    """The second seam between this route and the model: the reader a test replaces.
+
+    Zero arguments, so it carries no configuration, and resolved per request by
+    `Depends`, so the suite installs `app.dependency_overrides[get_resume_ocr]`
+    and then no case needs a key, a socket or a model -- the `get_resume_parser`
+    pattern beside it. It returns the real reader, with no client: which endpoint,
+    model and timeout a real scan uses is `app.matching.scorer`'s, read per scan.
+    """
+    return LlmResumeOcr()
 
 
 @router.post(
@@ -137,9 +171,12 @@ REFUSAL_RESPONSES = {
     responses=REFUSAL_RESPONSES,
 )
 async def upload_resume(
-    file: Annotated[UploadFile, File(description="A PDF, a DOCX or a UTF-8 text file")],
+    file: Annotated[
+        UploadFile, File(description="A PDF, a DOCX, a PNG, a JPEG or a UTF-8 text file")
+    ],
+    ocr: Annotated[ResumeOcr, Depends(get_resume_ocr)],
 ) -> ResumeUploaded:
-    """Accept one file, extract its text, and store it as the single active resume."""
+    """Accept one file, extract its text -- or read a scan -- and store it as the active resume."""
     # A part the parser did not read as a file -- missing, or sent without a
     # filename -- is refused by the parameter's own validation, as `422`.
     filename = file.filename or ""
@@ -159,16 +196,57 @@ async def upload_resume(
 
     try:
         content_type = resume_service.content_type_of(file.content_type, data)
+    except resume_service.ResumeRejected as rejected:
+        raise _rejection(rejected) from rejected
+
+    read_from_a_scan = False
+    try:
         text = resume_service.extract_text(content_type, data)
+    except resume_service.ResumeWithoutText as blank:
+        # A scan is the one upload whose text is not in its own bytes: a blank
+        # text file or DOCX is refused here, and a scan is read by the reader --
+        # once, in a thread, because a model takes seconds and the event loop does
+        # not wait for it.
+        if content_type not in resume_service.OCR_CONTENT_TYPES:
+            raise _rejection(blank) from blank
+        read_from_a_scan = True
+        try:
+            text = await run_in_threadpool(_read_a_scan, ocr, content_type, data)
+        except ScorerConfigurationError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        except ResumeOcrError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        except resume_service.ResumeRejected as rejected:
+            raise _rejection(rejected) from rejected
     except resume_service.ResumeRejected as rejected:
         raise _rejection(rejected) from rejected
 
     stored_path = resume_service.save_upload(data, content_type)
     resume_id = resume_service.record_active_resume(filename, content_type, text, stored_path)
-    logger.info("Stored resume %s: %s, %s bytes", resume_id, content_type, len(data))
+    logger.info(
+        "Stored resume %s: %s, %s bytes%s",
+        resume_id,
+        content_type,
+        len(data),
+        " (text read by OCR)" if read_from_a_scan else "",
+    )
     return ResumeUploaded(
         id=resume_id, filename=filename, content_type=content_type, is_active=True
     )
+
+
+def _read_a_scan(ocr: ResumeOcr, content_type: str, data: bytes) -> str:
+    """One scan read by the reader, in a worker thread: the model call blocks for seconds.
+
+    The reader is the blocking part, so it runs through `run_in_threadpool` rather
+    than holding the loop that serves every other request. Its failures travel back
+    to the caller by type: no key, a call that failed and a refusal are each
+    answered by the route that knows the status codes, this function knowing none
+    of them. What the reader answered goes through `require_text`, so a scan that
+    yielded nothing is judged and refused by the same rule and the same words as an
+    upload whose own reader found no text.
+    """
+    return resume_service.require_text(content_type, ocr.read(content_type, data))
 
 
 # The refusals the history routes answer with, named in the contract the way

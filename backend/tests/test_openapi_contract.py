@@ -31,7 +31,10 @@ def test_contract_describes_the_health_check_and_the_resume_upload() -> None:
     assert ok_response["content"]["application/json"]["schema"]
 
     upload = contract["paths"]["/resume"]["post"]
-    assert set(upload["responses"]) == {"201", "413", "415", "422"}
+    # The four refusals #3 shipped, plus the scan's two: no key configured, and a
+    # call or an answer that failed. Every status this route answers, and no
+    # other, so a new one cannot be added without a line here.
+    assert set(upload["responses"]) == {"201", "413", "415", "422", "502", "503"}
     body_schema = upload["requestBody"]["content"]["multipart/form-data"]["schema"]
     assert upload["requestBody"]["required"] is True
     body = contract["components"]["schemas"][body_schema["$ref"].rsplit("/", 1)[-1]]
