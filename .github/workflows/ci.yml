@@ -36,7 +36,9 @@
 #   docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest
 #
 # The versions are this repository's own: Python 3.12 (`requires-python`),
-# Node 22.12 (`backend/Dockerfile`) and `postgres:17` (`compose.yaml`).
+# Node 22.12 (`backend/Dockerfile`) and `postgres:17` (`compose.yaml`). Actions
+# are pinned to a released version and never to a branch; setup-uv carries its
+# full version because it publishes no moving major tag above `v7`.
 
 name: CI
 
@@ -52,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: "3.12"
       - run: uv sync
@@ -95,7 +97,7 @@ jobs:
           --health-start-period 5s
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: "3.12"
       - run: uv sync
@@ -111,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: "3.12"
       - run: uv sync
