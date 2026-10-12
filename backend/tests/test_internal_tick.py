@@ -468,9 +468,14 @@ def test_the_next_tick_is_accepted_after_a_success_and_after_a_failure(
 
 
 def test_a_running_row_this_process_did_not_create_does_not_refuse_a_tick(
-    client: TestClient, captured: list[Callable[[], None]]
+    client: TestClient, captured: list[Callable[[], None]], pipeline: FakePipeline
 ) -> None:
-    """What a process that died mid-run leaves behind is #35's; it refuses nothing here."""
+    """What a process that died mid-run leaves behind is #35's; it refuses nothing here.
+
+    The run's own work is the fake above, as in every other case here that runs the
+    recorded work: this case is about the guard, and the walk #34 wired into the real
+    provider needs an active resume this test's database does not have.
+    """
     with db.session_scope() as session:
         session.add(Run(status=internal.RUNNING))
 

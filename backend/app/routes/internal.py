@@ -26,9 +26,9 @@ is in `app.routes.watchlist`: `get_run_starter()` returns the callable that take
 the work off this thread, and `get_pipeline()` returns the work itself -- a
 callable whose only argument is the run's `id`. The suite replaces both with
 `app.dependency_overrides[...]`, so no test needs a board, a model, a key or a
-socket, and no test depends on timing. #34 is what replaces the pipeline behind
-the second seam; until it lands, a tick starts a run that does nothing and ends
-`succeeded` with both counts at 0.
+socket, and no test depends on timing. #34 is what the second seam returns: the
+walk over the watchlist in `app.services.pipeline`, which fetches a board per
+company, stores what it finds, scores each survivor and counts what it did.
 
 The row's seven columns are the whole progress record, and this module is the
 only writer of `status`, `finished_at` and `error`: the row is inserted `running`
@@ -57,8 +57,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import db
+from app.matching.scorer import LlmScorer
 from app.models import Run
 from app.routes.runs import RunSummary, run_summary
+from app.services.pipeline import run_pipeline
+from app.sources.greenhouse import fetch
 
 logger = logging.getLogger(__name__)
 
@@ -122,12 +125,19 @@ def get_run_starter() -> RunStarter:
 def get_pipeline() -> Pipeline:
     """The second seam: the run's work, a callable taking the run's `id`.
 
-    #34 replaces what this returns with the walk over the watchlist, the fetch,
-    the ingest, the prefilter and the scorer, and fills the two counts as the run
-    earns them. Until it lands the seam returns `_no_pipeline`, so a tick starts a
-    run that does nothing and finishes `succeeded` with both counts at 0.
+    It returns the real walk over the watchlist (#34), wired here and in no other
+    module: `greenhouse.fetch` as the source, and a fresh `LlmScorer` per run,
+    because a scorer instance counts the postings it was offered and that count is
+    the run's cap. `Depends` resolves this provider on every request, so a later
+    tick gets a scorer with a cap of its own.
     """
-    return _no_pipeline
+    scorer = LlmScorer()
+
+    def pipeline(run_id: int) -> None:
+        """One run's work, in the shape the starter and the row lifecycle take."""
+        run_pipeline(run_id, source=fetch, scorer=scorer)
+
+    return pipeline
 
 
 def _start_on_a_daemon_thread(work: Callable[[], None]) -> None:
@@ -140,11 +150,6 @@ def _start_on_a_daemon_thread(work: Callable[[], None]) -> None:
     running inside the request where a client waits for the whole pipeline.
     """
     threading.Thread(target=work, daemon=True).start()
-
-
-def _no_pipeline(run_id: int) -> None:
-    """Do nothing, on purpose: there is no pipeline until #34 lands."""
-    logger.debug("Run %s has no pipeline yet", run_id)
 
 
 def _require_tick_secret(provided: str | None) -> None:
