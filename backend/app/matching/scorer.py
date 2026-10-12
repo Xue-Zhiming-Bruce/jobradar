@@ -37,6 +37,7 @@ before any request.
 inserting a second one.
 """
 
+import base64
 import json
 import os
 from dataclasses import dataclass
@@ -276,21 +277,36 @@ def record_score(posting_id: int, result: MatchResult) -> None:
             row.gaps = gaps
 
 
-def request_body(prompt: str) -> dict[str, object]:
+def request_body(prompt: str, images: list[bytes] | None = None) -> dict[str, object]:
     """The request body: four fields, and nothing that would change the answer.
 
-    Public because it is one half of the seam #26's resume parser reuses: the
-    body, and `ask_model` below, so a second model path cannot drift from this
-    one's URL, model, temperature or answer format.
-
+    Public because it is one half of the seam #26's resume parser and #27's scan
+    reader reuse: the body, and `ask_model` below, so a second model path cannot
+    drift from this one's URL, model, temperature or answer format. Called with no
+    images -- every caller that has a prompt and no pictures -- the message's
+    content is the prompt alone. Called with images, it is one text part followed
+    by one image part per page, each a data URL: they are the PNGs
+    `app.services.resume.scan_images` re-encoded, one format whatever the scanner
+    stored.
 
     No `tools`, no `stream`, no second request: one user message holding the
     rendered prompt, `temperature: 0` because a posting's score should not depend
     on the day it was scored, and a JSON-object answer rather than prose.
     """
+    content: str | list[dict[str, object]] = prompt
+    if images:
+        content = [{"type": "text", "text": prompt}] + [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": "data:image/png;base64," + base64.b64encode(image).decode("ascii")
+                },
+            }
+            for image in images
+        ]
     return {
         "model": model(),
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": content}],
         "temperature": 0,
         "response_format": {"type": "json_object"},
     }

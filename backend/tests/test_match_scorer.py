@@ -1161,8 +1161,9 @@ def test_the_key_the_model_and_the_cap_are_read_in_one_module_only() -> None:
 
     `scorer` is the one module that reads the three variables --
     `test_only_the_three_readers_touch_the_environment` is that proof -- and the
-    resume parser #26 adds is the one module that names the key besides it, in
-    the refusal it raises before any request.
+    two modules that reach the model through it name the key as well: #26's resume
+    parser, and #27's scan reader, each in the refusal it raises before any
+    request.
     """
     naming = sorted(
         path.relative_to(BACKEND_ROOT).as_posix()
@@ -1170,7 +1171,11 @@ def test_the_key_the_model_and_the_cap_are_read_in_one_module_only() -> None:
         if any(name in path.read_text(encoding="utf-8") for name, _ in THE_THREE)
     )
 
-    assert naming == ["app/matching/resume_fields.py", "app/matching/scorer.py"]
+    assert naming == [
+        "app/matching/resume_fields.py",
+        "app/matching/resume_ocr.py",
+        "app/matching/scorer.py",
+    ]
 
 
 def test_only_the_three_readers_touch_the_environment() -> None:
@@ -1205,12 +1210,13 @@ def test_only_the_recorder_opens_a_session() -> None:
     assert opening == ["record_score"]
 
 
-def test_the_prefilter_reaches_no_network_and_the_model_path_is_the_two_model_modules() -> None:
+def test_the_prefilter_reaches_no_network_and_the_model_path_is_the_three_model_modules() -> None:
     """#8's boundary: the prefilter still decides everything without a model or a key.
 
-    Two modules touch a network client and only these two: `scorer` owns the one
-    request, and the resume parser #26 adds holds the client it is handed and
-    sends it through `scorer.ask_model`.
+    Three modules touch a network client and only these three: `scorer` owns the
+    one request, and the two readers that reach the model through it -- #26's
+    resume parser and #27's scan reader -- hold the client they are handed and
+    send it with `scorer.ask_model`.
     """
     prefilter_source = (MATCHING_ROOT / "prefilter.py").read_text(encoding="utf-8")
     assert _imported_roots(prefilter_source) & NETWORK_MODULES == set()
@@ -1222,14 +1228,21 @@ def test_the_prefilter_reaches_no_network_and_the_model_path_is_the_two_model_mo
         if _imported_roots(path.read_text(encoding="utf-8")) & NETWORK_MODULES
     )
 
-    assert importing_the_network == ["resume_fields.py", "scorer.py"]
+    assert importing_the_network == ["resume_fields.py", "resume_ocr.py", "scorer.py"]
 
 
-def test_the_package_holds_the_prefilter_the_scorer_the_parser_and_their_prompts() -> None:
+def test_the_package_holds_the_prefilter_the_two_readers_the_scorer_and_their_prompts() -> None:
     modules = sorted(path.name for path in MATCHING_ROOT.glob("*.py"))
 
-    assert modules == ["__init__.py", "prefilter.py", "resume_fields.py", "scorer.py"]
+    assert modules == [
+        "__init__.py",
+        "prefilter.py",
+        "resume_fields.py",
+        "resume_ocr.py",
+        "scorer.py",
+    ]
     assert sorted(path.name for path in MATCHING_ROOT.glob("*.txt")) == [
+        "ocr_prompt.txt",
         "resume_prompt.txt",
         "score_prompt.txt",
     ]

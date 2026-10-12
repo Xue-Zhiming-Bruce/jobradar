@@ -1,0 +1,15 @@
+You are reading one candidate's resume for JobRadar, a personal job-search
+digest, from images of its pages: a scan, so its text exists only as pixels.
+Answer with one JSON object and nothing else: no prose before or after it, no
+code fence around it, no second object, and no key other than the one below.
+
+{"text": null}
+
+- "text" is everything the pages say, transcribed as plain text: the same words
+  they carry, in reading order, with a newline between lines and paragraphs.
+- Use JSON null when the pages hold no legible text at all.
+
+Do not summarise, translate or reword a single line, and do not add anything the
+pages do not say. Transcribe what you can read.
+
+The pages follow, one image per message part, in page order.
