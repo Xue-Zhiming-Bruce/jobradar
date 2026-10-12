@@ -65,7 +65,7 @@ GOOD_FIELDS = {"name": "Ada Lovelace", "skills": ["Python", "SQL"]}
 
 @pytest.fixture(autouse=True)
 def no_outbound_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Nothing in this module reaches the network: an unpatched client fails rather than connects."""
+    """No case here reaches the network: an unpatched client fails rather than connects."""
 
     def refuse(*args: object, **kwargs: object) -> None:
         raise AssertionError("this test tried to open a socket")
@@ -560,8 +560,12 @@ CALL_FAILURES = [
         "the model call failed (HTTP 500)",
         id="a 500",
     ),
-    pytest.param(_response("slow down", status=429), "the model call failed (HTTP 429)", id="a 429"),
-    pytest.param(_response("no key", status=401), "the model call failed (HTTP 401)", id="a 401"),
+    pytest.param(
+        _response("slow down", status=429), "the model call failed (HTTP 429)", id="a 429"
+    ),
+    pytest.param(
+        _response("no key", status=401), "the model call failed (HTTP 401)", id="a 401"
+    ),
 ]
 
 
