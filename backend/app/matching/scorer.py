@@ -226,12 +226,12 @@ class LlmScorer:
             return _not_scored(f"the run's cap of {limit} postings was reached")
         self._offered += 1
 
-        body = _request_body(render_prompt(posting, resume_text))
+        body = request_body(render_prompt(posting, resume_text))
         client = self._client
         if client is None:
             client = httpx2.Client(timeout=MODEL_TIMEOUT_SECONDS)
         for _ in range(SCORER_MAX_ATTEMPTS):
-            answer, failure = _ask(client, body, key)
+            answer, failure = ask_model(client, body, key)
             if failure:
                 return _not_scored(failure)
             result = _parsed(answer)
@@ -276,8 +276,13 @@ def record_score(posting_id: int, result: MatchResult) -> None:
             row.gaps = gaps
 
 
-def _request_body(prompt: str) -> dict[str, object]:
+def request_body(prompt: str) -> dict[str, object]:
     """The request body: four fields, and nothing that would change the answer.
+
+    Public because it is one half of the seam #26's resume parser reuses: the
+    body, and `ask_model` below, so a second model path cannot drift from this
+    one's URL, model, temperature or answer format.
+
 
     No `tools`, no `stream`, no second request: one user message holding the
     rendered prompt, `temperature: 0` because a posting's score should not depend
@@ -291,8 +296,12 @@ def _request_body(prompt: str) -> dict[str, object]:
     }
 
 
-def _ask(client: httpx2.Client, body: dict[str, object], key: str) -> tuple[str, str]:
+def ask_model(client: httpx2.Client, body: dict[str, object], key: str) -> tuple[str, str]:
     """One call, as `(answer body, "")` or `("", reason there is none)`.
+
+    Public for the reason `request_body` gives: #26's resume parser sends the
+    same request with this same function, so the timeout, the endpoint and the
+    failure wording have one spelling.
 
     Every `httpx2` failure is turned into a reason here, so none of them escapes
     `score`. The reason names a status or nothing at all: the response body is
