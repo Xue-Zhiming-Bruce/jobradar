@@ -21,14 +21,19 @@ is the shape recorded in `_docs/decisions/2026-10-11-deploy-and-repo.md`. What a
 client reads instead is `GET /runs/{id}` (`app.routes.runs`), the same body the
 `202` carries.
 
-Two seams, both zero-argument `Depends` providers declared the way `get_source`
+Three seams, all zero-argument `Depends` providers declared the way `get_source`
 is in `app.routes.watchlist`: `get_run_starter()` returns the callable that takes
-the work off this thread, and `get_pipeline()` returns the work itself -- a
-callable whose only argument is the run's `id`. The suite replaces both with
-`app.dependency_overrides[...]`, so no test needs a board, a model, a key or a
-socket, and no test depends on timing. #34 is what the second seam returns: the
-walk over the watchlist in `app.services.pipeline`, which fetches a board per
-company, stores what it finds, scores each survivor and counts what it did.
+the work off this thread, `get_pipeline()` returns the work itself -- a callable
+whose only argument is the run's `id` -- and `get_mailer()` returns the mailer
+#10's digest sends through. The suite replaces all three with
+`app.dependency_overrides[...]`, so no test needs a board, a model, a key, a
+credential or a socket, and no test depends on timing. #34 and #10 are what the
+second seam returns: the walk over the watchlist in `app.services.pipeline`,
+which fetches a board per company, stores what it finds, scores each survivor
+and counts what it did, and then #10's digest, which emails the matches that
+qualify and marks them notified. The order matters: a pipeline that raises sends
+no email at all, so the matches it scored before a board failure go out with the
+next successful run.
 
 The row's seven columns are the whole progress record, and this module is the
 only writer of `status`, `finished_at` and `error`: the row is inserted `running`
@@ -60,6 +65,7 @@ from app import db
 from app.matching.scorer import LlmScorer
 from app.models import Run
 from app.routes.runs import RunSummary, run_summary
+from app.services.digest import Mailer, SmtpMailer, send_digest
 from app.services.pipeline import run_pipeline
 from app.sources.greenhouse import fetch
 
@@ -122,20 +128,39 @@ def get_run_starter() -> RunStarter:
     return _start_on_a_daemon_thread
 
 
-def get_pipeline() -> Pipeline:
+def get_mailer() -> Mailer:
+    """The third seam: the one place a `SmtpMailer` is constructed.
+
+    Zero arguments, so it carries no configuration, and resolved per request by
+    `Depends` -- through `get_pipeline`, whose parameter it is -- so the suite
+    installs `app.dependency_overrides[get_mailer]` and #10's digest then sends
+    through a fake without a host, a port or a credential. It is the mailer
+    *type* that is chosen here: which relay, sender and recipient a real send
+    uses is `app.services.digest`'s own configuration, read per send.
+    """
+    return SmtpMailer()
+
+
+def get_pipeline(mailer: Mailer = Depends(get_mailer)) -> Pipeline:
     """The second seam: the run's work, a callable taking the run's `id`.
 
-    It returns the real walk over the watchlist (#34), wired here and in no other
-    module: `greenhouse.fetch` as the source, and a fresh `LlmScorer` per run,
-    because a scorer instance counts the postings it was offered and that count is
-    the run's cap. `Depends` resolves this provider on every request, so a later
-    tick gets a scorer with a cap of its own.
+    It returns the real walk over the watchlist (#34) followed by the digest
+    (#10), wired here and in no other module: `greenhouse.fetch` as the source, a
+    fresh `LlmScorer` per run, because a scorer instance counts the postings it
+    was offered and that count is the run's cap, and the mailer its own provider
+    hands it. `Depends` resolves this provider on every request, so a later tick
+    gets a scorer with a cap of its own.
+
+    The mailer arrives as a `Depends` default rather than as a required argument,
+    so this provider is still callable with no arguments: #9's tests call
+    `get_pipeline()` to inspect the shape of the work it returns.
     """
     scorer = LlmScorer()
 
     def pipeline(run_id: int) -> None:
         """One run's work, in the shape the starter and the row lifecycle take."""
         run_pipeline(run_id, source=fetch, scorer=scorer)
+        send_digest(mailer)
 
     return pipeline
 
