@@ -32,6 +32,23 @@ INDEX_HTML = (
     f"<script type=\"module\" src=\"/assets/{ASSET_NAME}\"></script></body></html>"
 )
 
+# One request per path in the committed contract, with a method that path serves
+# and the answer only its own route gives. The mount answers an unknown path with
+# `{"detail":"Not Found"}`, so a body the route wrote is what proves the routers
+# were matched first; `None` means the status and the JSON content type are the
+# whole claim (`POST /resume` with no file part is the route's own `422`, and a
+# tick with no secret its own `401`).
+_CONTRACT_REQUESTS = [
+    ("GET", "/healthz", None, 200, {"status": "ok"}),
+    ("POST", "/resume", None, 422, None),
+    ("GET", "/watchlist", None, 200, []),
+    ("DELETE", "/watchlist/1", None, 404, {"detail": "There is no watched company with id 1"}),
+    ("POST", "/internal/tick", None, 401, None),
+    ("GET", "/runs/1", None, 404, {"detail": "There is no run with id 1"}),
+    ("GET", "/matches", None, 200, []),
+    ("PATCH", "/matches/1", {"state": "saved"}, 404, {"detail": "There is no match with id 1"}),
+]
+
 
 def _built_ui(directory: Path) -> None:
     """A scratch build: an index carrying one `/assets/...` reference, and that file."""
@@ -47,18 +64,13 @@ def _app_with_static_dir(monkeypatch: pytest.MonkeyPatch, static_dir: Path, tmp_
 
     The mount is registered -- or not -- while the module is imported, so a test
     that wants the served case has to import it again with the variable set.
-    `DATABASE_URL` is pinned at a scratch SQLite file: the routes below read the
-    database, and this test is about the mount, not about an engine.
+    `DATABASE_URL` is pinned at a scratch SQLite file and `TICK_SECRET` removed:
+    the routes below read the database, and none of them is the thing under test.
     """
     monkeypatch.setenv(main.STATIC_DIR_VARIABLE, str(static_dir))
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'jobradar.db'}")
+    monkeypatch.delenv("TICK_SECRET", raising=False)
     return importlib.reload(main).app
-
-
-def _contract_paths() -> list[str]:
-    """Every path in the committed contract, with its path parameters filled in."""
-    document = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
-    return [path.replace("{id}", "1") for path in document["paths"]]
 
 
 def test_the_static_root_answers_the_page_it_holds(monkeypatch, tmp_path: Path) -> None:
@@ -88,24 +100,42 @@ def test_healthz_answers_json_and_is_not_shadowed_by_the_mount(monkeypatch, tmp_
     assert response.json() == {"status": "ok"}
 
 
-@pytest.mark.parametrize("path", _contract_paths())
-def test_no_route_in_the_committed_contract_answers_html(
-    path: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(("method", "path", "payload", "status", "body"), _CONTRACT_REQUESTS)
+def test_every_contract_path_is_answered_by_its_own_route(
+    method: str,
+    path: str,
+    payload: dict[str, object] | None,
+    status: int,
+    body: dict[str, object] | list[object] | None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Every path the contract names is answered by the app, not by the mount.
 
-    The static mount answers an unknown path with `text/plain`, so a JSON answer
-    -- a `200`, a `404` or a `405` -- is what proves the API was matched first.
+    The mount answers an unknown path with the same `404` an unmatched API path
+    gets, so the status and the body together are the claim: the route's own
+    answer, which the mount cannot produce.
     """
     _built_ui(tmp_path / "static")
     app = _app_with_static_dir(monkeypatch, tmp_path / "static", tmp_path)
 
     with TestClient(app) as client:
-        response = client.get(path)
+        response = client.request(method, path, json=payload)
 
-    assert response.headers["content-type"].startswith("application/json"), (
-        f"{path} was answered by the mount: {response.headers.get('content-type')}"
-    )
+    assert response.status_code == status
+    assert response.headers["content-type"].startswith("application/json")
+    if body is None:
+        assert response.json() != {"detail": "Not Found"}, f"{path} was answered by the mount"
+    else:
+        assert response.json() == body, f"{path} was answered by the mount: {response.text}"
+
+
+def test_the_contract_paths_are_the_eight_the_contract_names() -> None:
+    """The requests above are the committed contract's paths, not a copy that drifted."""
+    document = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))
+    requested = {path.replace("/1", "/{id}") for _, path, _, _, _ in _CONTRACT_REQUESTS}
+
+    assert requested == set(document["paths"])
 
 
 def test_without_a_build_no_mount_is_registered_and_the_api_still_answers(
