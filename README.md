@@ -201,6 +201,30 @@ mock backend, so they need no API, no key and no network.
 and exits on its own. `npm run dev` serves the app with the mock backend
 answering in the browser.
 
+## CI, and the scheduled tick
+
+Two workflows, both in `.github/workflows/`, and each file's leading comment
+names the local command that stands in for every job it runs, so the pipeline can
+be reproduced without GitHub Actions.
+
+- `ci.yml` runs on every push and every pull request, in four jobs: `backend`
+  (`uv sync && uv run pytest`), `frontend` (`npm ci && npm run build && npm test`),
+  `integration` (`uv run pytest -m integration` against a `postgres:17` service
+  container holding the same throwaway credentials as the local server) and
+  `contract` (regenerate `backend/openapi.json`, then fail on a diff). It has no
+  deploy step; deploying a green `main` is #45.
+- `tick.yml` calls `POST /internal/tick` once a day, taking the secret from the
+  repository secret `TICK_SECRET` and the base URL from the repository variable
+  `JOBRADAR_URL`. No secret value is in either file. Until #16 sets
+  `JOBRADAR_URL`, that job is red on purpose rather than silently green.
+
+The schedule is best-effort: GitHub Actions cron drifts by minutes to hours and
+can skip a run entirely, and it is disabled after 60 days of repository
+inactivity, so a late or missed run is expected rather than a fault. That is the
+trigger decision in `_docs/decisions/2026-10-11-deploy-and-repo.md`, and it is why
+the in-app **"Run digest now"** button is the reliable path -- the one the demo
+relies on.
+
 ## MCP server
 
 `mcp/` is a second uv project, `jobradar_mcp`: a small MCP server that drives the
