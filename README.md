@@ -129,8 +129,8 @@ serves both, so there is one origin, no CORS and no second service.
 own `init_db()` at startup, which is all a database that does not exist yet
 needs: no seed step and no `docker compose exec` before the API serves. A
 database that already holds rows is brought to the schema `backend/app/models.py`
-declares by `uv run alembic upgrade head` from a checkout -- the container does
-not run it, see **Changing the schema** under Backend -- and a change to the
+declares by `uv run alembic upgrade head` from a checkout — the container does
+not run it, see **Changing the schema** under Backend — and a change to the
 models ships as a revision.
 
 ### Where the data lives
@@ -611,7 +611,7 @@ Each with what it costs, because a limitation without a consequence is a slogan.
   runs no migration at startup, so that command is run from a checkout: a schema
   change reaches a brand-new database on deploy and one that already holds rows
   only when someone runs it. #47 ships the files and the startup step. And
-  `downgrade base` is destructive -- it drops the five tables -- which is
+  `downgrade base` is destructive — it drops the five tables — which is
   acceptable only while the databases in existence are disposable.
 - **The free tier sleeps.** `_docs/plan.md`'s "Known constraints" records that a
   Render free instance spins down after 15 minutes idle and takes about a minute
