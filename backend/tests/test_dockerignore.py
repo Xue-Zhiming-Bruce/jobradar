@@ -1,4 +1,10 @@
-"""`backend/.dockerignore` must keep caches and local data out of the build context.
+"""The repository-root `.dockerignore` must keep caches and local data out of the build context.
+
+`#13` builds the image from the repository root -- the frontend stage needs
+`frontend/` and the runtime stage needs `backend/` -- so the file that governs
+the context is `.dockerignore` at the root, and this test reads that one. Its
+rules are the ones `backend/.dockerignore` held, moved, not deleted: the parts
+of the repository the build actually reads have to survive it.
 
 Unlike `.gitignore`, `.dockerignore` patterns are anchored at the context root:
 `__pycache__/` excludes the root directory only, so after `uv run pytest` the
@@ -21,11 +27,8 @@ import pytest
 
 from app.db import DEFAULT_DATABASE_PATH
 
-BACKEND_ROOT = Path(__file__).resolve().parent.parent
-_DOCKERIGNORE = BACKEND_ROOT / ".dockerignore"
-
-# Patterns that are deliberately anchored at the context root.
-_ROOT_ONLY_PATTERNS = {".python-version"}
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 
 # Junk at the root and below it: none of it may reach the image.
 _EXCLUDED_PATHS = [
@@ -34,36 +37,63 @@ _EXCLUDED_PATHS = [
     ".ruff_cache/0.1.0/data",
     ".mypy_cache/3.12/app.main.data.json",
     "__pycache__/main.cpython-312.pyc",
-    "app/__pycache__/__init__.cpython-312.pyc",
-    "app/__pycache__/main.cpython-312.pyc",
-    "app/__pycache__/export_openapi.cpython-312.pyc",
-    "tests/__pycache__/test_health.cpython-312.pyc",
-    "app/main.pyc",
-    "app/main.pyo",
-    "app/main.pyd",
+    "backend/app/__pycache__/__init__.cpython-312.pyc",
+    "backend/app/__pycache__/main.cpython-312.pyc",
+    "backend/app/__pycache__/export_openapi.cpython-312.pyc",
+    "backend/tests/__pycache__/test_health.cpython-312.pyc",
+    "backend/app/main.pyc",
+    "backend/app/main.pyo",
+    "backend/app/main.pyd",
+    "backend/.python-version",
     "jobradar.db",
-    "data/jobradar.db",
-    "nested/data/jobradar.db",
+    "backend/data/jobradar.db",
+    "backend/nested/data/jobradar.db",
     "jobradar.sqlite3",
-    "deep/nested/notes.sqlite3",
+    "backend/deep/nested/notes.sqlite3",
     "uploads/resume.pdf",
-    "nested/uploads/resume.pdf",
+    "backend/uploads/resume.pdf",
+    "backend/nested/uploads/resume.pdf",
     ".env",
     ".env.local",
-    "app/.env.local",
+    "backend/app/.env.local",
     ".DS_Store",
-    "app/.DS_Store",
+    "backend/app/.DS_Store",
+    # The junk the wider context adds: git's history, the frontend's installed
+    # dependencies -- `npm ci` runs in the build stage -- and its output, which
+    # that stage produces. A committed or host-built `frontend/dist` must never
+    # be what the image serves.
+    ".git/config",
+    ".git/objects/3f/ab12cd",
+    "frontend/node_modules/react/index.js",
+    "frontend/node_modules/.bin/vite",
+    "frontend/dist/index.html",
+    "frontend/dist/assets/index-B6OjL1iC.js",
 ]
 
-# Everything the image needs must survive the ignore file.
+# Everything the build reads must survive the ignore file: the backend's source
+# and lock file, the frontend's source plus the two files `npm ci` installs
+# from, and the files the build itself is described by.
 _KEPT_PATHS = [
     "Dockerfile",
-    "pyproject.toml",
-    "uv.lock",
-    "openapi.json",
-    "app/__init__.py",
-    "app/main.py",
-    "app/export_openapi.py",
+    "compose.yaml",
+    "backend/Dockerfile",
+    "backend/pyproject.toml",
+    "backend/uv.lock",
+    "backend/openapi.json",
+    "backend/app/__init__.py",
+    "backend/app/main.py",
+    "backend/app/export_openapi.py",
+    "backend/app/matching/score_prompt.txt",
+    "frontend/package.json",
+    "frontend/package-lock.json",
+    "frontend/index.html",
+    "frontend/vite.config.ts",
+    "frontend/tsconfig.json",
+    "frontend/tsconfig.app.json",
+    "frontend/tsconfig.node.json",
+    "frontend/src/main.tsx",
+    "frontend/src/App.tsx",
+    "frontend/public/favicon.svg",
 ]
 
 # The characters moby escapes before handing a pattern to the regexp engine.
@@ -141,15 +171,11 @@ def test_the_default_local_database_is_excluded() -> None:
     The path is taken from `app.db` instead of being repeated as a literal, so
     moving the default cannot silently take the file out of the ignore file.
     """
-    relative = DEFAULT_DATABASE_PATH.relative_to(BACKEND_ROOT).as_posix()
+    relative = DEFAULT_DATABASE_PATH.relative_to(REPO_ROOT).as_posix()
 
     assert _is_excluded(relative, _dockerignore_patterns()), f"{relative} would enter the image"
 
 
 def test_no_exclusion_pattern_is_anchored_at_the_context_root_only() -> None:
-    wrong = [
-        pattern
-        for pattern in _dockerignore_patterns()
-        if not pattern.startswith("**/") and pattern not in _ROOT_ONLY_PATTERNS
-    ]
+    wrong = [pattern for pattern in _dockerignore_patterns() if not pattern.startswith("**/")]
     assert wrong == [], f"root-only patterns let nested paths through: {wrong}"

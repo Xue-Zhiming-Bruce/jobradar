@@ -1,0 +1,35 @@
+# The image is built from the repository root, because the frontend's build needs
+# frontend/ as well as backend/ (#13). This file therefore governs that context:
+# backend/.dockerignore is gone, and every rule it held lives here.
+#
+# Unlike .gitignore, .dockerignore patterns are anchored at the build-context
+# root: `__pycache__/` matches the root directory only and lets `app/__pycache__/`
+# into the image, so every pattern above carries the `**/` prefix (`**/` also
+# matches zero directories, so the root is covered).
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+
+# The image's Python comes from its base image tag, not from a local pin, and the
+# tests run outside the image.
+**/.python-version
+**/tests/
+
+# Local data and secrets must never enter a build context.
+**/uploads/
+**/data/
+**/*.db
+**/*.sqlite3
+**/.env
+**/.env.*
+**/.DS_Store
+
+# Context the build does not read: git's own history, the frontend's installed
+# dependencies (the build stage runs `npm ci` itself) and the frontend's output
+# (the build stage produces it).
+**/.git/
+**/node_modules/
+**/dist/
