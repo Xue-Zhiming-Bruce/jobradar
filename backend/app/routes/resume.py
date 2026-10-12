@@ -21,15 +21,26 @@ client that wants the whole row reads `GET /resume`.
 The body of every answer here is built from the row's metadata -- id, filename,
 media type, upload time, active state -- and never from its contents: the resume
 text is stored, and it reaches no response and no log line.
+
+One route is the exception, and it is the point of the parse: `POST /resume/parse`
+turns the active resume's stored text into its name and the skills it claims,
+stores them as JSON text on the row and answers them. The model call itself is
+`app.matching.resume_fields`'s -- this module owns the JSON in both directions,
+and reaches the parser through one `Depends` seam so no case here needs a key, a
+socket or a model. The fields it answers are user data, like the text they were
+read from: they belong in that one body, and in no log line.
 """
 
+import json
 import logging
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict
 
+from app.matching.resume_fields import LlmResumeParser, ResumeFieldParser, ResumeParseError
+from app.matching.scorer import ScorerConfigurationError
 from app.models import Resume
 from app.services import resume as resume_service
 
@@ -79,6 +90,20 @@ class ResumeActivation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     is_active: Literal[True]
+
+
+class ResumeParsed(BaseModel):
+    """Body of a parse: which resume, the name it states, and the skills it claims.
+
+    The two fields are #26's own -- `name` is `None` and `skills` is `[]` for what
+    the resume does not state -- and they are answered here because a parse is the
+    one place they belong. `ResumeSummary` is deliberately not widened to carry
+    them: the history routes answer five public fields and no user data.
+    """
+
+    id: int
+    name: str | None
+    skills: list[str]
 
 
 def _too_large(size: int, limit: int) -> HTTPException:
@@ -234,3 +259,85 @@ def delete_resume(id: int) -> None:
     """
     if not resume_service.delete_resume(id):
         raise HTTPException(status_code=404, detail=f"There is no resume with id {id}")
+
+
+# The refusals the parse answers with, named in the contract the way the rest of
+# this module names its own: a client reads the status codes it has to handle
+# without having to try them out. The 503 is the one refusal here that names no
+# response body of its own -- its detail is the error's message, which names the
+# missing variable and never its value.
+PARSE_RESPONSES = {
+    404: {"description": "No resume is active, so there is nothing to parse"},
+    502: {"description": "The model call timed out, failed, or answered something unusable"},
+    503: {"description": "The model key is not configured, so the model cannot be asked"},
+}
+
+
+def get_resume_parser() -> ResumeFieldParser:
+    """The one seam between this route and the model: the provider a test replaces.
+
+    Zero arguments, so it carries no configuration, and resolved per request by
+    `Depends`, so the suite installs `app.dependency_overrides[get_resume_parser]`
+    and then no case needs a key, a socket or a model -- the way
+    `app.routes.internal.get_run_starter` is declared and replaced. It returns the
+    real parser, with no client: which endpoint, model and timeout a real call
+    uses is `app.matching.scorer`'s, read per parse.
+    """
+    return LlmResumeParser()
+
+
+@router.post(
+    "/resume/parse",
+    response_model=ResumeParsed,
+    tags=["resume"],
+    summary="Parse the active resume into its name and skills",
+    responses=PARSE_RESPONSES,
+)
+def parse_resume(
+    parser: Annotated[ResumeFieldParser, Depends(get_resume_parser)],
+) -> ResumeParsed:
+    """Parse the active resume once, store its fields on its row, and answer them.
+
+    No path parameter and no request body: the resume this parses is the active
+    one, which is the row every other route in this family already names. A row
+    that already holds its fields is answered from the stored JSON without a
+    request, because a parse is a slow, paid call and the stored text never
+    changes after the upload; a NULL column is the one thing that makes a call,
+    and it is the row's own column, so a resume activated again later parses on
+    its own first call.
+
+    The two JSON directions are this module's: `json.dumps` of the object the
+    parser answered, and the same object read back. The failures are the
+    parser's own types, answered by name: the scorer's configuration error is a
+    `503` -- it means no key is set, which is a deployment's problem and not the
+    request's -- and a parse that produced no fields is a `502`, the model
+    upstream having failed. The log line names the resume's id and the shape of
+    what was stored, never a value: the fields are user data, like the text.
+    """
+    row = resume_service.active_resume()
+    if row is None:
+        raise HTTPException(
+            status_code=404, detail="No active resume: upload one before parsing it"
+        )
+
+    if row.parsed_fields is not None:
+        stored = json.loads(row.parsed_fields)
+        return ResumeParsed(id=row.id, name=stored["name"], skills=stored["skills"])
+
+    try:
+        fields = parser.parse(row.text)
+    except ScorerConfigurationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except ResumeParseError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+    resume_service.record_parsed_fields(
+        row.id, json.dumps({"name": fields.name, "skills": fields.skills})
+    )
+    logger.info(
+        "Parsed resume %s: name %s, %s skills",
+        row.id,
+        "present" if fields.name is not None else "absent",
+        len(fields.skills),
+    )
+    return ResumeParsed(id=row.id, name=fields.name, skills=fields.skills)

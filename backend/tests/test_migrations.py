@@ -49,7 +49,7 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import Column, Dialect, MetaData, Table, Text, event, inspect, select
+from sqlalchemy import Column, Dialect, MetaData, Table, Text, event, inspect, select, text
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
@@ -255,6 +255,30 @@ def _resume_rows_before_the_column(engine: Engine) -> list[tuple[object, ...]]:
                 " FROM resume ORDER BY id"
             )
         ]
+
+
+def _store_a_resume_row_at_the_baseline(engine: Engine, filename: str, *, active: bool) -> None:
+    """Insert one resume row with SQL, the way the app stored them before this revision.
+
+    SQL rather than the model, because the model declares the column this case is
+    about to add and an INSERT naming it fails on the schema that predates it --
+    which is the schema this row is written into.
+    """
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO resume"
+                " (filename, content_type, text, stored_path, uploaded_at, is_active)"
+                " VALUES (:filename, 'text/plain', :text, :stored_path,"
+                " '2026-01-01 00:00:00', :is_active)"
+            ),
+            {
+                "filename": filename,
+                "text": SYNTHETIC_RESUME_TEXT,
+                "stored_path": f"/tmp/{filename}",
+                "is_active": active,
+            },
+        )
 
 
 def _parsed_fields_values(engine: Engine) -> list[object]:
@@ -529,21 +553,8 @@ def test_the_new_column_is_added_to_a_database_that_predates_it_with_no_backfill
     command.upgrade(_config(), BASELINE_REVISION)
     # The rows go in with SQL, the way the app stored them before this revision:
     # the model now declares the column the schema here does not have yet.
-    with database.begin() as connection:
-        connection.exec_driver_sql(
-            "INSERT INTO resume"
-            " (filename, content_type, text, stored_path, uploaded_at, is_active)"
-            " VALUES ('synthetic-resume.txt', 'text/plain', ?, '/tmp/synthetic-resume.txt',"
-            " '2026-01-01 00:00:00', 1)",
-            (SYNTHETIC_RESUME_TEXT,),
-        )
-        connection.exec_driver_sql(
-            "INSERT INTO resume"
-            " (filename, content_type, text, stored_path, uploaded_at, is_active)"
-            " VALUES ('synthetic-resume-2.txt', 'text/plain', ?, '/tmp/synthetic-resume-2.txt',"
-            " '2026-01-01 00:00:00', 0)",
-            (SYNTHETIC_RESUME_TEXT,),
-        )
+    _store_a_resume_row_at_the_baseline(database, "synthetic-resume.txt", active=True)
+    _store_a_resume_row_at_the_baseline(database, "synthetic-resume-2.txt", active=False)
     before = _resume_rows_before_the_column(database)
     assert "parsed_fields" not in _reflected_columns(database, "resume")
 

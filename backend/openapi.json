@@ -171,6 +171,37 @@
         }
       }
     },
+    "/resume/parse": {
+      "post": {
+        "tags": [
+          "resume"
+        ],
+        "summary": "Parse the active resume into its name and skills",
+        "description": "Parse the active resume once, store its fields on its row, and answer them.\n\nNo path parameter and no request body: the resume this parses is the active\none, which is the row every other route in this family already names. A row\nthat already holds its fields is answered from the stored JSON without a\nrequest, because a parse is a slow, paid call and the stored text never\nchanges after the upload; a NULL column is the one thing that makes a call,\nand it is the row's own column, so a resume activated again later parses on\nits own first call.\n\nThe two JSON directions are this module's: `json.dumps` of the object the\nparser answered, and the same object read back. The failures are the\nparser's own types, answered by name: the scorer's configuration error is a\n`503` -- it means no key is set, which is a deployment's problem and not the\nrequest's -- and a parse that produced no fields is a `502`, the model\nupstream having failed. The log line names the resume's id and the shape of\nwhat was stored, never a value: the fields are user data, like the text.",
+        "operationId": "parse_resume_resume_parse_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResumeParsed"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No resume is active, so there is nothing to parse"
+          },
+          "502": {
+            "description": "The model call timed out, failed, or answered something unusable"
+          },
+          "503": {
+            "description": "The model key is not configured, so the model cannot be asked"
+          }
+        }
+      }
+    },
     "/watchlist": {
       "get": {
         "tags": [
@@ -558,6 +589,40 @@
         ],
         "title": "ResumeActivation",
         "description": "Body of an activation: the one value this endpoint accepts, and no other field.\n\n`is_active` is a `Literal` of `True` -- the `MatchVerdict` precedent -- so\nonly \"make this one active\" is expressible and `{\"is_active\": false}` is\nrefused by this model's own validation as `422`. The model forbids extra\nfields as well: deactivation is not in `_docs/plan.md`, and a body carrying\nanything else is a request this route does not understand rather than a\nwrite it performs while ignoring what it was sent."
+      },
+      "ResumeParsed": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "skills": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Skills"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "skills"
+        ],
+        "title": "ResumeParsed",
+        "description": "Body of a parse: which resume, the name it states, and the skills it claims.\n\nThe two fields are #26's own -- `name` is `None` and `skills` is `[]` for what\nthe resume does not state -- and they are answered here because a parse is the\none place they belong. `ResumeSummary` is deliberately not widened to carry\nthem: the history routes answer five public fields and no user data."
       },
       "ResumeSummary": {
         "properties": {

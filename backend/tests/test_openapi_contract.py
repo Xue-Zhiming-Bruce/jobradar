@@ -50,6 +50,7 @@ def test_contract_lists_every_registered_path_in_registration_order() -> None:
         "/healthz",
         "/resume",
         "/resume/{id}",
+        "/resume/parse",
         "/watchlist",
         "/watchlist/{id}",
         "/internal/tick",
