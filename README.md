@@ -124,6 +124,48 @@ here, because 5432 is taken on this machine:
 `compose.yaml` is not a test harness: the container above is the database those
 tests run against, and `docker rm -f jobradar-test-db` throws it away.
 
+### The integration suite: the whole workflow against PostgreSQL
+
+`backend/tests/integration/` holds one suite that drives the real application end
+to end: the real `POST /resume`, the real `POST /watchlist`, the real
+`POST /internal/tick` with its own daemon thread and its run row, the real
+pipeline, prefilter and digest, and the real `GET /matches` -- all of it against a
+real PostgreSQL server. Exactly three things are faked, each at the seam the
+running code reads it from: the Greenhouse fetch, the LLM scorer, and the
+mailer. So **no API key and no SMTP credential are needed**, no request leaves
+the process, and the resume it uploads is synthetic -- written for the tests, in
+the request.
+
+Every test there carries the `integration` marker. It is declared in
+`backend/pyproject.toml`'s `[tool.pytest.ini_options]` (`markers`), and that is
+also where the default run's `addopts = "-m 'not integration'"` lives;
+`backend/tests/integration/conftest.py` marks every item it collects. The default
+`cd backend && uv run pytest` therefore collects this suite and **deselects** it --
+its summary reads `N deselected` -- and the command that runs only it is:
+
+    cd backend && uv run pytest -m integration
+
+A unit test in the default suite (`backend/tests/test_integration_separation.py`)
+fails if the directory holds no test module, if the marker is not declared, or if
+an item collected there does not carry the marker.
+
+That suite needs a real PostgreSQL server, and it **fails rather than skips** when
+`TEST_DATABASE_URL` is unset, empty or unreachable: there is nothing in it to
+skip. The server is the same throwaway container, on port 5433, because 5432 is
+taken on this machine -- and it is *not* the compose stack, which is not a test
+harness:
+
+    docker run --rm -d --name jobradar-test-db -p 5433:5432 \
+      -e POSTGRES_USER=jobradar -e POSTGRES_PASSWORD=jobradar-throwaway \
+      -e POSTGRES_DB=jobradar postgres:17
+    cd backend && TEST_DATABASE_URL=postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:5433/jobradar uv run pytest -m integration
+    docker rm -f jobradar-test-db
+
+The suite drops the tables it created, so the database is left as it was found,
+and every case starts on empty tables. The `TEST_DATABASE_URL` paragraph above is
+the unit suite's rule and stays as it is: there the PostgreSQL parameter skips
+without a server, because SQLite covers the same tests.
+
 ### Local development, without Docker
 
     cd backend && uv run uvicorn app.main:app --reload
