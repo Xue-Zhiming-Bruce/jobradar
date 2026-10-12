@@ -86,9 +86,9 @@ What each piece is, where it sits, and the seam it talks through.
 - **SQLAlchemy over SQLite and Postgres** -- storage, the same models on both
   engines. `backend/app/models.py` is the schema, `backend/app/db.py` turns
   `DATABASE_URL` into an engine and hands out the session scope every writer
-  uses, and the engine matrix in `backend/tests/test_engine_matrix.py` keeps the
-  two engines the covered pair rather than the promised one: SQLite for a clone
-  and the default suite, Postgres for `compose.yaml`, CI and production.
+  uses, and the suite's engine fixture is parametrised over both engines: SQLite
+  needs nothing, and the Postgres parameter runs the same tests whenever
+  `TEST_DATABASE_URL` names a server -- the throwaway one below is that server.
 - **Docker + `compose.yaml`** -- packaging and the local whole-system path. One
   image, built from the repository root because the build needs both halves of
   the repository, and one compose file that brings the image up with its database
@@ -507,3 +507,103 @@ The remaining steps — creating the service, attaching the database, setting th
 variables — need the owner's own Render and Neon accounts and are #16. None of
 them was performed to write this file, and the file therefore states no URL: #46
 adds the deployed-instance evidence once #16 exists.
+
+## Known limitations
+
+Each with what it costs, because a limitation without a consequence is a slogan.
+
+- **Greenhouse is the only source.** LinkedIn and Indeed are excluded on their
+  terms and Workday is not attempted — the reasons are in the next section — and
+  a second adapter is #28. A company without a Greenhouse board cannot be watched
+  at all: not watched badly, not watched.
+- **One user, no accounts and no sharing.** There is no login and nothing scoped
+  to a user: the watchlist, the resume and the matches belong to the instance, so
+  two people cannot use one instance without sharing all three.
+- **No embeddings and no vector store, so a match is one LLM call per posting**,
+  capped for a single run by `SCORER_MAX_POSTINGS` (default 50). Cost and latency
+  grow with the size of the watchlist, and postings past the cap in one run are
+  stored with a not-scored reason rather than scored later.
+- **The scheduled tick is best-effort.** GitHub Actions cron drifts by minutes to
+  hours, can skip a run entirely, and is disabled after 60 days of repository
+  inactivity, so a late or missing digest is expected rather than a fault. That is
+  why the in-app **"Run digest now"** button is the reliable path, and why the
+  demo uses it (`_docs/decisions/2026-10-11-deploy-and-repo.md`).
+- **There is no migration step.** The tables are created by the app's own
+  `init_db()` at startup, so a schema change reaches a brand-new database but not
+  one that already holds data: changing a column on the latter needs #21.
+- **The free tier sleeps.** `_docs/plan.md`'s "Known constraints" records that a
+  Render free instance spins down after 15 minutes idle and takes about a minute
+  to wake, so the first request after a quiet period is slow. That is the free
+  tier's documented behaviour rather than an observation made here — #46 owns the
+  observed numbers.
+
+## Sources deliberately not ingested
+
+**Greenhouse is the one source implemented**: `backend/app/sources/greenhouse.py`
+reads a company's public board JSON by slug, which needs no key and no account.
+Three others were considered and left out, each with its own reason.
+
+- **LinkedIn** — partner-gated, and scraping it breaches its terms.
+- **Indeed** — the same: partner-gated, and scraping it breaches its terms.
+- **Workday and the other enterprise ATS providers** — their feeds are XML and
+  messier in shape, so a second adapter is a follow-up rather than a flag on this
+  one: #28.
+
+## How this repository was built, with AI
+
+An AI agent writes this repository in bounded steps, and the one decision it could
+not settle itself it handed to another model. The files that make both true are
+committed.
+
+### The workflow the repository defines
+
+`AGENTS.md` is what an agent reads first and `_docs/process.md` is the rule book;
+`_docs/team/` holds one prompt per role, written to the template in
+`_docs/team/task-template.md`. Together they say:
+
+1. **Grooming first.** A task is a GitHub issue, and it is groomed before anyone
+   implements it: the PM (`_docs/team/pm.md`) rewrites it against
+   `_docs/team/task-template.md` — goal, acceptance criteria that can be checked
+   by looking at the result, out of scope with a link per moved item, constraints.
+2. **One issue at a time, lowest number first.**
+3. **The engineer implements it.** `_docs/team/software-engineer.md`: implement
+   what the issue describes, do not change the acceptance criteria, write tests
+   for the new behaviour, commit regularly, do not close the issue, and leave a
+   comment saying what was done.
+4. **QA checks it against the issue.** `_docs/team/qa-engineer.md`: a verdict that
+   starts with PASS or FAIL, one line per acceptance criterion, with the test
+   command and its result — and QA changes no code. A single FAIL keeps the issue
+   open.
+5. **The orchestrator closes the issue only after a PASS.**
+
+### Which AI did what
+
+- **The orchestrator session** owns the plan, the delegation, the review fanout
+  and the closing of issues, working from `AGENTS.md` and `_docs/process.md`.
+- **The PM agent** grooms each issue before implementation, under
+  `_docs/team/pm.md`.
+- **The engineer agent** implements one groomed issue at a time and writes its
+  tests, under `_docs/team/software-engineer.md` — the role that wrote this
+  README.
+- **The QA agent** verifies the finished work against the issue's criteria, under
+  `_docs/team/qa-engineer.md`.
+- **Jev**, a separate model (`typesafe/jev-1.13-20260917`, through OpenRouter),
+  took one bounded architecture decision: the deploy target, the repository's
+  visibility, the digest trigger, and whether a single-container poller is sound.
+  What was asked is preserved verbatim in `_docs/decisions/jev-request.json`, the
+  raw verdicts with their confidence scores are in
+  `_docs/decisions/jev-verdicts.json`, and the outcome is in
+  `_docs/decisions/2026-10-11-deploy-and-repo.md`.
+- **The MCP server in `mcp/`** is the same idea pointed at the product instead of
+  at the build: five bounded tools over the app, so an AI client can add a
+  company, list the watchlist, list matches, start a run and read that run.
+
+### Two answers were escalated, not accepted
+
+Jev answers each question with a confidence score, and the verdict file marks the
+answers that came back below the bar as escalations rather than decisions. Two
+were: the digest trigger, and whether the single-container poller is sound. The
+decision record presents both as **priors, not decisions the model made**, and
+records how each was resolved: the in-app "Run digest now" button is the reliable
+trigger with the scheduled workflow as a best-effort convenience, and the
+single-container poller stands, with the run row as the constraint it implies.
