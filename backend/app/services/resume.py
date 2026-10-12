@@ -21,7 +21,10 @@ A resume's text is user data: it is stored, and nothing in this module logs it,
 puts it in an error message or returns it to a client. The readers below name the
 file's media type, never its contents -- `active_resume_text` hands the text to
 its caller and to nobody else, and `resume_rows` hands out rows for the routes to
-render without ever naming the text column.
+render without ever naming the text column. The fields `POST /resume/parse`
+stores are that same kind of value: `active_resume` is a reader for the route
+that parses them, and `record_parsed_fields` is the one writer of the column they
+land in.
 """
 
 import os
@@ -226,6 +229,45 @@ def active_resume_text() -> str | None:
         return session.scalars(
             select(Resume.text).where(Resume.is_active.is_(True))
         ).one_or_none()
+
+
+def active_resume() -> Resume | None:
+    """The one active resume row, text and parsed fields included, or `None` when none is active.
+
+    One `session_scope()` per call -- one unit of work, committed and closed before
+    this returns -- and one row: the partial index `uq_resume_one_active` allows one
+    active row, and no other row and no other column is read. The row is detached
+    before the commit expires it, the way `resume_rows` detaches its own, because
+    `POST /resume/parse` reads its text outside this session.
+
+    The row holds user data, so nothing here logs it, puts it in an error or
+    returns it to a client: this function is a reader, and the row goes to its
+    caller.
+    """
+    with db.session_scope() as session:
+        row = session.scalars(select(Resume).where(Resume.is_active.is_(True))).one_or_none()
+        if row is not None:
+            session.expunge(row)
+        return row
+
+
+def record_parsed_fields(resume_id: int, parsed: str) -> None:
+    """Store the parsed fields' JSON text on the row that id names.
+
+    One `session_scope()` per call, one unit of work, committed before this
+    returns. Only `parsed_fields` is written: the row's text, its file and its
+    active flag are as they were. A row that is no longer there -- deleted while
+    the model was answering -- is nothing to write and not a failure, the way #9's
+    end-of-run write treats a row that is gone.
+
+    The value is user data, like the text beside it: nothing here logs it or
+    returns it to a client.
+    """
+    with db.session_scope() as session:
+        row = session.get(Resume, resume_id)
+        if row is None:
+            return
+        row.parsed_fields = parsed
 
 
 def resume_rows() -> list[Resume]:

@@ -78,6 +78,7 @@ _STRING_LENGTHS = {
     ("resume", "content_type"): 100,
     ("resume", "text"): None,
     ("resume", "stored_path"): 500,
+    ("resume", "parsed_fields"): None,
     ("company", "name"): 255,
     ("company", "slug"): 255,
     ("posting", "external_id"): 255,
@@ -94,6 +95,7 @@ _STRING_LENGTHS = {
 
 _UNBOUNDED_STRING_COLUMNS = {
     ("resume", "text"),
+    ("resume", "parsed_fields"),
     ("posting", "title"),
     ("posting", "url"),
     ("posting", "description"),

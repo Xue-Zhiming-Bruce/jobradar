@@ -103,6 +103,10 @@ class Resume(Base):
     filename: Mapped[str] = mapped_column(String(255))
     content_type: Mapped[str] = mapped_column(String(100))
     text: Mapped[str] = mapped_column(Text)
+    # The `{"name": ..., "skills": [...]}` object #26's parse stored, as JSON text,
+    # and NULL on a row that was never parsed -- which is what makes a parse happen.
+    # #50 reads it; nothing writes it but `POST /resume/parse`.
+    parsed_fields: Mapped[str | None] = mapped_column(Text)
     stored_path: Mapped[str] = mapped_column(String(500))
     uploaded_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

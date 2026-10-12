@@ -1,11 +1,12 @@
 """The migration path, measured against the models on both engines.
 
-`app.db.init_db()` creates the five tables in an empty database; the baseline
-revision in `migrations/versions/` brings a database that already exists to the
-same five tables. Two paths to one schema can drift, so nothing here assumes the
-revision is right: every test runs `alembic upgrade head` -- in-process, through
-`alembic.command.upgrade` -- against the database the shared `engine` fixture in
-`tests/conftest.py` supplies, and then compares the *result* with `app.models`.
+`app.db.init_db()` creates the five tables in an empty database; the revisions in
+`migrations/versions/` bring a database that already exists to the same five
+tables -- the baseline, and then the column #26 added. Two paths to one schema
+can drift, so nothing here assumes a revision is right: every test runs `alembic
+upgrade head` -- in-process, through `alembic.command.upgrade` -- against the
+database the shared `engine` fixture in `tests/conftest.py` supplies, and then
+compares the *result* with `app.models`.
 That fixture is what makes this both engines: SQLite always, PostgreSQL whenever
 `TEST_DATABASE_URL` is set, skipped visibly when it is not. Every database a test
 touches is the fixture's -- a temporary SQLite file, or the server that variable
@@ -24,6 +25,8 @@ What is measured, in the order the guarantees build:
   `tests/test_engine_parity.py` asks them of `init_db()`'s schema;
 - a database `init_db()` already built and filled: `upgrade head` adopts it and a
   second run sends no DDL at all;
+- a database at the baseline, with rows in it: the revision that adds a column
+  adds it, and the rows keep their text and their active flag;
 - the four commands of the layout, each against the fixture's database;
 - drift: the current models produce no diff at `head`, and one appended column in
   a deep copy of `Base.metadata` produces a diff naming that column.
@@ -60,9 +63,14 @@ BACKEND_ROOT = Path(__file__).resolve().parent.parent
 ALEMBIC_INI = BACKEND_ROOT / "alembic.ini"
 REVISIONS_DIR = BACKEND_ROOT / "migrations" / "versions"
 
-# The readable revision id criterion 2 asks for, and the only revision committed.
+# The readable revision ids, in the order they apply, and the files that hold
+# them. The head is the last of the two.
 BASELINE_REVISION = "0001_baseline"
 BASELINE_REVISION_FILE = "0001_baseline_five_tables.py"
+PARSED_FIELDS_REVISION = "0002_parsed_fields"
+PARSED_FIELDS_REVISION_FILE = "0002_add_resume_parsed_fields.py"
+THE_REVISION_FILES = (BASELINE_REVISION_FILE, PARSED_FIELDS_REVISION_FILE)
+HEAD_REVISION = PARSED_FIELDS_REVISION
 
 # Alembic's own bookkeeping table: one row per applied revision. It is not one of
 # the five the models declare, and `alembic current` reads it.
@@ -231,6 +239,33 @@ def _assert_the_engine_named_what_it_refused(exception: IntegrityError, *spellin
     assert any(spelling in message for spelling in spellings), message
 
 
+def _resume_rows_before_the_column(engine: Engine) -> list[tuple[object, ...]]:
+    """The `resume` values a database at the baseline holds, read with SQL.
+
+    Read with SQL rather than through `Resume`, because the model declares the
+    column this test is about to add and a SELECT naming it would fail on the
+    schema that predates it -- which is the schema this reading is evidence
+    about.
+    """
+    with engine.connect() as connection:
+        return [
+            tuple(row)
+            for row in connection.exec_driver_sql(
+                "SELECT id, filename, content_type, text, stored_path, is_active"
+                " FROM resume ORDER BY id"
+            )
+        ]
+
+
+def _parsed_fields_values(engine: Engine) -> list[object]:
+    """The new column's values, read with SQL for the reason above."""
+    with engine.connect() as connection:
+        return [
+            row[0]
+            for row in connection.exec_driver_sql("SELECT parsed_fields FROM resume ORDER BY id")
+        ]
+
+
 def _synthetic_resume(**overrides: object) -> Resume:
     """A resume row whose text is synthetic: the repository holds no real one."""
     fields: dict[str, object] = {
@@ -269,7 +304,7 @@ def test_the_migrated_schema_holds_the_five_tables_and_alembics_own(database: En
     assert set(inspect(database).get_table_names()) == set(THE_FIVE_TABLES) | {
         ALEMBIC_VERSION_TABLE
     }
-    assert _applied_revisions(database) == [BASELINE_REVISION]
+    assert _applied_revisions(database) == [HEAD_REVISION]
 
 
 def test_the_migrated_schema_produces_an_empty_diff_against_the_models(database: Engine) -> None:
@@ -470,12 +505,55 @@ def test_a_database_init_db_built_and_filled_is_adopted_by_upgrade_head(database
 
     current_config = _config()
     command.current(current_config)
-    assert current_config.stdout.getvalue().strip() == f"{BASELINE_REVISION} (head)"
+    assert current_config.stdout.getvalue().strip() == f"{HEAD_REVISION} (head)"
 
     second = _ddl_statements_sent_by(database, lambda: command.upgrade(upgrade_config, "head"))
 
     assert second == []
     assert _written_rows(database) == before
+
+
+def test_the_new_column_is_added_to_a_database_that_predates_it_with_no_backfill(
+    database: Engine,
+) -> None:
+    """#26's column: a database at the baseline gains it, and its rows are as they were.
+
+    The fixture's database is rebuilt at the baseline only -- the schema that
+    existed before this revision -- and two synthetic resume rows go in, one
+    active and one older. `upgrade head` adds the column: the text, the media
+    type, the stored path and the active flag of both rows are what they were,
+    and the new column is NULL on both, which is the state that makes the next
+    parse of a row happen rather than a value somebody wrote.
+    """
+    Base.metadata.drop_all(database)
+    command.upgrade(_config(), BASELINE_REVISION)
+    # The rows go in with SQL, the way the app stored them before this revision:
+    # the model now declares the column the schema here does not have yet.
+    with database.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO resume"
+            " (filename, content_type, text, stored_path, uploaded_at, is_active)"
+            " VALUES ('synthetic-resume.txt', 'text/plain', ?, '/tmp/synthetic-resume.txt',"
+            " '2026-01-01 00:00:00', 1)",
+            (SYNTHETIC_RESUME_TEXT,),
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO resume"
+            " (filename, content_type, text, stored_path, uploaded_at, is_active)"
+            " VALUES ('synthetic-resume-2.txt', 'text/plain', ?, '/tmp/synthetic-resume-2.txt',"
+            " '2026-01-01 00:00:00', 0)",
+            (SYNTHETIC_RESUME_TEXT,),
+        )
+    before = _resume_rows_before_the_column(database)
+    assert "parsed_fields" not in _reflected_columns(database, "resume")
+
+    command.upgrade(_config(), "head")
+
+    assert _reflected_columns(database, "resume")["parsed_fields"] == ("TEXT", True)
+    assert _resume_rows_before_the_column(database) == before
+    assert [bool(row[5]) for row in before] == [True, False]
+    assert [row[3] for row in before] == [SYNTHETIC_RESUME_TEXT] * 2
+    assert _parsed_fields_values(database) == [None, None]
 
 
 def test_the_four_documented_commands_do_what_they_say(database: Engine, tmp_path: Path) -> None:
@@ -492,9 +570,10 @@ def test_the_four_documented_commands_do_what_they_say(database: Engine, tmp_pat
 
     scratch = tmp_path / "versions"
     scratch.mkdir()
-    (scratch / BASELINE_REVISION_FILE).write_text(
-        (REVISIONS_DIR / BASELINE_REVISION_FILE).read_text(encoding="utf-8"), encoding="utf-8"
-    )
+    for name in THE_REVISION_FILES:
+        (scratch / name).write_text(
+            (REVISIONS_DIR / name).read_text(encoding="utf-8"), encoding="utf-8"
+        )
     config.set_main_option("version_locations", str(scratch))
 
     command.upgrade(config, "head")
@@ -502,16 +581,16 @@ def test_the_four_documented_commands_do_what_they_say(database: Engine, tmp_pat
     assert set(inspect(database).get_table_names()) == set(THE_FIVE_TABLES) | {
         ALEMBIC_VERSION_TABLE
     }
-    assert _applied_revisions(database) == [BASELINE_REVISION]
+    assert _applied_revisions(database) == [HEAD_REVISION]
 
     current_config = _config()
     command.current(current_config)
-    assert current_config.stdout.getvalue().strip() == f"{BASELINE_REVISION} (head)"
+    assert current_config.stdout.getvalue().strip() == f"{HEAD_REVISION} (head)"
 
     # Against a database already at `head`: exit 0, and no revision written.
     assert command.revision(config, message="no change here", autogenerate=True) == []
-    assert sorted(path.name for path in scratch.glob("*.py")) == [BASELINE_REVISION_FILE]
-    assert sorted(path.name for path in REVISIONS_DIR.glob("*.py")) == [BASELINE_REVISION_FILE]
+    assert sorted(path.name for path in scratch.glob("*.py")) == sorted(THE_REVISION_FILES)
+    assert sorted(path.name for path in REVISIONS_DIR.glob("*.py")) == sorted(THE_REVISION_FILES)
 
     command.downgrade(config, "base")
 
