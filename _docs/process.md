@@ -12,6 +12,7 @@
 - Every acceptance criterion is implemented and verified by QA
 - Tests cover the new behaviour and the whole suite passes
 - The work is committed
+- A change to the routes or what they send and receive regenerates the committed contract in the same commit: `cd backend && uv run python -m app.export_openapi`. `cd backend && uv run pytest` compares `backend/openapi.json` with the document the app generates now (`backend/tests/test_openapi_contract.py`), and `ci.yml`'s `contract` job fails on a diff, so a stale contract is a red build and not a reviewer's catch.
 
 ## Local commands
 
