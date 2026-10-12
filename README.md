@@ -1,8 +1,114 @@
 # JobRadar
 
-A daily digest of new job postings at companies you actually want to work for,
-matched against your resume, with a plain-English reason for each match. See
-`_docs/plan.md` for the full plan.
+**The problem.** Finding the openings worth applying to means either checking
+many company career pages by hand, or drowning in a job-board firehose where most
+postings are irrelevant. Neither tells you *why* a role fits, so the same postings
+get re-read.
+
+**The user.** One person: the owner. No accounts, no login, no multi-tenancy.
+
+**What it does.** A daily digest of new postings at companies on a watchlist,
+matched against the uploaded resume, with a plain-English reason and the gaps per
+match. A company is added by name and Greenhouse slug; once a day -- or whenever
+the owner presses the in-app **"Run digest now"** button -- the app fetches each
+company's public job board, normalises the postings, and scores the new ones
+against the resume: a score 0-100, why it fits and what is missing. New matches
+above the cutoff are grouped into one email; with nothing above it, no email is
+sent and the run says so. The UI lists the watchlist and the matches with their
+score, reasoning and gaps, and a match can be marked saved or dismissed.
+
+The full plan -- the behaviour spec, the non-goals and the constraints -- is
+`_docs/plan.md`.
+
+## Architecture
+
+Six pieces. The rest of this file is the detail behind them.
+
+1. **One container and no second service.** `backend/Dockerfile` builds a single
+   image holding the API and the frontend's build; `compose.yaml` runs that image
+   and the Postgres it writes to, and nothing else. There is no worker process to
+   deploy, start or supervise, because the poller is an endpoint (3).
+2. **The frontend's build is served by the backend, as static files.** The
+   Dockerfile's first stage runs the frontend's own `npm ci && npm run build` and
+   copies the result into the runtime image at `app/static`; `app/main.py` mounts
+   that directory at `/`, after every API router, so `/` is the UI and the API
+   keeps its own paths. One origin, one port, one URL: no CORS and no proxy. When
+   no build is present -- a clone, the suite, `uv run uvicorn` without the image
+   -- no mount is registered and the app is the API alone.
+3. **The poller is `POST /internal/tick`, an endpoint rather than a separate
+   worker.** It carries the shared secret in `X-Tick-Secret`, compared against
+   `TICK_SECRET`; with that variable unset every tick is `401`, and a run already
+   in progress is `409`. A process-local lock is the whole concurrency rule,
+   because the poller lives in the one process the one container runs.
+4. **SQLAlchemy over SQLite locally and Postgres in production.** The models in
+   `backend/app/models.py` are the only schema and `backend/app/db.py` builds the
+   engine from `DATABASE_URL`, where unset means the local SQLite file
+   `backend/data/jobradar.db`. The same models, constraints and tests run on both
+   engines, so the two places they genuinely differ -- the SQLite pragmas and the
+   partial unique index over active resumes -- carry a clause per dialect rather
+   than a branch per caller. `compose.yaml` points the container at its own
+   Postgres; production points the same variable at Neon.
+5. **The `MatchScorer` seam.** `backend/app/matching/prefilter.py` decides first,
+   with no network and no model: title, seniority, location and must-have terms
+   read from the `PREFILTER_*` variables, and a posting it rejects is stored and
+   never asked about. Survivors go through `MatchScorer.score(posting,
+   resume_text)` -- one method, answering `MatchResult(score, reason, gaps)` --
+   which `LlmScorer` implements as one model call per posting, bounded by
+   `SCORER_MAX_POSTINGS`. A call the model never answered comes back as a
+   not-scored result instead of an exception, so it reaches the run row rather
+   than a traceback. The tests substitute a `FakeScorer` through
+   `app.dependency_overrides`, so the suite needs no API key and no network.
+6. **The run row.** `POST /internal/tick` writes a `run` row in `running` and
+   answers `202` at once; the work continues off the request thread, writing
+   `postings_seen` and `matches_created` as it earns them, and its end writes
+   `succeeded` or `failed` with the failure's own message. The UI reads that row
+   through `GET /runs/{id}` for progress. The reason for the shape is a
+   constraint, not a preference: a tick that scores many postings must not
+   outlive an HTTP timeout (`_docs/decisions/2026-10-11-deploy-and-repo.md`).
+
+## Technologies
+
+What each piece is, where it sits, and the seam it talks through.
+
+- **FastAPI** -- the API, and the server of the frontend's build. One app object
+  in `backend/app/main.py`, one router module per resource in
+  `backend/app/routes/`, `uvicorn` as the server. The app object carries the
+  startup that creates the tables, the validation handler that keeps an upload's
+  contents out of an error body, and the UI mount, so the static files are served
+  by the same server as the API rather than by a second one.
+- **React + TypeScript + Vite** -- the UI, in `frontend/`. Screens in
+  `frontend/src/screens/`, and every backend call funnelled through one module,
+  `frontend/src/api/client.ts`; a test
+  (`frontend/src/api/noStrayFetch.test.ts`) fails if any other file under `src/`
+  reaches the network, which is what keeps the one-origin design honest. Vite
+  builds it (`npm run build`), and the tests run under `vitest` against the mock
+  backend in `frontend/src/mocks/`, so they need no API and no key.
+- **SQLAlchemy over SQLite and Postgres** -- storage, the same models on both
+  engines. `backend/app/models.py` is the schema, `backend/app/db.py` turns
+  `DATABASE_URL` into an engine and hands out the session scope every writer
+  uses, and the engine matrix in `backend/tests/test_engine_matrix.py` keeps the
+  two engines the covered pair rather than the promised one: SQLite for a clone
+  and the default suite, Postgres for `compose.yaml`, CI and production.
+- **Docker + `compose.yaml`** -- packaging and the local whole-system path. One
+  image, built from the repository root because the build needs both halves of
+  the repository, and one compose file that brings the image up with its database
+  and its named volumes, so `docker compose up --build --wait` from the root is
+  the whole of the local system.
+- **GitHub Actions** -- CI, in `.github/workflows/`. `ci.yml` runs four jobs on
+  every push and pull request -- `backend`, `frontend`, `integration` and
+  `contract` -- and each file's leading comment names the local command that
+  stands in for every job it runs, so the pipeline is reproducible off GitHub.
+  `tick.yml` is the scheduled convenience: one `POST /internal/tick` a day,
+  deliberately red until #16 supplies its two inputs.
+- **The committed contract, `backend/openapi.json`** -- what the API answers,
+  generated from the FastAPI app rather than written by hand. `uv run pytest`
+  compares the file with the document the app generates now and fails when the
+  two differ, and `ci.yml`'s `contract` job regenerates it and fails on a diff,
+  so a route change that was not exported is caught rather than merged.
+- **The MCP server in `mcp/`** -- the app reachable by an MCP client. A separate
+  uv project, `jobradar-mcp`, that drives this app over HTTP through five bounded
+  tools, in a process of its own, over stdio. Separate on purpose: the `mcp`
+  dependency never enters `backend/`'s tree and never enters the deployed image.
 
 ## Run the whole system
 
