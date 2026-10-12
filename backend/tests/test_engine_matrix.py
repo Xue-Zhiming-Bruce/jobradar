@@ -123,8 +123,14 @@ def test_an_unreachable_test_database_fails_instead_of_skipping() -> None:
 
     assert completed.returncode != 0
     assert _SKIPPED not in completed.stdout  # a dead server is not "not configured"
+    # The short summary appends the error's reason once the line fits the
+    # terminal, and a CI runner's terminal is wide enough for it: the ids are what
+    # this compares, so the reason is cut off. The id is never wrapped, at any
+    # width.
     errors = [
-        line.split(" ", 1)[1] for line in completed.stdout.splitlines() if line.startswith("ERROR ")
+        line.split(" ", 1)[1].split(" - ", 1)[0]
+        for line in completed.stdout.splitlines()
+        if line.startswith("ERROR ")
     ]
     assert errors == postgres_cases
     assert f"{len(collected) - len(postgres_cases)} passed" in completed.stdout
