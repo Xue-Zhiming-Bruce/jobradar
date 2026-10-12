@@ -1,8 +1,8 @@
-# CI: this repository's own runners run the three suites and the stale-contract
-# check. There is no deploy step -- deploying a green `main` is #45, which needs
-# #16's Render service and Neon database. Nothing in this file reaches a
-# credential beyond the throwaway Postgres one below, which the README already
-# publishes for an ephemeral container.
+# CI: this repository's own runners run the three suites, the committed-data
+# guard and the stale-contract check. There is no deploy step -- deploying a
+# green `main` is #45, which needs #16's Render service and Neon database. Nothing
+# in this file reaches a credential beyond the throwaway Postgres one below, which
+# the README already publishes for an ephemeral container.
 #
 # What each job runs, and the local command that stands in for it:
 #
@@ -26,6 +26,15 @@
 #                git diff --exit-code -- backend/openapi.json
 #                a stale or hand-edited contract rewrites the file, so the diff
 #                is non-empty and this fails with the diff printed
+#
+# The `backend` job's first step is the committed-data guard (#19), on its own so
+# its verdict is readable without the suite's output, and again inside the suite:
+#
+#   cd backend && uv run pytest tests/test_committed_data_guard.py
+#
+# A secret, resume or database file in the git index makes that step red before
+# the suite starts. It needs no credential and prints no matched value: the
+# failure names the file and the kind.
 #
 # That the YAML itself is valid -- empty output and exit 0 on both files:
 #
@@ -58,6 +67,9 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync
+        working-directory: backend
+      - name: Fail on a committed secret, resume or database file
+        run: uv run pytest tests/test_committed_data_guard.py
         working-directory: backend
       - run: uv run pytest
         working-directory: backend

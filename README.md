@@ -157,6 +157,20 @@ gitignored, and in a deployment they arrive as the platform's environment
 variables (Render) and GitHub repository secrets. The names are the
 Configuration table below; no value ever appears in this file.
 
+The rule is enforced, not remembered: `backend/tests/test_committed_data_guard.py`
+runs in the default suite — so `uv run pytest` fails locally on it — and as one
+step of `ci.yml`'s `backend` job on every push and pull request. It fails on a
+tracked `.env` file, a `*.db` or `*.sqlite3` file, any path under `uploads/` or
+`data/`, a resume file (`.pdf`, `.docx`, `.doc`, `.rtf`, `.odt`), and a credential
+shape: a PEM private key, an AWS access key id, an `sk-`-prefixed API key, a
+GitHub token, and a PostgreSQL URL carrying a password — plus a non-empty value
+assigned to a `*_API_KEY`, `*_SECRET`, `*_PASSWORD`, `*_TOKEN` or
+`*_ACCESS_KEY_ID` name. It reads tracked content only, from the git index rather
+than the working tree, so a gitignored local `.env`, the local database and
+`~/.jobradar/uploads` are not violations; the seven throwaway values this file
+and `compose.yaml` publish are allowed as exact literals; and it names the file
+and the kind without ever printing the matched text.
+
 ### Configuration
 
 `compose.yaml` passes every variable the app reads. Unset or empty means:
@@ -324,7 +338,9 @@ names the local command that stands in for every job it runs, so the pipeline ca
 be reproduced without GitHub Actions.
 
 - `ci.yml` runs on every push and every pull request, in four jobs: `backend`
-  (`uv sync && uv run pytest`), `frontend` (`npm ci && npm run build && npm test`),
+  (`uv sync && uv run pytest`, with the step `Fail on a committed secret, resume
+  or database file` running `uv run pytest tests/test_committed_data_guard.py`
+  before the suite), `frontend` (`npm ci && npm run build && npm test`),
   `integration` (`uv run pytest -m integration` against a `postgres:17` service
   container holding the same throwaway credentials as the local server) and
   `contract` (regenerate `backend/openapi.json`, then fail on a diff). It has no
