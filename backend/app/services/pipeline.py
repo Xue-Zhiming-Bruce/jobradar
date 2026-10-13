@@ -75,10 +75,14 @@ that wants no pacing says so. The waits `fetch_body` itself makes on a retry are
 Six things are deliberately not done here:
 
 - a posting that was already stored is offered to neither the prefilter nor the
-  scorer: only `created_ids` are matched. A reopened posting already has the one
-  `match` row `match.posting_id` allows -- possibly a `state` the owner saved, and
-  a `notified_at` a digest already set -- so re-offering it would rewrite a row
-  the owner acted on. The round trip through `closed_at` stays #6's business.
+  scorer by *this* walk: only `created_ids` are matched. A reopened posting already
+  has the one `match` row `match.posting_id` allows -- possibly a `state` the owner
+  saved, and a `notified_at` a digest already set -- so re-offering it would rewrite
+  a row the owner acted on. The round trip through `closed_at` stays #6's business.
+  Re-deciding a stored posting deliberately is the other half of #64, and it is
+  `rematch_stored_postings` below: a path of its own, entered by its own endpoint,
+  which decides *which* rows may be offered again -- the open ones the owner has not
+  resolved and no digest has emailed -- rather than widening this walk.
 - the resume is read once, before the first board is called, and a run with no
   active resume fails without a single request: its text and the parsed skills the
   must-have rule reads (`active_resume_text` and `active_resume_skills`, the second
@@ -118,12 +122,12 @@ import os
 import time
 from collections.abc import Callable, Mapping
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from app import db
 from app.matching.prefilter import prefilter, record_rejection
-from app.matching.scorer import MatchScorer, record_score
-from app.models import Company, Posting, Run, RunCompany
+from app.matching.scorer import MatchScorer, max_postings, record_score
+from app.models import Company, Match, Posting, Run, RunCompany
 from app.services import resume
 from app.services.ingest import ingest_postings
 from app.sources.base import (
@@ -272,6 +276,97 @@ def run_pipeline(
             _add_counts(run_id, matches_created=1)
 
 
+def rematch_stored_postings(run_id: int, *, scorer: MatchScorer) -> None:
+    """Re-decide the stored postings the owner has not resolved, under the configuration now.
+
+    The work `POST /internal/rematch` hands over, beside `run_pipeline` and the
+    other half of #64: where the tick decides only the postings its board just
+    created, this decides the ones an earlier run stored -- the resume the rules
+    read, or the prefilter configuration the process holds, changed after that run.
+    It takes
+    no `sources` and no `sleep`: no adapter is constructed and none is called, no
+    `posting` column moves (`closed_at` included) and no `company.etag` /
+    `last_modified` moves, so `postings_seen` stays 0 and the run's own
+    `run_company` rows are the walk's -- this path writes none, `_recorded_failure`
+    finds none, and the run ends `succeeded`. No digest runs here either: the next
+    tick emails what the re-match produced, through the digest's own
+    `notified_at IS NULL` selection.
+
+    The candidates are every open posting whose `match` row is missing or the owner
+    has neither acted on nor been told about (`state = 'new'` and
+    `notified_at IS NULL`), oldest `posting.id` first, read in one statement by
+    `_postings_to_rematch`. Each is offered to the prefilter first -- a rejection is
+    written through `record_rejection`, a passer through `record_score` -- the
+    tick's own writers in the tick's own order, so a stored rejection can flip to a
+    score and a stale score can be rewritten. The active resume's text and parsed
+    skills are read once each, before the first decision, and no active resume
+    raises the module's own `NO_ACTIVE_RESUME` before any row is touched.
+
+    One press decides at most the run's own `max_postings()` candidates -- the
+    reader `LlmScorer.score` uses for its own cap -- read once before the first
+    decision, and the candidates past the cap keep the verdicts they have. That is
+    the one thing this path does that the tick does not, and the reason it must:
+    handing a capped scorer a passer would replace a stored score with its own
+    `NOT_SCORED_PREFIX` refusal, which is not a re-decision. What the cap left is
+    written on the run's row by `_record_not_rematched`, so a truncated pass says
+    so rather than looking complete. `matches_created` is counted the way the tick
+    counts it, one per `record_score` write.
+
+    Every write updates the row `match.posting_id` already keys -- both writers
+    look the row up rather than inserting -- so a second run touches the same rows,
+    and the candidate rule (which reads only `posting.closed_at`, `match.state` and
+    `match.notified_at`, none of them written here) yields the same list: the run is
+    idempotent, and no `match` or `posting` row is inserted or deleted.
+    """
+    resume_text = resume.active_resume_text()
+    if resume_text is None or not resume_text.strip():
+        raise RuntimeError(NO_ACTIVE_RESUME)
+    resume_must_haves = tuple(resume.active_resume_skills())
+
+    limit = max_postings()
+    candidates = _postings_to_rematch()
+    decided = candidates[:limit] if limit > 0 else []
+    for posting_id, posting in decided:
+        decision = prefilter(posting, resume_must_haves=resume_must_haves)
+        if not decision.passed:
+            record_rejection(posting_id, decision)
+            continue
+        record_score(posting_id, scorer.score(posting, resume_text))
+        _add_counts(run_id, matches_created=1)
+    # The count is written on every re-match, a `0` included: a pass that decided
+    # every candidate is an answer, not a missing one (#56's `0` reading does not
+    # exist, because that walk always stops for another reason).
+    _record_not_rematched(run_id, len(candidates) - len(decided))
+
+
+def _postings_to_rematch() -> list[tuple[int, SourcePosting]]:
+    """Every open posting the owner has not resolved, oldest `posting.id` first.
+
+    One statement: the postings with no `closed_at`, left-joined to the one `match`
+    row `match.posting_id` allows -- that key is unique, so the join cannot
+    duplicate a posting -- and kept only when that row is missing or the owner has
+    neither acted on nor been told about it. The two `match` columns this reads,
+    `state` and `notified_at`, are written by no line of this path, so the list is
+    the same on a second run. Each row is read back as a `SourcePosting` while the
+    session is open, because a row handed out of `db.session_scope()` is expired by
+    its commit.
+    """
+    with db.session_scope() as session:
+        rows = session.scalars(
+            select(Posting)
+            .outerjoin(Match, Match.posting_id == Posting.id)
+            .where(
+                Posting.closed_at.is_(None),
+                or_(
+                    Match.id.is_(None),
+                    (Match.state == "new") & Match.notified_at.is_(None),
+                ),
+            )
+            .order_by(Posting.id)
+        )
+        return [(row.id, _source_posting(row)) for row in rows]
+
+
 def _active_companies() -> list[tuple[int, str, str, str | None, str | None]]:
     """Every active company's `id`, stored `slug`, `source` and stored validator.
 
@@ -416,6 +511,24 @@ def _record_not_fetched(run_id: int, count: int) -> None:
         if run is None:
             return
         run.companies_not_fetched = count
+
+
+def _record_not_rematched(run_id: int, count: int) -> None:
+    """Write how many eligible postings this re-match's model cap left for a later one.
+
+    Written by `rematch_stored_postings`, the one place that knows the cap stopped
+    the offers; #9's `_end_run` keeps writing the status, the end and the error.
+    Written on every re-match, a `0` included -- a pass that decided every candidate
+    is a real answer and not a missing one -- and it is one `db.session_scope()`,
+    the way `_record_not_fetched` writes a step of its own. A row that is no longer
+    there is nothing to write and not a failure. A tick never calls this, so a run
+    that did not re-match keeps the column's NULL.
+    """
+    with db.session_scope() as session:
+        run = session.get(Run, run_id)
+        if run is None:
+            return
+        run.postings_not_rematched = count
 
 
 def _add_counts(run_id: int, *, postings_seen: int = 0, matches_created: int = 0) -> None:
