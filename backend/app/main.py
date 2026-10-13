@@ -23,6 +23,12 @@ those hashes and has none itself, so caching it would serve a page pointing at a
 build that is no longer there; it is revalidated instead. Without this, the
 `cache-control` was absent on both and the browser made a conditional request for
 every hashed asset on every load.
+
+`#43` serves the hosted MCP endpoint at `/mcp` (with or without its trailing
+slash), from `app.mcp`: the same seven `mcp/` tools over streamable HTTP, on this
+origin and behind the bearer guard. Its routes are registered after the API
+routers and before the UI mount, and its transport is started in the lifespan
+below.
 """
 
 import os
@@ -35,8 +41,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.routing import Route
 from starlette.types import Scope
 
+from app import mcp
 from app.db import init_db
 from app.routes.internal import router as internal_router
 from app.routes.matches import router as matches_router
@@ -89,20 +97,28 @@ class Health(BaseModel):
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Create the missing tables, finish the runs a dead process left behind, and serve.
+    """Create the missing tables, finish stranded runs, start the MCP endpoint, and serve.
 
     The reap comes after `init_db()`, because the table it writes has to exist,
     and before the yield, because it is what makes "no `run` row reads `running`"
     true of every request this process will answer: a tick's guard is the
     process's own, so a `running` row found here is a row no process is running.
-    One reap per process start, and no other startup work.
+    The hosted MCP endpoint (#43) starts its transport here too, because a
+    mounted ASGI app's own lifespan is not entered by Starlette; one reap per
+    process start, and no other startup work.
     """
     init_db()
     reap_stale_runs()
-    yield
+    async with mcp.endpoint.lifespan():
+        yield
 
 
 app = FastAPI(title=API_TITLE, version=API_VERSION, lifespan=lifespan)
+
+# The one guard the hosted MCP endpoint has (#43): the bearer token is read per
+# request and an unset one refuses every request, so the endpoint is off unless an
+# operator configures it.
+app.add_middleware(mcp.BearerAuthMiddleware)
 
 
 @app.exception_handler(RequestValidationError)
@@ -132,6 +148,15 @@ app.include_router(watchlist_router)
 app.include_router(internal_router)
 app.include_router(runs_router)
 app.include_router(matches_router)
+
+# The hosted MCP endpoint (#43): the `mcp/` tools over streamable HTTP, on this
+# origin and behind the bearer guard, so one container serves the API, the UI and
+# MCP. Registered as routes for the path with and without its trailing slash: a
+# `Mount` matches only the slashed form, and the UI's mount at `/` -- registered
+# last -- would otherwise swallow the bare path instead of letting Starlette
+# redirect it. Both spellings reach the transport at the same path.
+for path in (mcp.MCP_PATH, mcp.MCP_PATH + "/"):
+    app.routes.append(Route(path, endpoint=mcp.endpoint))
 
 # Last, after every `include_router` above: the API's own paths are matched
 # first, and only a path none of them claims reaches the built UI.
