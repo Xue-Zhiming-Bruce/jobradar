@@ -1,18 +1,19 @@
 """The work one digest run does: the walk, the fetch, the store, the gate, the score, the counts.
 
-`run_pipeline(run_id, *, source, scorer)` is what #9's `get_pipeline()` provider
+`run_pipeline(run_id, *, sources, scorer)` is what #9's `get_pipeline()` provider
 returns, and the run row the id names already exists in `running`: the run's
 lifecycle, the concurrency guard and the thread are #9's, and this module touches
 none of them. It writes no `status`, no `finished_at` and no `error` -- a run that
 fails leaves the row as it found it and #9's `_run` records the failure, the
 message included -- and it opens no socket, sends no email and reads no
-configuration of its own: the source and the scorer arrive as arguments.
+configuration of its own: the sources and the scorer arrive as arguments.
 
 One run does this, in this order, for every company whose `is_active` is true, in
 ascending `company.id` order:
 
-- `source(company.slug)`, once per company, with the slug the row stores -- never
-  a value rebuilt from the company's name;
+- `sources[company.source](company.slug)`, once per company, through the adapter
+  the row names and with the slug the row stores -- never a value rebuilt from
+  the company's name and never another company's adapter;
 - `ingest.ingest_postings(company_id, postings)` for the list that board
   returned, so every `posting` row -- the insert, the update in place, the close
   and the reopen -- is #6's, and this module writes no `posting` column;
@@ -46,15 +47,14 @@ Three things are deliberately not done here:
   row and no message.
 - a board that fails fails the run. The first `SourceError` escaping a company's
   fetch aborts the walk, naming that company's slug -- and never the board's
-  response body, which `app.sources.greenhouse` already keeps out of its own
-  messages. The postings and matches the earlier companies earned stay written
-  and the counts keep them, so a failed run costs a retry. Skipping the company
-  or keeping going would be a silent miss, and a per-company column is the
-  migration path #21 owns. A second source, retries, backoff and an empty-board
-  guard are #28's.
+  response body, which the adapters already keep out of their own messages. The
+  postings and matches the earlier companies earned stay written and the counts
+  keep them, so a failed run costs a retry. Skipping the company or keeping going
+  would be a silent miss, and a per-company column is the migration path #21
+  owns. Retries, backoff and an empty-board guard are #54's.
 """
 
-from collections.abc import Callable
+from collections.abc import Mapping
 
 from sqlalchemy import select
 
@@ -64,7 +64,7 @@ from app.matching.scorer import MatchScorer, record_score
 from app.models import Company, Posting, Run
 from app.services import resume
 from app.services.ingest import ingest_postings
-from app.sources.greenhouse import SourceError, SourcePosting
+from app.sources.base import Source, SourceError, SourcePosting
 
 # The one failure this module raises of its own, and the message a run row keeps:
 # a run with nothing to score against would otherwise fetch and store postings it
@@ -75,23 +75,23 @@ NO_ACTIVE_RESUME = "No active resume: upload one before a run can score postings
 def run_pipeline(
     run_id: int,
     *,
-    source: Callable[[str], list[SourcePosting]],
+    sources: Mapping[str, Source],
     scorer: MatchScorer,
 ) -> None:
     """Walk the watchlist once for the run `run_id` names, and count what it did.
 
-    Both collaborators are arguments -- the source is the callable a board adapter
-    exports and the scorer is one per run, the way its own cap requires -- so this
-    module reaches no socket, knows no payload shape and reads no configuration.
-    Anything either collaborator raises escapes this function the way it was
-    raised: #9's `_run` is what turns it into the run row's failure.
+    Both collaborators are arguments -- `sources` maps a stored source name to a
+    board adapter and the scorer is one per run, the way its own cap requires --
+    so this module reaches no socket, knows no payload shape and reads no
+    configuration. Anything either collaborator raises escapes this function the
+    way it was raised: #9's `_run` is what turns it into the run row's failure.
     """
     resume_text = resume.active_resume_text()
     if resume_text is None or not resume_text.strip():
         raise RuntimeError(NO_ACTIVE_RESUME)
 
-    for company_id, slug in _active_companies():
-        postings = _fetched(source, slug)
+    for company_id, slug, source in _active_companies():
+        postings = _fetched(sources[source], slug)
         _add_counts(run_id, postings_seen=len(postings))
         created_ids = ingest_postings(company_id, postings).created_ids
         for posting_id, posting in _stored_postings(created_ids):
@@ -103,24 +103,24 @@ def run_pipeline(
             _add_counts(run_id, matches_created=1)
 
 
-def _active_companies() -> list[tuple[int, str]]:
-    """Every active company's `id` and stored `slug`, in ascending `id` order.
+def _active_companies() -> list[tuple[int, str, str]]:
+    """Every active company's `id`, stored `slug` and stored `source`, in ascending `id` order.
 
-    Both values are read while the session is open, because a row handed out of
-    `db.session_scope()` is expired by its commit. An inactive company is simply
-    not in this list, so the source is never asked about a board this app has
-    stopped watching.
+    All three values are read while the session is open, because a row handed out
+    of `db.session_scope()` is expired by its commit. An inactive company is
+    simply not in this list, so the source is never asked about a board this app
+    has stopped watching.
     """
     with db.session_scope() as session:
         return [
-            (row.id, row.slug)
+            (row.id, row.slug, row.source)
             for row in session.scalars(
                 select(Company).where(Company.is_active.is_(True)).order_by(Company.id)
             )
         ]
 
 
-def _fetched(source: Callable[[str], list[SourcePosting]], slug: str) -> list[SourcePosting]:
+def _fetched(source: Source, slug: str) -> list[SourcePosting]:
     """What that board returned, or a `SourceError` naming the company's slug.
 
     The source's own message is kept -- an adapter's failure message carries a

@@ -38,7 +38,7 @@ from app.main import app
 from app.models import Run
 from app.routes import internal
 from app.routes.internal import TICK_SECRET_HEADER, get_pipeline, get_run_starter
-from app.sources.greenhouse import SourceError
+from app.sources.base import SourceError
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 APP_ROOT = BACKEND_ROOT / "app"

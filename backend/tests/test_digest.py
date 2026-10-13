@@ -61,7 +61,7 @@ from app.services.digest import (
     send_digest,
 )
 from app.services.pipeline import run_pipeline
-from app.sources.greenhouse import SourceError, SourcePosting
+from app.sources.base import SourceError, SourcePosting
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 APP_ROOT = BACKEND_ROOT / "app"
@@ -943,7 +943,7 @@ def test_the_resume_marker_reaches_no_subject_and_no_body_through_a_tick(
     monkeypatch.setattr(
         internal,
         "run_pipeline",
-        lambda run_id, **_: run_pipeline(run_id, source=source, scorer=scorer),
+        lambda run_id, **_: run_pipeline(run_id, sources={"greenhouse": source}, scorer=scorer),
     )
 
     response = _tick(client)

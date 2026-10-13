@@ -67,7 +67,7 @@ from app.models import Run
 from app.routes.runs import RunSummary, run_summary
 from app.services.digest import Mailer, SmtpMailer, send_digest
 from app.services.pipeline import run_pipeline
-from app.sources.greenhouse import fetch
+from app.sources import SOURCES
 
 logger = logging.getLogger(__name__)
 
@@ -145,9 +145,10 @@ def get_pipeline(mailer: Mailer = Depends(get_mailer)) -> Pipeline:
     """The second seam: the run's work, a callable taking the run's `id`.
 
     It returns the real walk over the watchlist (#34) followed by the digest
-    (#10), wired here and in no other module: `greenhouse.fetch` as the source, a
-    fresh `LlmScorer` per run, because a scorer instance counts the postings it
-    was offered and that count is the run's cap, and the mailer its own provider
+    (#10), wired here and in no other module: `app.sources.SOURCES`, the mapping
+    from a stored source name to that board's adapter, as the sources, a fresh
+    `LlmScorer` per run, because a scorer instance counts the postings it was
+    offered and that count is the run's cap, and the mailer its own provider
     hands it. `Depends` resolves this provider on every request, so a later tick
     gets a scorer with a cap of its own.
 
@@ -159,7 +160,7 @@ def get_pipeline(mailer: Mailer = Depends(get_mailer)) -> Pipeline:
 
     def pipeline(run_id: int) -> None:
         """One run's work, in the shape the starter and the row lifecycle take."""
-        run_pipeline(run_id, source=fetch, scorer=scorer)
+        run_pipeline(run_id, sources=SOURCES, scorer=scorer)
         send_digest(mailer)
 
     return pipeline

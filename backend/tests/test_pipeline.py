@@ -62,7 +62,7 @@ from app.services import pipeline as pipeline_module
 from app.services import resume
 from app.services.ingest import IngestResult
 from app.services.pipeline import NO_ACTIVE_RESUME, run_pipeline
-from app.sources.greenhouse import (
+from app.sources.base import (
     BoardUnavailable,
     MalformedPayload,
     SourceError,
@@ -235,10 +235,14 @@ def _result() -> MatchResult:
     return MatchResult(score=87, reason="Synthetic fit.", gaps=["No Kubernetes."])
 
 
-def _company(slug: str = "acme", *, name: str | None = None, is_active: bool = True) -> int:
+def _company(
+    slug: str = "acme", *, name: str | None = None, is_active: bool = True, source: str = "greenhouse"
+) -> int:
     """One watchlist company, flushed so its id can name its postings: returns that id."""
     with db.session_scope() as session:
-        company = Company(name=name or slug.capitalize(), slug=slug, is_active=is_active)
+        company = Company(
+            name=name or slug.capitalize(), slug=slug, is_active=is_active, source=source
+        )
         session.add(company)
         session.flush()
         return company.id
@@ -338,7 +342,7 @@ def test_one_fetch_per_active_company_with_the_stored_slug_in_ascending_id_order
     _active_resume()
     run = _run()
 
-    run_pipeline(run, source=source, scorer=FakeScorer(_result()))
+    run_pipeline(run, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
 
     assert source.calls == ["beta", "acme"]  # the stored slug, not a value built from the name
     assert set(_postings_of(first)) == {"1"}
@@ -355,11 +359,49 @@ def test_an_inactive_company_is_never_fetched(engine: Engine) -> None:
     _active_resume()
     run = _run()
 
-    run_pipeline(run, source=source, scorer=FakeScorer(_result()))
+    run_pipeline(run, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
 
     assert source.calls == ["acme"]
     assert _postings_of(stopped) == {}
     assert _run_row(run)["postings_seen"] == 1
+
+
+def test_each_company_is_fetched_through_the_adapter_its_row_names(engine: Engine) -> None:
+    """A lever row and a greenhouse row in id order: each fake is called once with its own slug."""
+    greenhouse = _company("acme", name="Acme Corporation")
+    lever = _company("globex", name="Globex GmbH", source="lever")
+    greenhouse_source = FakeSource({"acme": [_posting("1")]})
+    lever_source = FakeSource({"globex": [_posting("2")]})
+    _active_resume()
+
+    run_pipeline(
+        _run(),
+        sources={"greenhouse": greenhouse_source, "lever": lever_source},
+        scorer=FakeScorer(_result()),
+    )
+
+    assert greenhouse_source.calls == ["acme"]  # never the lever company's slug
+    assert lever_source.calls == ["globex"]  # never the greenhouse company's slug
+    assert set(_postings_of(greenhouse)) == {"1"}
+    assert set(_postings_of(lever)) == {"2"}
+
+
+def test_a_lever_source_error_fails_the_run_and_the_message_names_the_slug(engine: Engine) -> None:
+    _company("globex", source="lever")
+    _active_resume()
+    failure = UnknownSlug("There is no Lever board named 'globex'")
+
+    with pytest.raises(SourceError) as raised:
+        run_pipeline(
+            _run(),
+            sources={"lever": FakeSource(failing={"globex": failure})},
+            scorer=FakeScorer(_result()),
+        )
+
+    assert str(raised.value) == (
+        f"The board for company 'globex' could not be fetched: {failure}"
+    )
+    assert isinstance(raised.value, SourceError)
 
 
 # Ingest owns every `posting` row: one call per company, and no row from anywhere else.
@@ -380,7 +422,7 @@ def test_each_board_is_handed_to_ingest_once_in_the_walk_s_order(
     monkeypatch.setattr(pipeline_module, "ingest_postings", recording_ingest)
     _active_resume()
 
-    run_pipeline(_run(), source=source, scorer=FakeScorer(_result()))
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
 
     assert calls == [(first, ["1"]), (second, ["2", "3"])]
     assert _rows(Posting) == 0  # the fake wrote nothing, and the pipeline wrote no row itself
@@ -392,7 +434,7 @@ def test_no_posting_row_exists_that_ingest_did_not_create(engine: Engine) -> Non
     payload = [_posting("1"), _posting("2")]
     _active_resume()
 
-    run_pipeline(_run(), source=FakeSource({"acme": payload}), scorer=FakeScorer(_result()))
+    run_pipeline(_run(), sources={"greenhouse": FakeSource({"acme": payload})}, scorer=FakeScorer(_result()))
 
     assert set(_postings_of(company)) == {"1", "2"}
     assert _rows(Posting) == 2
@@ -408,14 +450,14 @@ def test_a_second_run_over_an_unchanged_board_offers_nothing(engine: Engine) -> 
     _active_resume()
     first = _run()
     first_scorer = FakeScorer(_result())
-    run_pipeline(first, source=source, scorer=first_scorer)
+    run_pipeline(first, sources={"greenhouse": source}, scorer=first_scorer)
     _mark_saved(_matches()[0]["id"])  # a digest already alerted on one of them
     before = _matches()
     postings_before = _postings_of(company)
     second = _run()
     second_scorer = FakeScorer(_result())
 
-    run_pipeline(second, source=source, scorer=second_scorer)
+    run_pipeline(second, sources={"greenhouse": source}, scorer=second_scorer)
 
     assert second_scorer.calls == []
     assert _matches() == before  # score, reason, state and notified_at included
@@ -432,7 +474,7 @@ def test_a_reopened_posting_is_left_alone_with_the_match_row_it_already_has(
     company = _company("acme")
     _active_resume()
     run_pipeline(
-        _run(), source=FakeSource({"acme": [_posting("Y")]}), scorer=FakeScorer(_result())
+        _run(), sources={"greenhouse": FakeSource({"acme": [_posting("Y")]})}, scorer=FakeScorer(_result())
     )
     (match_id,) = [row["id"] for row in _matches()]
     _mark_saved(match_id)
@@ -440,14 +482,14 @@ def test_a_reopened_posting_is_left_alone_with_the_match_row_it_already_has(
         row = session.get(Match, match_id)
         row.score = 77
         row.reason = "The owner saved this one."
-    run_pipeline(_run(), source=FakeSource({"acme": []}), scorer=FakeScorer(_result()))
+    run_pipeline(_run(), sources={"greenhouse": FakeSource({"acme": []})}, scorer=FakeScorer(_result()))
     assert _postings_of(company)["Y"]["closed_at"] is not None
     before = _matches()
     reopened = _run()
     scorer = FakeScorer(_result())
     source = FakeSource({"acme": [_posting("Y")]})
 
-    run_pipeline(reopened, source=source, scorer=scorer)
+    run_pipeline(reopened, sources={"greenhouse": source}, scorer=scorer)
 
     assert source.calls == ["acme"]
     assert scorer.calls == []  # a reopened posting is not re-scored
@@ -480,7 +522,7 @@ def test_the_prefilter_and_the_scorer_are_offered_the_stored_row_not_the_payload
     scorer = FakeScorer(_result())
     _active_resume()
 
-    run_pipeline(_run(), source=source, scorer=scorer)
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=scorer)
 
     assert scorer.calls == [(stored, RESUME_TEXT)]
 
@@ -505,7 +547,7 @@ def test_a_rejected_posting_is_recorded_and_never_offered_to_the_scorer(
     _active_resume()
     run = _run()
 
-    run_pipeline(run, source=source, scorer=scorer)
+    run_pipeline(run, sources={"greenhouse": source}, scorer=scorer)
 
     stored = _postings_of(company)
     rows = {row["posting_id"]: row for row in _matches()}
@@ -533,7 +575,7 @@ def test_every_survivor_is_scored_once_with_the_active_resume_and_its_result_is_
     _active_resume()
     run = _run()
 
-    run_pipeline(run, source=FakeSource({"acme": payload}), scorer=scorer)
+    run_pipeline(run, sources={"greenhouse": FakeSource({"acme": payload})}, scorer=scorer)
 
     assert scorer.calls == [(posting, RESUME_TEXT) for posting in payload]
     stored = _postings_of(company)
@@ -557,7 +599,7 @@ def test_a_not_scored_result_is_stored_like_any_other_and_does_not_fail_the_run(
     _active_resume()
     run = _run()
 
-    run_pipeline(run, source=FakeSource({"acme": [_posting("1")]}), scorer=FakeScorer(outage))
+    run_pipeline(run, sources={"greenhouse": FakeSource({"acme": [_posting("1")]})}, scorer=FakeScorer(outage))
 
     (row,) = _matches()
     assert (row["score"], row["reason"], row["gaps"]) == (0, outage.reason, "[]")
@@ -574,7 +616,7 @@ def test_a_scorer_that_raises_fails_the_run_and_stops_the_walk(engine: Engine) -
     run = _run()
 
     with pytest.raises(ScorerConfigurationError) as raised:
-        run_pipeline(run, source=source, scorer=RaisingScorer(failure))
+        run_pipeline(run, sources={"greenhouse": source}, scorer=RaisingScorer(failure))
 
     assert raised.value is failure
     assert source.calls == ["acme"]
@@ -603,7 +645,7 @@ def test_the_active_resume_is_read_once_and_before_the_first_board(
     _active_resume()
     scorer = FakeScorer(_result())
 
-    run_pipeline(_run(), source=source, scorer=scorer)
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=scorer)
 
     assert reads == [0]  # once, and before the first fetch
     assert {text for _, text in scorer.calls} == {RESUME_TEXT}
@@ -616,7 +658,7 @@ def test_a_run_with_no_active_resume_raises_naming_it_and_calls_no_board(engine:
     run = _run()
 
     with pytest.raises(RuntimeError) as raised:
-        run_pipeline(run, source=source, scorer=scorer)
+        run_pipeline(run, sources={"greenhouse": source}, scorer=scorer)
 
     assert str(raised.value) == NO_ACTIVE_RESUME
     assert "resume" in str(raised.value)
@@ -648,7 +690,7 @@ def test_postings_seen_counts_everything_returned_and_matches_created_only_the_s
     run = _run()
 
     run_pipeline(
-        run, source=FakeSource({"beta": beta, "acme": acme}), scorer=FakeScorer(_result())
+        run, sources={"greenhouse": FakeSource({"beta": beta, "acme": acme})}, scorer=FakeScorer(_result())
     )
 
     row = _run_row(run)
@@ -683,7 +725,7 @@ def test_a_run_that_fails_half_way_keeps_the_counts_and_the_rows_it_earned(
     run = _run()
 
     with pytest.raises(SourceError) as raised:
-        run_pipeline(run, source=source, scorer=FakeScorer(_result()))
+        run_pipeline(run, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
 
     assert "beta" in str(raised.value)
     assert len(_postings_of(watched)) == 3
@@ -703,13 +745,13 @@ def test_a_retry_after_a_failed_board_stores_and_matches_only_what_is_new(engine
         failing={"beta": SourceError("The board 'beta' could not be reached")},
     )
     with pytest.raises(SourceError):
-        run_pipeline(first, source=source, scorer=FakeScorer(_result()))
+        run_pipeline(first, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
     before = _matches()
     assert len(before) == 1
 
     second = _run()
     retried = FakeSource({"acme": [_posting("1")], "beta": [_posting("2")]})
-    run_pipeline(second, source=retried, scorer=FakeScorer(_result()))
+    run_pipeline(second, sources={"greenhouse": retried}, scorer=FakeScorer(_result()))
 
     after = _matches()
     assert after[0] == before[0]  # the same row, not a second one for the same posting
@@ -727,14 +769,14 @@ def test_the_pipeline_writes_the_counts_and_leaves_the_run_rows_lifecycle_alone(
     succeeding = _run()
 
     run_pipeline(
-        succeeding, source=FakeSource({"acme": [_posting("1")]}), scorer=FakeScorer(_result())
+        succeeding, sources={"greenhouse": FakeSource({"acme": [_posting("1")]})}, scorer=FakeScorer(_result())
     )
 
     failing = _run()
     with pytest.raises(SourceError):
         run_pipeline(
             failing,
-            source=FakeSource(failing={"acme": SourceError("no board today")}),
+            sources={"greenhouse": FakeSource(failing={"acme": SourceError("no board today")})},
             scorer=FakeScorer(_result()),
         )
 
@@ -766,7 +808,7 @@ def test_each_source_error_fails_the_run_and_the_message_names_the_slug(
 
     with pytest.raises(SourceError) as raised:
         run_pipeline(
-            run, source=FakeSource(failing={"acme": failure}), scorer=FakeScorer(_result())
+            run, sources={"greenhouse": FakeSource(failing={"acme": failure})}, scorer=FakeScorer(_result())
         )
 
     assert str(raised.value) == (
@@ -784,9 +826,9 @@ def test_the_seam_is_the_run_id_and_the_two_injected_collaborators() -> None:
     """The shape #9's provider returns and the tests drive, named so a change fails loudly."""
     parameters = inspect.signature(run_pipeline).parameters
 
-    assert list(parameters) == ["run_id", "source", "scorer"]
+    assert list(parameters) == ["run_id", "sources", "scorer"]
     assert parameters["run_id"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-    assert parameters["source"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameters["sources"].kind is inspect.Parameter.KEYWORD_ONLY
     assert parameters["scorer"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
@@ -846,7 +888,7 @@ def test_the_resume_text_reaches_no_log_line_no_row_and_no_response(
     source = FakeSource({"acme": [_posting("1")]})
     scorer = FakeScorer(_result())
     app.dependency_overrides[get_pipeline] = lambda: partial(
-        run_pipeline, source=source, scorer=scorer
+        run_pipeline, sources={"greenhouse": source}, scorer=scorer
     )
     try:
         response = client.post("/internal/tick", headers={TICK_SECRET_HEADER: TICK_SECRET})
