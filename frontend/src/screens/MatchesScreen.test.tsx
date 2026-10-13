@@ -1,12 +1,16 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { server } from '../mocks/server'
-import { matches } from '../mocks/fixtures'
+import { matches, runSummary, runSucceeded } from '../mocks/fixtures'
 import MatchesScreen from './MatchesScreen'
+import RunDigestNow from './RunDigestNow'
 
 // The suite runs without Vitest globals, so Testing Library's auto-cleanup is off.
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.useRealTimers()
+})
 
 const LOADING = 'Loading matches...'
 const EMPTY = 'No matches yet.'
@@ -179,5 +183,213 @@ describe("the matches screen's three outcomes", () => {
     expect((await screen.findByRole('alert')).textContent).toBe(detail)
     expect(screen.queryByText(LOADING)).toBeNull()
     expect(screen.queryByText(EMPTY)).toBeNull()
+  })
+})
+
+/**
+ * A run the page started ends, and the list it rewrote is read again (#79). The
+ * two sibling screens are rendered together because the signal crosses them by
+ * module: only a real run control can publish it, and only the screen subscribes.
+ */
+describe('the matches list after a run the page started', () => {
+  const POLL_MS = 1000
+
+  /** The fake clock `RunDigestNow.test.tsx` installs, so no test waits on a wall clock. */
+  const useTestClock = () =>
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+    })
+
+  /**
+   * Lets the mocked answers and React's commits run out. `findBy`/`waitFor` cannot
+   * be used while this clock is installed, so a test flushes and then looks.
+   */
+  const flush = () => act(async () => {})
+
+  /** Lets one poll interval pass, and the read it starts come back. */
+  const poll = async () => {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_MS)
+    })
+  }
+
+  /** A row already on screen, looked up without `findBy` for the same clock reason. */
+  const rowNow = (label: string) => screen.getByText(label).closest('li') as HTMLElement
+
+  /** Renders the shipped digest control and the matches list, the two siblings the signal joins. */
+  const renderPage = () =>
+    render(
+      <>
+        <RunDigestNow />
+        <MatchesScreen />
+      </>,
+    )
+
+  /** The press and the run row a digest run needs, so it ends terminal on the first poll. */
+  const digestRunHandlers = () => [
+    http.post('/internal/tick', () => HttpResponse.json(runSummary, { status: 202 })),
+    http.get('/runs/:id', () => HttpResponse.json(runSucceeded)),
+  ]
+
+  /** Presses `Run digest now`, lets its terminal read answer, and the publish reach the list. */
+  const endDigestRun = async () => {
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Run digest now' })))
+    await poll()
+    await flush()
+  }
+
+  it('keeps the last rows on screen while the re-read is in flight, never the loading text (AC6)', async () => {
+    useTestClock()
+    const answer = withheld()
+    const rewritten = matches.map((match) =>
+      match.id === 1 ? { ...match, reason: 'Rewritten by the run' } : match,
+    )
+    let reads = 0
+    server.use(
+      ...digestRunHandlers(),
+      http.get('/matches', () => {
+        reads += 1
+        return reads === 1 ? HttpResponse.json(matches) : answer.promise
+      }),
+    )
+    renderPage()
+    await flush()
+    expect(within(newList()).getByText('Acme: Backend engineer')).toBeDefined()
+
+    await endDigestRun()
+
+    // The re-read is in flight: the mount read's rows are still there, no loading text.
+    expect(reads).toBe(2)
+    expect(screen.queryByText(LOADING)).toBeNull()
+    expect(within(newList()).getByText('Acme: Backend engineer')).toBeDefined()
+
+    answer.release(HttpResponse.json(rewritten))
+    await flush()
+    // When the answer lands the rows are the answer's -- a replace, not a merge.
+    expect(within(newList()).getByText('Rewritten by the run')).toBeDefined()
+    expect(screen.queryByText(LOADING)).toBeNull()
+  })
+
+  it('clears a previous read error when the re-read succeeds, leaving no alert over the rows (AC7)', async () => {
+    useTestClock()
+    const detail = 'The matches could not be read'
+    let reads = 0
+    server.use(
+      ...digestRunHandlers(),
+      http.get('/matches', () => {
+        reads += 1
+        return reads === 1
+          ? HttpResponse.json({ detail }, { status: 500 })
+          : HttpResponse.json(matches)
+      }),
+    )
+    renderPage()
+    await flush()
+    expect(screen.getByRole('alert').textContent).toBe(detail)
+
+    await endDigestRun()
+
+    expect(reads).toBe(2)
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(within(newList()).getByText('Acme: Backend engineer')).toBeDefined()
+  })
+
+  it('shows a failed re-read on the existing error branch, in place of the rows (AC7)', async () => {
+    useTestClock()
+    const detail = 'The re-read was refused'
+    let reads = 0
+    server.use(
+      ...digestRunHandlers(),
+      http.get('/matches', () => {
+        reads += 1
+        return reads === 1
+          ? HttpResponse.json(matches)
+          : HttpResponse.json({ detail }, { status: 500 })
+      }),
+    )
+    renderPage()
+    await flush()
+    expect(within(newList()).getByText('Acme: Backend engineer')).toBeDefined()
+
+    await endDigestRun()
+
+    expect(reads).toBe(2)
+    expect(screen.getByRole('alert').textContent).toBe(detail)
+    expect(screen.queryByText('Acme: Backend engineer')).toBeNull()
+  })
+
+  it('replaces the rows with the answer, and a verdict recorded on the screen survives it (AC8)', async () => {
+    useTestClock()
+    let reads = 0
+    server.use(
+      ...digestRunHandlers(),
+      http.get('/matches', () => {
+        reads += 1
+        return HttpResponse.json(
+          reads === 1
+            ? matches
+            : matches.map((match) => (match.id === 1 ? { ...match, state: 'saved' } : match)),
+        )
+      }),
+    )
+    renderPage()
+    await flush()
+
+    await act(async () =>
+      fireEvent.click(within(rowNow('Acme: Backend engineer')).getByRole('button', { name: 'Save' })),
+    )
+    expect(within(savedList()).getByText('Acme: Backend engineer')).toBeDefined()
+
+    await endDigestRun()
+
+    expect(reads).toBe(2)
+    // The verdict was written to the same server the re-read reads, so the group holds.
+    expect(within(savedList()).getByText('Acme: Backend engineer')).toBeDefined()
+    expect(within(newList()).queryByText('Acme: Backend engineer')).toBeNull()
+  })
+
+  it('reads nothing again when a press is refused with 401 (AC4)', async () => {
+    useTestClock()
+    const detail = 'The request is not allowed'
+    let reads = 0
+    server.use(
+      http.post('/internal/tick', () => HttpResponse.json({ detail }, { status: 401 })),
+      http.get('/runs/:id', () => HttpResponse.json(runSucceeded)),
+      http.get('/matches', () => {
+        reads += 1
+        return HttpResponse.json(matches)
+      }),
+    )
+    renderPage()
+    await flush()
+
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Run digest now' })))
+
+    expect(screen.getByRole('alert').textContent).toBe(detail)
+    // No run row, so no terminal status and no publication: the mount read stands alone.
+    expect(reads).toBe(1)
+    expect(within(newList()).getByText('Acme: Backend engineer')).toBeDefined()
+  })
+
+  it('reads nothing again when a press is answered 409 (AC4)', async () => {
+    useTestClock()
+    const detail = 'A run is already in progress in this process'
+    let reads = 0
+    server.use(
+      http.post('/internal/tick', () => HttpResponse.json({ detail }, { status: 409 })),
+      http.get('/matches', () => {
+        reads += 1
+        return HttpResponse.json(matches)
+      }),
+    )
+    renderPage()
+    await flush()
+
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Run digest now' })))
+    await poll()
+
+    expect(screen.getByRole('alert').textContent).toBe(detail)
+    expect(reads).toBe(1)
+    expect(within(newList()).getByText('Acme: Backend engineer')).toBeDefined()
   })
 })

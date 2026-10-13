@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { listMatches, setMatchState, type Match, type MatchState } from '../api/client'
+import { subscribeRunEnded } from './runEnded'
 
 // Three outcomes a reader can tell apart: not read yet, read and empty, refused.
 const LOADING = 'Loading matches...'
@@ -48,11 +49,27 @@ export default function MatchesScreen() {
   // A refused verdict sits beside the rows: it changes no state and hides nothing.
   const [verdictError, setVerdictError] = useState<string | null>(null)
 
-  useEffect(() => {
-    listMatches().then(setMatches, (failure: unknown) => {
-      setListError(failure instanceof Error ? failure.message : String(failure))
-    })
+  // The one path that reads the list, shared by the mount effect and by a run's
+  // end. It never resets `matches` to `null`: `null` means "not read yet" for the
+  // mount read alone, so a re-read cannot flash the loading text over rows that
+  // are already on screen. A successful read clears a previous `listError` (#79).
+  const read = useCallback(() => {
+    listMatches().then(
+      (rows) => {
+        setListError(null)
+        setMatches(rows)
+      },
+      (failure: unknown) => {
+        setListError(failure instanceof Error ? failure.message : String(failure))
+      },
+    )
   }, [])
+
+  useEffect(() => {
+    read()
+    // A run the page started has ended, so the rows on screen may be stale.
+    return subscribeRunEnded(read)
+  }, [read])
 
   async function judge(id: number, state: MatchState) {
     try {
