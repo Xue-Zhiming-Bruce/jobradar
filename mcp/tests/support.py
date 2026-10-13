@@ -26,10 +26,18 @@ from mcp.types import CallToolResult
 BASE_URL = "http://127.0.0.1:8123"
 TICK_SECRET = "test-throwaway-secret"
 
-# The five tools, in the order the server registers them: `test_tools.py`
+# The seven tools, in the order the server registers them: `test_tools.py`
 # asserts each one's input schema against this list, and `test_server_process.py`
 # reads them over a real stdio session.
-TOOL_NAMES = ("add_company", "list_watchlist", "list_matches", "trigger_run", "get_run")
+TOOL_NAMES = (
+    "add_company",
+    "list_watchlist",
+    "list_matches",
+    "trigger_run",
+    "get_run",
+    "remove_company",
+    "set_match_state",
+)
 
 
 class FakeApp:

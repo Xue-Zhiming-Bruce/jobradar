@@ -503,6 +503,8 @@ keeps the loopback demo below working on a machine that runs one.
 | `list_matches` | none | every match row, newest first, unfiltered: `id`, `company_name`, `title`, `url`, `score`, `reason`, `gaps`, `state`, `created_at` |
 | `trigger_run` | none | the app's `202` body: `id`, `status`, `started_at`, `finished_at`, `error`, `postings_seen`, `matches_created` |
 | `get_run` | `run_id: integer` (required) | that run's row, the same seven fields |
+| `remove_company` | `company_id: integer` (required) | a confirmation this tool builds: `id`, `removed` — the route answers `204` with no body |
+| `set_match_state` | `match_id: integer`, `state: string` (`"saved"` or `"dismissed"`, both required) | the app's `200` body: the written row, the same fields `list_matches` renders |
 
 Each tool returns the app's own response body, field for field and name for name:
 nothing is filtered, renamed or derived here. `list_matches` has no filter of its

@@ -45,5 +45,5 @@ def settings(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def server(fake_app: FakeApp, settings: None) -> MCPServer:
-    """The server under test, over the fake app: the five tools and their real dispatch."""
+    """The server under test, over the fake app: the seven tools and their real dispatch."""
     return build_server(fake_app.client)

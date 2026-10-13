@@ -112,7 +112,7 @@ def test_the_server_starts_and_advertises_its_tools_with_neither_variable_set(
     monkeypatch.delenv(URL_VARIABLE, raising=False)
     monkeypatch.delenv(TICK_SECRET_VARIABLE, raising=False)
 
-    assert len(listed_tools(build_server())) == 5
+    assert len(listed_tools(build_server())) == 7
 
 
 def test_an_unset_secret_is_a_named_failure_that_sends_nothing(

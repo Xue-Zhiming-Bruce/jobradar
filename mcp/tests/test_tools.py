@@ -9,6 +9,7 @@ arguments could not have produced.
 """
 
 import json
+import re
 from itertools import takewhile
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from tests.support import TOOL_NAMES, TICK_SECRET, FakeApp, answered, call, list
 
 README = Path(__file__).resolve().parents[2] / "README.md"
 
-# The five tools, and the input schema the SDK builds from each function: the
+# The seven tools, and the input schema the SDK builds from each function: the
 # argument names, their JSON types and which of them are required. A renamed,
 # dropped, added or accidentally-optional argument fails this dict.
 EXPECTED_INPUT_SCHEMAS = {
@@ -50,6 +51,24 @@ EXPECTED_INPUT_SCHEMAS = {
         "properties": {"run_id": {"title": "Run Id", "type": "integer"}},
         "required": ["run_id"],
         "title": "get_runArguments",
+        "type": "object",
+    },
+    "remove_company": {
+        "properties": {"company_id": {"title": "Company Id", "type": "integer"}},
+        "required": ["company_id"],
+        "title": "remove_companyArguments",
+        "type": "object",
+    },
+    # The verdict's own restriction: the schema the SDK builds from
+    # `tools.Verdict` carries the two values and no third, so `new` is refused
+    # before any function body runs.
+    "set_match_state": {
+        "properties": {
+            "match_id": {"title": "Match Id", "type": "integer"},
+            "state": {"enum": ["saved", "dismissed"], "title": "State", "type": "string"},
+        },
+        "required": ["match_id", "state"],
+        "title": "set_match_stateArguments",
         "type": "object",
     },
 }
@@ -130,24 +149,25 @@ ENDED_RUNS = [
 ]
 
 
-def test_the_tool_list_is_exactly_these_five_with_these_arguments(server: MCPServer) -> None:
-    """Five tools, these argument names, these JSON types, these required flags, and no sixth."""
+def test_the_tool_list_is_exactly_these_seven_with_these_arguments(server: MCPServer) -> None:
+    """Seven tools, these argument names, these JSON types, these required flags, and no eighth."""
     listed = listed_tools(server)
 
     assert tuple(EXPECTED_INPUT_SCHEMAS) == TOOL_NAMES
     assert {tool.name: tool.input_schema for tool in listed} == EXPECTED_INPUT_SCHEMAS
     # `structured_output=False`: the answer is the body, not a shape the SDK derives from it.
-    assert [tool.output_schema for tool in listed] == [None] * 5
+    assert [tool.output_schema for tool in listed] == [None] * 7
 
 
-def test_the_readme_tool_table_names_the_same_five_tools(server: MCPServer) -> None:
-    """The table a reviewer reads is this tool list, one row per tool."""
+def test_the_readme_tool_table_names_the_same_seven_tools_and_arguments(server: MCPServer) -> None:
+    """The table a reviewer reads is this tool list, one row per tool: name and arguments both."""
     lines = README.read_text().splitlines()
     table = list(takewhile(lambda line: line.startswith("|"), lines[lines.index("| Tool | Arguments | Returns |") :]))
+    rows = [line.split("|") for line in table if line.startswith("| `")]
 
-    assert [line.split("|")[1].strip().strip("`") for line in table if line.startswith("| `")] == list(
-        EXPECTED_INPUT_SCHEMAS
-    )
+    assert [(cells[1].strip().strip("`"), tuple(re.findall(r"`(\w+): ", cells[2]))) for cells in rows] == [
+        (tool.name, tuple(tool.input_schema.get("properties", {}))) for tool in listed_tools(server)
+    ]
 
 
 def test_add_company_sends_the_post_the_app_serves_and_answers_its_201_body(

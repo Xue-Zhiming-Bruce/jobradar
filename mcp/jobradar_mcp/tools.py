@@ -1,14 +1,18 @@
-"""The five tools this server offers, and the server that carries them.
+"""The seven tools this server offers, and the server that carries them.
 
 Each tool is one request to an endpoint the app already serves -- `POST
 /watchlist`, `GET /watchlist`, `GET /matches`, `POST /internal/tick`,
-`GET /runs/{id}` -- and each returns the app's own answer, decoded JSON, field
-for field: nothing is computed, filtered, renamed or defaulted here. `add_company`
-answers the `201` body, `list_watchlist` and `list_matches` answer the app's list
-whole (a prefiltered row with score 0 and a not-scored row are in it exactly as
-stored, because keeping either out is the digest's business and the screen's),
-`trigger_run` answers the `202` body and does not wait for the run or poll it,
-and `get_run` answers that run's row.
+`GET /runs/{id}`, `DELETE /watchlist/{id}`, `PATCH /matches/{id}` -- and each
+returns the app's own answer, decoded JSON, field for field: nothing is computed,
+filtered, renamed or defaulted here. `add_company` answers the `201` body,
+`list_watchlist` and `list_matches` answer the app's list whole (a prefiltered row
+with score 0 and a not-scored row are in it exactly as stored, because keeping
+either out is the digest's business and the screen's), `trigger_run` answers the
+`202` body and does not wait for the run or poll it, `get_run` answers that run's
+row, and `set_match_state` answers the row its `PATCH` writes. `remove_company` is
+the one tool whose route answers no body at all: its `204` becomes the small
+confirmation this module builds, because there is nothing of the app's to hand
+back and a caller needs something it can read.
 
 The functions take an `httpx2.Client` as their first parameter and are plain
 `def`s, so the suite injects `httpx2.Client(transport=httpx2.MockTransport(...))`
@@ -24,7 +28,7 @@ not JSON is an error naming the status rather than a decode traceback, and an ap
 that is not running is an error naming `JOBRADAR_URL`.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 import httpx2
 from mcp.server.mcpserver.exceptions import ToolError
@@ -33,8 +37,14 @@ from jobradar_mcp.client import URL_VARIABLE, base_url, tick_secret
 
 WATCHLIST_PATH = "/watchlist"
 MATCHES_PATH = "/matches"
+MATCH_PATH = MATCHES_PATH + "/{match_id}"
 TICK_PATH = "/internal/tick"
 RUN_PATH = "/runs/{run_id}"
+
+# The two values the route's own body takes, spelled as `MatchVerdict` spells
+# them. `new` is not one of them: re-opening a match is #12's business, not this
+# tool's, so a third value never reaches the app.
+Verdict = Literal["saved", "dismissed"]
 
 # The header the app checks, spelled as `app.routes.internal.TICK_SECRET_HEADER`
 # spells it. The app reads the value itself from `TICK_SECRET`.
@@ -77,6 +87,32 @@ def get_run(client: httpx2.Client, run_id: int) -> dict[str, Any]:
     return _answer_of(client, "GET", RUN_PATH.format(run_id=run_id), expected=200)
 
 
+def remove_company(client: httpx2.Client, company_id: int) -> dict[str, Any]:
+    """Stop watching one company: `DELETE /watchlist/{id}`, and this tool's own confirmation.
+
+    The route answers `204` with no body, so this is the one tool that does not
+    hand back the app's own JSON -- there is none, and a caller needs something it
+    can read. A refusal is still the app's own `detail`.
+    """
+    _answer_of(client, "DELETE", f"{WATCHLIST_PATH}/{company_id}", expected=204, has_body=False)
+    return {"id": company_id, "removed": True}
+
+
+def set_match_state(client: httpx2.Client, match_id: int, state: Verdict) -> dict[str, Any]:
+    """Record `saved` or `dismissed` on one match: `PATCH /matches/{id}`, and its `200` row.
+
+    The body is `state` and nothing else, and the answer is the row as
+    `GET /matches` renders it.
+    """
+    return _answer_of(
+        client,
+        "PATCH",
+        MATCH_PATH.format(match_id=match_id),
+        expected=200,
+        json_body={"state": state},
+    )
+
+
 def _answer_of(
     client: httpx2.Client,
     method: str,
@@ -85,12 +121,16 @@ def _answer_of(
     expected: int,
     json_body: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
+    has_body: bool = True,
 ) -> Any:
     """The app's own answer to one request, decoded, or a `ToolError` saying why not.
 
     The body is returned exactly as the app sent it: this is where a status the
     tool does not expect, a body that is not JSON and an app that cannot be
-    reached all become one `ToolError` for the client to read.
+    reached all become one `ToolError` for the client to read. A route that
+    answers no body (`DELETE /watchlist/{id}`'s `204`) is asked for none:
+    `has_body=False` answers `None`, where decoding an empty body would invent the
+    one failure this module does not have.
     """
     url = f"{base_url()}{path}"
     try:
@@ -99,6 +139,8 @@ def _answer_of(
         raise ToolError(f"{URL_VARIABLE} ({url}) could not be reached") from error
     if answer.status_code != expected:
         raise ToolError(_unexpected(method, path, answer))
+    if not has_body:
+        return None
     try:
         return answer.json()
     except ValueError as error:

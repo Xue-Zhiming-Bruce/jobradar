@@ -1,9 +1,9 @@
-"""The entry point: build the five-tool server, and run it over stdio.
+"""The entry point: build the seven-tool server, and run it over stdio.
 
 `cd mcp && uv run python -m jobradar_mcp` is the whole way to start it -- no port,
 no host, no HTTP server of its own: the client on the other end of stdin and
 stdout is the coding agent that registered it. Building the server reads no
-variable and opens no socket, so a client can list the five tools with nothing set,
+variable and opens no socket, so a client can list the seven tools with nothing set,
 and `run(transport="stdio")` is the only transport it has.
 
 Each registered tool is one line over the function of the same name in
@@ -22,10 +22,11 @@ from mcp.server.mcpserver import MCPServer
 
 from jobradar_mcp import tools
 from jobradar_mcp.client import new_client
+from jobradar_mcp.tools import Verdict
 
 
 def build_server(get_client: Callable[[], httpx2.Client] = new_client) -> MCPServer:
-    """The five tools, registered on a server that is not yet running.
+    """The seven tools, registered on a server that is not yet running.
 
     `get_client` is the one seam: the suite passes a factory returning a client
     over `httpx2.MockTransport`, and a running server uses the default. Building
@@ -58,6 +59,16 @@ def build_server(get_client: Callable[[], httpx2.Client] = new_client) -> MCPSer
     def get_run(run_id: int) -> dict[str, Any]:
         """Read one digest run by its id, however it ended."""
         return tools.get_run(get_client(), run_id)
+
+    @server.tool(structured_output=False)
+    def remove_company(company_id: int) -> dict[str, Any]:
+        """Delete one watched company by its id: it stops being polled and is gone from the list."""
+        return tools.remove_company(get_client(), company_id)
+
+    @server.tool(structured_output=False)
+    def set_match_state(match_id: int, state: Verdict) -> dict[str, Any]:
+        """Record `saved` or `dismissed` on one match by its id, and answer the written row."""
+        return tools.set_match_state(get_client(), match_id, state)
 
     return server
 
