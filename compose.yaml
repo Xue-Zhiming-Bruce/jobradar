@@ -54,12 +54,16 @@ services:
       db:
         condition: service_healthy
     healthcheck:
-      # What the image has is python, not curl.
+      # What the image has is python, not curl. Two facts, so a service that is
+      # serving with a revision the database does not have reads unhealthy
+      # rather than healthy (#47): `/healthz` answers, and the database is at
+      # the revision this image carries -- the upgrade `docker-entrypoint.sh`
+      # ran before uvicorn started. `alembic current` prints the URL nowhere.
       test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).read()
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).read()"
+          && alembic current | grep -q '(head)'
       interval: 5s
       timeout: 5s
       retries: 30
