@@ -34,7 +34,7 @@ from sqlalchemy.exc import IntegrityError
 from app import db
 from app.models import Company, Match, Posting
 from app.services.ingest import IngestResult, ingest_postings
-from app.sources.greenhouse import SourcePosting
+from app.sources.base import SourcePosting
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 INGEST_MODULE = BACKEND_ROOT / "app" / "services" / "ingest.py"

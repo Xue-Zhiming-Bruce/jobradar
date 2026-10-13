@@ -56,7 +56,7 @@ from app.matching.scorer import (
     record_score,
 )
 from app.models import Company, Match, Posting, Run
-from app.sources.greenhouse import SourcePosting
+from app.sources.base import SourcePosting
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 MATCHING_ROOT = BACKEND_ROOT / "app" / "matching"

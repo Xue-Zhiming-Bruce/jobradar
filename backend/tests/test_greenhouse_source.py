@@ -28,7 +28,7 @@ from pathlib import Path
 import httpx2
 import pytest
 
-from app.sources.greenhouse import (
+from app.sources.base import (
     REQUEST_TIMEOUT_SECONDS,
     BoardUnavailable,
     MalformedPayload,
@@ -36,8 +36,8 @@ from app.sources.greenhouse import (
     SourcePosting,
     SourceTimeout,
     UnknownSlug,
-    fetch,
 )
+from app.sources.greenhouse import fetch
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "greenhouse"
@@ -49,11 +49,10 @@ UNKNOWN_BOARD_BODY = (FIXTURES / "unknown-board.json").read_bytes()
 # built from the module's own constant, so a moved endpoint fails here.
 SLUG = "acme"
 BOARD_URL = "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
-REQUEST_URL = f"https://boards-api.greenhouse.io/v1/boards/{SLUG}/jobs?content=true"
 
 # The key names the payload is known by, and the only files allowed to name them:
-# the adapter and this test module. #28 is where a second source and the interface
-# the two would share arrive.
+# the adapter and this test module. `app.sources.base` and `app.sources.__init__`
+# name neither source's payload.
 PAYLOAD_TERMS = ("boards-api.greenhouse.io", "internal_job_id", "absolute_url", "gh_jid")
 
 
@@ -332,11 +331,11 @@ def test_only_one_module_knows_the_greenhouse_payload() -> None:
     assert found == set()
 
 
-def test_the_sources_package_holds_only_the_one_adapter() -> None:
-    """#28 owns the second source and the interface that would come with it."""
+def test_the_sources_package_holds_base_the_registry_and_the_two_adapters() -> None:
+    """Two adapters, the shared vocabulary, and the one mapping from a name to one."""
     modules = sorted(path.name for path in (BACKEND_ROOT / "app" / "sources").glob("*.py"))
 
-    assert modules == ["__init__.py", "greenhouse.py"]
+    assert modules == ["__init__.py", "base.py", "greenhouse.py", "lever.py"]
 
 
 def test_the_http_client_is_a_runtime_dependency() -> None:

@@ -43,7 +43,7 @@ from sqlalchemy import select
 
 from app import db
 from app.models import Posting
-from app.sources.greenhouse import SourcePosting
+from app.sources.base import SourcePosting
 
 # The columns the source owns. They follow the payload -- and an absent value is
 # written as `NULL` rather than skipped -- while `id`, `company_id`,

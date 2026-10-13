@@ -44,7 +44,7 @@ from app.matching.prefilter import (
     title_terms,
 )
 from app.models import Company, Match, Posting, Run
-from app.sources.greenhouse import SourcePosting
+from app.sources.base import SourcePosting
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 PREFILTER_MODULE = BACKEND_ROOT / "app" / "matching" / "prefilter.py"

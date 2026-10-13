@@ -43,7 +43,7 @@ from sqlalchemy import select
 
 from app import db
 from app.models import Match
-from app.sources.greenhouse import SourcePosting
+from app.sources.base import SourcePosting
 
 # The four variables, named here and read in no other module, the way the resume
 # service reads its own settings in one place.
