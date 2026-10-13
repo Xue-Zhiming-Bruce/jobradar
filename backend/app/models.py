@@ -134,6 +134,13 @@ class Company(Base):
     source: Mapped[str] = mapped_column(String(20), default="greenhouse")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow)
+    # The validator the board's last stored answer carried, sent back as
+    # `If-None-Match`/`If-Modified-Since` by the next run and stored verbatim -- an
+    # `ETag` keeps its quotes, a `Last-Modified` is the date string it arrived as --
+    # so `Text` rather than a bound the server did not choose. NULL means this
+    # company has no validator yet, which is every row written before the columns.
+    etag: Mapped[str | None] = mapped_column(Text)
+    last_modified: Mapped[str | None] = mapped_column(Text)
 
     @validates("slug")
     def _normalise_slug(self, key: str, value: str) -> str:

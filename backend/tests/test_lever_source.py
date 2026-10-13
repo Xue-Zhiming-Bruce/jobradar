@@ -151,7 +151,7 @@ def test_one_request_is_made_to_the_board_endpoint_with_mode_json() -> None:
     """The recorded board drives the fetch, and the request is the one the payload needs."""
     requests: list[httpx2.Request] = []
 
-    postings = fetch(SLUG, client=_client_serving(BOARD_BODY, requests))
+    postings = fetch(SLUG, client=_client_serving(BOARD_BODY, requests)).postings
 
     assert len(postings) == 2
     assert len(requests) == 1
@@ -163,7 +163,7 @@ def test_one_request_is_made_to_the_board_endpoint_with_mode_json() -> None:
 
 def test_every_field_of_each_posting_comes_from_the_payload() -> None:
     """Fields compared whole, one posting per job: a hard-coded answer cannot pass."""
-    postings = fetch(SLUG, client=_client_serving(BOARD_BODY, []))
+    postings = fetch(SLUG, client=_client_serving(BOARD_BODY, [])).postings
 
     assert isinstance(postings, list)
     assert all(isinstance(posting, SourcePosting) for posting in postings)
@@ -188,7 +188,7 @@ def test_every_field_of_each_posting_comes_from_the_payload() -> None:
 
 def test_the_description_is_the_plain_text_with_the_list_html_stripped() -> None:
     """The scorer (#8) gets sentences, not the payload's markup, and never its `description`."""
-    first, second = fetch(SLUG, client=_client_serving(BOARD_BODY, []))
+    first, second = fetch(SLUG, client=_client_serving(BOARD_BODY, [])).postings
 
     assert first.description == FIRST_DESCRIPTION
     assert second.description == SECOND_DESCRIPTION
@@ -203,7 +203,7 @@ def test_the_payload_html_description_field_is_not_the_one_used() -> None:
     payload = _board_payload()
     payload[0]["description"] = "<div>HTML that must not reach the posting.</div>"
 
-    first, _ = fetch(SLUG, client=_client_serving(_body_of(payload), []))
+    first, _ = fetch(SLUG, client=_client_serving(_body_of(payload), [])).postings
 
     assert "HTML that must not reach the posting" not in first.description
     assert first.description == FIRST_DESCRIPTION
@@ -215,7 +215,7 @@ def test_a_posting_without_a_location_or_a_description_is_a_posting() -> None:
     payload[0]["categories"]["location"] = None
     del payload[1]["descriptionPlain"]
 
-    first, second = fetch(SLUG, client=_client_serving(_body_of(payload), []))
+    first, second = fetch(SLUG, client=_client_serving(_body_of(payload), [])).postings
 
     assert first.location is None
     assert first.title == "Staff Accountant"
@@ -226,7 +226,7 @@ def test_a_posting_without_a_location_or_a_description_is_a_posting() -> None:
 def test_an_empty_board_is_an_empty_list_and_still_one_request() -> None:
     requests: list[httpx2.Request] = []
 
-    postings = fetch(SLUG, client=_client_serving(b"[]", requests))
+    postings = fetch(SLUG, client=_client_serving(b"[]", requests)).postings
 
     assert isinstance(postings, list)
     assert postings == []
@@ -285,7 +285,7 @@ def test_a_slug_shaped_value_is_sent_as_it_is(slug: str) -> None:
     """No real board is refused by the gate, and no slug is lower-cased on the way out."""
     requests: list[httpx2.Request] = []
 
-    postings = fetch(slug, client=_client_serving(BOARD_BODY, requests, slug=slug))
+    postings = fetch(slug, client=_client_serving(BOARD_BODY, requests, slug=slug)).postings
 
     assert len(postings) == 2
     assert len(requests) == 1

@@ -5,7 +5,7 @@
 tables -- the baseline, then the column #26 added, then the source column and
 check #28 added, then the outcome column, its check and its backfill #30 added,
 then the model and prompt-version columns #32 added, then the run's emailed
-count #36 added. Two paths to one schema
+count #36 added, then the two board-validator columns #55 added. Two paths to one schema
 can drift, so nothing here assumes a revision is right: every test runs `alembic
 upgrade head` -- in-process, through `alembic.command.upgrade` -- against the
 database the shared `engine` fixture in `tests/conftest.py` supplies, and then
@@ -72,7 +72,7 @@ ALEMBIC_INI = BACKEND_ROOT / "alembic.ini"
 REVISIONS_DIR = BACKEND_ROOT / "migrations" / "versions"
 
 # The readable revision ids, in the order they apply, and the files that hold
-# them. The head is the last of the six.
+# them. The head is the last of the seven.
 BASELINE_REVISION = "0001_baseline"
 BASELINE_REVISION_FILE = "0001_baseline_five_tables.py"
 PARSED_FIELDS_REVISION = "0002_parsed_fields"
@@ -85,6 +85,8 @@ PROVENANCE_REVISION = "0005_match_provenance"
 PROVENANCE_REVISION_FILE = "0005_match_provenance.py"
 RUN_MATCHES_EMAILED_REVISION = "0006_run_matches_emailed"
 RUN_MATCHES_EMAILED_REVISION_FILE = "0006_run_matches_emailed.py"
+BOARD_VALIDATOR_REVISION = "0007_company_board_validator"
+BOARD_VALIDATOR_REVISION_FILE = "0007_company_board_validator.py"
 THE_REVISION_FILES = (
     BASELINE_REVISION_FILE,
     PARSED_FIELDS_REVISION_FILE,
@@ -92,8 +94,9 @@ THE_REVISION_FILES = (
     OUTCOME_REVISION_FILE,
     PROVENANCE_REVISION_FILE,
     RUN_MATCHES_EMAILED_REVISION_FILE,
+    BOARD_VALIDATOR_REVISION_FILE,
 )
-HEAD_REVISION = RUN_MATCHES_EMAILED_REVISION
+HEAD_REVISION = BOARD_VALIDATOR_REVISION
 
 # Alembic's own bookkeeping table: one row per applied revision. It is not one of
 # the five the models declare, and `alembic current` reads it.
@@ -318,28 +321,35 @@ def _store_a_match_row_before_this_revision(
 ) -> None:
     """Insert one match row with only the columns this schema has always had.
 
-    The company and the posting go in through the app's own session, because
-    neither table gains a column here, and the match row with SQL: the model
-    declares columns the schema under test does not have yet, so an INSERT naming
-    them would fail on the schema that predates the revision -- which is the schema
-    this row is written into. `reason` is the caller's, written from the writers'
-    own prefix constants, so a prefix that moved fails a case instead of silently
-    backfilling nothing.
+    All three rows go in with SQL: the model declares columns the schema under test
+    does not have yet -- `company` gains the two validator columns #55 added -- so
+    an INSERT naming them would fail on the schema that predates them, which is the
+    schema this row is written into. `reason` is the caller's, written from the
+    writers' own prefix constants, so a prefix that moved fails a case instead of
+    silently backfilling nothing.
     """
-    with db.session_scope() as session:
-        company = Company(name=f"Acme {external_id}", slug=f"acme-{external_id}")
-        session.add(company)
-        session.flush()
-        posting = Posting(
-            company_id=company.id,
-            external_id=external_id,
-            title="Backend Engineer",
-            url=f"https://example.test/{external_id}",
-        )
-        session.add(posting)
-        session.flush()
-        posting_id = posting.id
+    slug = f"acme-{external_id}"
     with engine.begin() as connection:
+        company_id = connection.execute(
+            text(
+                "INSERT INTO company (name, slug, source, is_active, created_at)"
+                " VALUES (:name, :slug, 'greenhouse', 1, '2026-01-01 00:00:00')"
+                " RETURNING id"
+            ),
+            {"name": f"Acme {external_id}", "slug": slug},
+        ).scalar_one()
+        posting_id = connection.execute(
+            text(
+                "INSERT INTO posting (company_id, external_id, title, url, first_seen_at,"
+                " updated_at) VALUES (:company_id, :external_id, 'Backend Engineer', :url,"
+                " '2026-01-01 00:00:00', '2026-01-01 00:00:00') RETURNING id"
+            ),
+            {
+                "company_id": company_id,
+                "external_id": external_id,
+                "url": f"https://example.test/{external_id}",
+            },
+        ).scalar_one()
         connection.execute(
             text(
                 "INSERT INTO match (posting_id, score, reason, state, created_at)"
@@ -436,6 +446,53 @@ def _matches_emailed_values(engine: Engine) -> list[object]:
         return [
             row[0]
             for row in connection.exec_driver_sql("SELECT matches_emailed FROM run ORDER BY id")
+        ]
+
+
+def _store_company_rows_before_this_revision(engine: Engine, *slugs: str) -> None:
+    """Insert company rows with only the columns this schema has always had.
+
+    SQL rather than the model, for the reason `_store_a_match_row_before_this_revision`
+    gives: the model declares the two columns this case is about to add, so an
+    INSERT naming them would fail on the schema that predates the revision -- which
+    is the schema these rows are written into.
+    """
+    with engine.begin() as connection:
+        for slug in slugs:
+            connection.execute(
+                text(
+                    "INSERT INTO company (name, slug, source, is_active, created_at)"
+                    " VALUES (:name, :slug, 'greenhouse', 1, '2026-01-01 00:00:00')"
+                ),
+                {"name": slug.capitalize(), "slug": slug},
+            )
+
+
+def _company_rows_before_the_columns(engine: Engine) -> list[tuple[object, ...]]:
+    """The `company` values a database before this revision holds, read with SQL.
+
+    Read with SQL for the reason the resume helper above gives: the model declares
+    the columns this case adds, and a SELECT naming them would fail on the schema
+    that predates them.
+    """
+    with engine.connect() as connection:
+        return [
+            tuple(row)
+            for row in connection.exec_driver_sql(
+                "SELECT id, name, slug, source, is_active, created_at"
+                " FROM company ORDER BY id"
+            )
+        ]
+
+
+def _validator_values(engine: Engine) -> list[tuple[object, object]]:
+    """The two new columns' values, in id order, read with SQL for the reason above."""
+    with engine.connect() as connection:
+        return [
+            (row[0], row[1])
+            for row in connection.exec_driver_sql(
+                "SELECT etag, last_modified FROM company ORDER BY id"
+            )
         ]
 
 
@@ -851,6 +908,39 @@ def test_the_run_column_is_added_null_with_no_backfill(database: Engine) -> None
 
     assert "matches_emailed" not in _reflected_columns(database, "run")
     assert _run_rows_before_the_column(database) == before
+
+
+def test_the_validator_columns_are_added_null_with_no_backfill(database: Engine) -> None:
+    """#55's columns: a database at #36 with two company rows gains them, both NULL.
+
+    The fixture's database is rebuilt at #36 -- the schema before this revision --
+    and two company rows go in. `upgrade head` adds the two columns: every row
+    reads NULL, which means "no validator yet" and not "no ETag" -- a row written
+    before them has no validator to send, so its next run asks an unconditional
+    question and stores whatever the answer carries -- and no row's name, slug,
+    source, active flag or timestamp is rewritten. `downgrade()` takes both columns
+    away again and leaves the rows exactly as they were.
+    """
+    Base.metadata.drop_all(database)
+    command.upgrade(_config(), RUN_MATCHES_EMAILED_REVISION)
+    _store_company_rows_before_this_revision(database, "acme", "globex")
+    before = _company_rows_before_the_columns(database)
+    assert len(before) == 2  # the assertions below are about rows that exist
+    assert "etag" not in _reflected_columns(database, "company")
+    assert "last_modified" not in _reflected_columns(database, "company")
+
+    command.upgrade(_config(), "head")
+
+    assert _reflected_columns(database, "company")["etag"] == ("TEXT", True)
+    assert _reflected_columns(database, "company")["last_modified"] == ("TEXT", True)
+    assert _validator_values(database) == [(None, None), (None, None)]
+    assert _company_rows_before_the_columns(database) == before
+
+    command.downgrade(_config(), RUN_MATCHES_EMAILED_REVISION)
+
+    assert "etag" not in _reflected_columns(database, "company")
+    assert "last_modified" not in _reflected_columns(database, "company")
+    assert _company_rows_before_the_columns(database) == before
 
 
 def test_the_four_documented_commands_do_what_they_say(database: Engine, tmp_path: Path) -> None:

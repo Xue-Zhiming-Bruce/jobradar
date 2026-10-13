@@ -1,6 +1,6 @@
 """A company's public Lever board, turned into postings this app can store.
 
-`fetch(slug)` makes one synchronous `GET` to
+`fetch(slug)` makes one synchronous, conditional `GET` to
 `https://api.lever.co/v0/postings/{slug}?mode=json`. Lever's public board API is
 one unauthenticated request that answers a top-level JSON array -- no envelope,
 no `meta` -- and a board that does not exist answers `404`. Nothing is written
@@ -48,7 +48,14 @@ from collections.abc import Callable
 
 import httpx2
 
-from app.sources.base import MalformedPayload, SourcePosting, fetch_body, html_to_text
+from app.sources.base import (
+    BoardPostings,
+    MalformedPayload,
+    NotModified,
+    SourcePosting,
+    fetch_body,
+    html_to_text,
+)
 
 BOARD_URL = "https://api.lever.co/v0/postings/{slug}"
 
@@ -63,23 +70,32 @@ DESCRIPTION_SEPARATOR = "\n\n"
 def fetch(
     slug: str,
     *,
+    etag: str | None = None,
+    last_modified: str | None = None,
     client: httpx2.Client | None = None,
     sleep: Callable[[float], None] = time.sleep,
-) -> list[SourcePosting]:
+) -> BoardPostings | NotModified:
     """Every posting on the board `slug` names, or a `SourceError` saying why not.
 
-    The one request, its timeout, its bounded retries and the body cap are
-    `base.fetch_body`'s -- this adapter knows only what the answer means. A value
-    that cannot be a slug makes no request at all.
+    The one request, its timeout, its bounded retries, its conditional headers and
+    the body cap are `base.fetch_body`'s -- this adapter knows only what the answer
+    means. A `304` to the conditional request is returned as it arrived, so the
+    walk ( #55) can skip the company; otherwise the answer's postings are parsed
+    and handed out with the answer's own validator beside them. A value that cannot
+    be a slug makes no request at all.
     """
-    body = fetch_body(
+    answer = fetch_body(
         slug,
         BOARD_URL.format(slug=slug),
         params=MODE_PARAMETER,
+        etag=etag,
+        last_modified=last_modified,
         client=client,
         sleep=sleep,
     )
-    return _postings(body)
+    if isinstance(answer, NotModified):
+        return answer
+    return BoardPostings(_postings(answer.body), answer.etag, answer.last_modified)
 
 
 def _postings(body: str) -> list[SourcePosting]:

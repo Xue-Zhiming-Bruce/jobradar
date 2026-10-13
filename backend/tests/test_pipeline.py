@@ -27,7 +27,7 @@ import inspect
 import json
 import logging
 import socket
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -67,9 +67,11 @@ from app.services.pipeline import NO_ACTIVE_RESUME, run_pipeline
 from app.sources import greenhouse
 from app.sources.base import (
     MAX_BODY_BYTES,
+    BoardPostings,
     BoardShrunk,
     BoardUnavailable,
     MalformedPayload,
+    NotModified,
     OversizedPayload,
     Source,
     SourceError,
@@ -152,7 +154,11 @@ class FakeSource:
     `boards` is the postings each slug's board returns and `failing` the
     `SourceError` a slug's board raises. A slug in neither is refused rather than
     answered empty, so a case that forgot to script a board fails instead of
-    passing as a board nobody listed anything on.
+    passing as a board nobody listed anything on. `not_modified` names the boards
+    that answer a conditional `304`, and `validators` the validator a `200` board
+    hands out beside its postings -- `None`/`None` for a board that sent neither.
+    `asked` records the validator each call carried, which is what proves the
+    walk sent the company's stored pair.
     """
 
     def __init__(
@@ -160,20 +166,31 @@ class FakeSource:
         boards: dict[str, list[SourcePosting]] | None = None,
         *,
         failing: dict[str, SourceError] | None = None,
+        not_modified: Iterable[str] = (),
+        validators: dict[str, tuple[str | None, str | None]] | None = None,
     ) -> None:
         self.boards = boards or {}
         self.failing = failing or {}
+        self.not_modified = set(not_modified)
+        self.validators = validators or {}
         self.calls: list[str] = []
+        self.asked: list[tuple[str, str | None, str | None]] = []
 
-    def __call__(self, slug: str) -> list[SourcePosting]:
+    def __call__(
+        self, slug: str, *, etag: str | None = None, last_modified: str | None = None
+    ) -> BoardPostings | NotModified:
         """The board this slug was scripted with, or the error it was scripted to raise."""
         self.calls.append(slug)
+        self.asked.append((slug, etag, last_modified))
         failure = self.failing.get(slug)
         if failure is not None:
             raise failure
+        if slug in self.not_modified:
+            return NotModified()
         if slug not in self.boards:
             raise UnknownSlug(f"No board is scripted for '{slug}'")
-        return self.boards[slug]
+        board_etag, board_last_modified = self.validators.get(slug, (None, None))
+        return BoardPostings(self.boards[slug], board_etag, board_last_modified)
 
 
 class RaisingScorer:
@@ -1065,6 +1082,192 @@ def test_the_pipeline_writes_no_row_of_its_own_but_the_runs_counts() -> None:
     assert ".commit(" not in PIPELINE_SOURCE
 
 
+# The validator: sent with the call, stored after the payload, and what a 304 does to the walk.
+
+STORED_ETAG = 'W/"v1"'
+ANSWERED_ETAG = 'W/"v2"'
+STORED_LAST_MODIFIED = "Wed, 21 Oct 2015 07:28:00 GMT"
+
+
+def _seed_validator(company_id: int, *, etag: str | None, last_modified: str | None) -> None:
+    """A company's stored validator, written straight through the app's own session."""
+    with db.session_scope() as session:
+        company = session.get(Company, company_id)
+        company.etag = etag
+        company.last_modified = last_modified
+
+
+def _stored_validator(company_id: int) -> tuple[str | None, str | None]:
+    """That company's two validator columns, as the database holds them."""
+    with db.session_scope() as session:
+        company = session.get(Company, company_id)
+        return (company.etag, company.last_modified)
+
+
+def test_the_company_s_stored_validator_is_sent_with_the_call(engine: Engine) -> None:
+    """The pair the row holds is what the adapter is asked with, read from the fake's own record."""
+    company = _company("acme")
+    _seed_validator(company, etag=STORED_ETAG, last_modified=STORED_LAST_MODIFIED)
+    source = FakeSource({"acme": [_posting("1")]})
+    _active_resume()
+
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.asked == [("acme", STORED_ETAG, STORED_LAST_MODIFIED)]
+
+
+def test_a_200_s_validator_is_stored_on_the_row_in_the_same_run(engine: Engine) -> None:
+    """Exactly what the answer carried: the old value is replaced by this run's own fetch."""
+    company = _company("acme")
+    _seed_validator(company, etag=STORED_ETAG, last_modified=STORED_LAST_MODIFIED)
+    source = FakeSource({"acme": [_posting("1")]}, validators={"acme": (ANSWERED_ETAG, None)})
+    _active_resume()
+
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert _stored_validator(company) == (ANSWERED_ETAG, None)
+
+
+def test_a_304_company_keeps_every_one_of_its_postings_open(engine: Engine) -> None:
+    """The board was not read, so nothing it holds may be closed: the real ingest is in place."""
+    company = _company("acme")
+    _stored_posting(company, external_id="1")
+    _stored_posting(company, external_id="2")
+    before = _postings_of(company)
+    _active_resume()
+
+    run_pipeline(
+        _run(),
+        sources={"greenhouse": FakeSource({}, not_modified={"acme"})},
+        scorer=FakeScorer(_result()),
+    )
+
+    assert _postings_of(company) == before  # not closed, not rewritten, not deleted
+    assert all(row["closed_at"] is None for row in before.values())
+    assert _open_count(company) == 2  # read by the module's own count, not by this case's copy
+
+
+def test_a_304_company_is_never_handed_to_ingest(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One `304` board and one `200` board: the spy's call list names only the board that answered."""
+    skipped = _company("acme")
+    ingested = _company("beta")
+    calls: list[tuple[int, list[str]]] = []
+
+    def recording_ingest(company_id: int, postings: list[SourcePosting]) -> IngestResult:
+        calls.append((company_id, [posting.external_id for posting in postings]))
+        return IngestResult(created_ids=[], reopened_ids=[])
+
+    monkeypatch.setattr(pipeline_module, "ingest_postings", recording_ingest)
+    _active_resume()
+
+    run_pipeline(
+        _run(),
+        sources={
+            "greenhouse": FakeSource(
+                {"beta": [_posting("1")]}, not_modified={"acme"}
+            )
+        },
+        scorer=FakeScorer(_result()),
+    )
+
+    assert calls == [(ingested, ["1"])]  # the skipped company's id is not in this list
+
+
+def test_a_skipped_board_contributes_nothing_to_either_count(engine: Engine) -> None:
+    """A `200` board of two postings and a `304` board: `postings_seen` is the two, and no more."""
+    _company("acme")  # answers 304, and is walked first
+    _company("beta")
+    _active_resume()
+    run = _run()
+
+    run_pipeline(
+        run,
+        sources={
+            "greenhouse": FakeSource(
+                {"beta": [_posting("1"), _posting("2")]}, not_modified={"acme"}
+            )
+        },
+        scorer=FakeScorer(_result()),
+    )
+
+    row = _run_row(run)
+    assert (row["postings_seen"], row["matches_created"]) == (2, 2)  # the skipped board's 0 is not here
+
+
+def test_a_304_leaves_the_stored_validator_exactly_as_it_was(engine: Engine) -> None:
+    """The validator that produced the `304` is still the validator of the body we hold."""
+    company = _company("acme")
+    _seed_validator(company, etag=STORED_ETAG, last_modified=STORED_LAST_MODIFIED)
+    _active_resume()
+
+    run_pipeline(
+        _run(),
+        sources={"greenhouse": FakeSource({}, not_modified={"acme"})},
+        scorer=FakeScorer(_result()),
+    )
+
+    assert _stored_validator(company) == (STORED_ETAG, STORED_LAST_MODIFIED)
+
+
+def test_a_refused_payload_leaves_the_stored_validator_untouched(engine: Engine) -> None:
+    """The guard refuses before the ingest, so the validator it answered with is not written."""
+    company = _company("acme")
+    _open_postings(company, 4)
+    _seed_validator(company, etag=STORED_ETAG, last_modified=None)
+    _active_resume()
+
+    with pytest.raises(BoardShrunk):
+        run_pipeline(
+            _run(),
+            sources={"greenhouse": FakeSource({"acme": []}, validators={"acme": (ANSWERED_ETAG, None)})},
+            scorer=FakeScorer(_result()),
+        )
+
+    assert _stored_validator(company) == (STORED_ETAG, None)  # next run asks the same question
+
+
+def test_a_payload_whose_ingest_raised_leaves_the_stored_validator_untouched(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A validator written too early would buy a board skipped forever: this is the case it stops."""
+    company = _company("acme")
+    _seed_validator(company, etag=STORED_ETAG, last_modified=None)
+    _active_resume()
+
+    def refusing_ingest(company_id: int, postings: list[SourcePosting]) -> IngestResult:
+        raise RuntimeError("the ingest failed after the board answered")
+
+    monkeypatch.setattr(pipeline_module, "ingest_postings", refusing_ingest)
+
+    with pytest.raises(RuntimeError):
+        run_pipeline(
+            _run(),
+            sources={"greenhouse": FakeSource({"acme": [_posting("1")]}, validators={"acme": (ANSWERED_ETAG, None)})},
+            scorer=FakeScorer(_result()),
+        )
+
+    assert _stored_validator(company) == (STORED_ETAG, None)
+
+
+def test_a_run_in_which_every_board_answers_304_is_a_success_with_nothing_new(
+    engine: Engine, client: TestClient, inline_starter: None
+) -> None:
+    """Through the real `POST /internal/tick`: a run is not a failure because there was nothing to read."""
+    acme = _company("acme")
+    beta = _company("beta")
+    _stored_posting(acme, external_id="1")
+    _stored_posting(beta, external_id="2")
+    _active_resume()
+
+    row = _tick(client, {"greenhouse": FakeSource({}, not_modified={"acme", "beta"})})
+
+    assert (row["status"], row["error"]) == ("succeeded", None)
+    assert (row["postings_seen"], row["matches_created"]) == (0, 0)
+    assert _rows(Posting) == 2  # both boards kept their rows
+    assert [posting["closed_at"] for company in (acme, beta) for posting in _postings_of(company).values()] == [None, None]
+    assert _rows(Match) == 0  # so the digest behind it has nothing to send
+
+
 # The shrink guard: a board that lists far fewer postings than the company has open.
 
 # A string a board's body carries that must reach no column of the run's row.
@@ -1251,7 +1454,17 @@ def _board(*answers: httpx2.Response | Exception) -> Callable[[str], list[Source
         return answer
 
     client = httpx2.Client(transport=httpx2.MockTransport(handle))
-    return lambda slug: greenhouse.fetch(slug, client=client, sleep=lambda seconds: None)
+
+    def board(slug: str, *, etag: str | None = None, last_modified: str | None = None):
+        return greenhouse.fetch(
+            slug,
+            etag=etag,
+            last_modified=last_modified,
+            client=client,
+            sleep=lambda seconds: None,
+        )
+
+    return board
 
 
 FAILED_BOARD_ANSWERS = [

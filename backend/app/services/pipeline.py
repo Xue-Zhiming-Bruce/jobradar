@@ -11,16 +11,22 @@ configuration of its own: the sources and the scorer arrive as arguments.
 One run does this, in this order, for every company whose `is_active` is true, in
 ascending `company.id` order:
 
-- `sources[company.source](company.slug)`, once per company, through the adapter
-  the row names and with the slug the row stores -- never a value rebuilt from
-  the company's name and never another company's adapter;
+- `sources[company.source](company.slug)` -- once per company, through the adapter
+  the row names and with the slug the row stores, never a value rebuilt from the
+  company's name and never another company's adapter. The company's stored
+  validator rides with the call as `etag`/`last_modified`, so a board that has not
+  changed answers `304` and the walk skips that company entirely: `NotModified`
+  returns to the top before the guard, before `_add_counts` and before the ingest,
+  so a board that was not read closes nothing, is counted by nobody and aborts
+  nothing;
 - `_refuse_shrunk_board`, which refuses that list when it names fewer than half
   the postings the company already has open, and at least
   `SHRINK_GUARD_MIN_OPEN_POSTINGS` of them are open: a `BoardShrunk`, raised before
   the ingest, so a refused board closes nothing and counts nothing;
 - `ingest.ingest_postings(company_id, postings)` for the list that board
   returned, so every `posting` row -- the insert, the update in place, the close
-  and the reopen -- is #6's, and this module writes no `posting` column;
+  and the reopen -- is #6's, and this module writes no `posting` column; then
+  `_store_validator`, which writes the answer's own validator on the company row;
 - for each id `IngestResult.created_ids` reported, in that order: the row read
   back as a `SourcePosting` and offered to `prefilter` with the active resume's
   parsed skills. A posting the prefilter rejects is stored through
@@ -32,8 +38,10 @@ ascending `company.id` order:
 
 `run.postings_seen` is every posting the boards returned, added as each fetch
 answers, and `run.matches_created` is one per `record_score` write, added as each
-score lands -- a prefilter rejection is not a match and is not counted. Both are
-written as they are earned rather than once at the end, so a run that fails
+score lands -- a prefilter rejection is not a match and is not counted. A skipped
+`304` board adds to neither: it contributed no posting at all, so a run over one
+`304` board and one `200` board of N postings ends with `postings_seen == N`. Both
+are written as they are earned rather than once at the end, so a run that fails
 half-way says how far it got: every write committed in its own
 `db.session_scope()`, so nothing already written is rolled back by a later
 failure, and the next tick re-runs the whole thing idempotently on #6's dedupe.
@@ -65,6 +73,16 @@ Three things are deliberately not done here:
   owner deactivates the company (#29). The price -- the companies after it are not
   fetched and the day's digest does not go out -- is #34's deliberate choice
   against a silent miss, and the escape is #59.
+- a `304` is not a failure and does not work like one: the board answered that
+  nothing changed, so the walk skips that company and goes on. The company's
+  stored validator is left exactly as it was -- it is still the validator of the
+  body this app holds -- and a run in which every board answers `304` is an
+  ordinary success with both counts 0.
+- the validator is written only after the payload was trusted and stored: an
+  unwritten validator costs one more unconditional fetch, while one written too
+  early buys a board skipped forever. So a payload the guard refuses and an
+  `ingest_postings` that raises both leave the stored validator untouched, and the
+  next run asks the same question again.
 """
 
 from collections.abc import Mapping
@@ -77,7 +95,14 @@ from app.matching.scorer import MatchScorer, record_score
 from app.models import Company, Posting, Run
 from app.services import resume
 from app.services.ingest import ingest_postings
-from app.sources.base import BoardShrunk, Source, SourceError, SourcePosting
+from app.sources.base import (
+    BoardPostings,
+    BoardShrunk,
+    NotModified,
+    Source,
+    SourceError,
+    SourcePosting,
+)
 
 # The one failure this module raises of its own, and the message a run row keeps:
 # a run with nothing to score against would otherwise fetch and store postings it
@@ -109,11 +134,15 @@ def run_pipeline(
         raise RuntimeError(NO_ACTIVE_RESUME)
     resume_must_haves = tuple(resume.active_resume_skills())
 
-    for company_id, slug, source in _active_companies():
-        postings = _fetched(sources[source], slug)
+    for company_id, slug, source, etag, last_modified in _active_companies():
+        fetched = _fetched(sources[source], slug, etag=etag, last_modified=last_modified)
+        if isinstance(fetched, NotModified):
+            continue  # the board has not changed: nothing to store, close or count
+        postings = fetched.postings
         _refuse_shrunk_board(company_id, slug, postings)
         _add_counts(run_id, postings_seen=len(postings))
         created_ids = ingest_postings(company_id, postings).created_ids
+        _store_validator(company_id, fetched.etag, fetched.last_modified)
         for posting_id, posting in _stored_postings(created_ids):
             decision = prefilter(posting, resume_must_haves=resume_must_haves)
             if not decision.passed:
@@ -123,37 +152,60 @@ def run_pipeline(
             _add_counts(run_id, matches_created=1)
 
 
-def _active_companies() -> list[tuple[int, str, str]]:
-    """Every active company's `id`, stored `slug` and stored `source`, in ascending `id` order.
+def _active_companies() -> list[tuple[int, str, str, str | None, str | None]]:
+    """Every active company's `id`, stored `slug`, `source` and stored validator.
 
-    All three values are read while the session is open, because a row handed out
+    All five values are read while the session is open, because a row handed out
     of `db.session_scope()` is expired by its commit. An inactive company is
     simply not in this list, so the source is never asked about a board this app
     has stopped watching.
     """
     with db.session_scope() as session:
         return [
-            (row.id, row.slug, row.source)
+            (row.id, row.slug, row.source, row.etag, row.last_modified)
             for row in session.scalars(
                 select(Company).where(Company.is_active.is_(True)).order_by(Company.id)
             )
         ]
 
 
-def _fetched(source: Source, slug: str) -> list[SourcePosting]:
-    """What that board returned, or a `SourceError` naming the company's slug.
+def _fetched(
+    source: Source, slug: str, *, etag: str | None, last_modified: str | None
+) -> BoardPostings | NotModified:
+    """What that board answered, or a `SourceError` naming the company's slug.
 
-    The source's own message is kept -- an adapter's failure message carries a
-    status or the slug, never a response body -- and the slug is added here,
-    because a run's `error` names the company whose board stopped the run and a
-    caller cannot otherwise tell two boards' failures apart.
+    The company's stored validator goes out with the call and the answer comes back
+    as it is: either the postings and the validator that body arrived with, or the
+    `NotModified` that says there is nothing to store. The source's own message is
+    kept -- an adapter's failure message carries a status or the slug, never a
+    response body -- and the slug is added here, because a run's `error` names the
+    company whose board stopped the run and a caller cannot otherwise tell two
+    boards' failures apart. `NotModified` is not a `SourceError`, so it passes this
+    seam through rather than being turned into a failure.
     """
     try:
-        return source(slug)
+        return source(slug, etag=etag, last_modified=last_modified)
     except SourceError as error:
         raise SourceError(
             f"The board for company '{slug}' could not be fetched: {error}"
         ) from error
+
+
+def _store_validator(company_id: int, etag: str | None, last_modified: str | None) -> None:
+    """Write the validator the stored payload came with, in its own unit of work.
+
+    Called once `ingest_postings` has returned, so the two columns always describe
+    the body of the last stored payload -- `None` included, which is what a board
+    that sent no validator leaves behind. A row that is no longer there -- deleted
+    while the run was in flight -- is nothing to write and not a failure, the way
+    `_add_counts` treats it.
+    """
+    with db.session_scope() as session:
+        company = session.get(Company, company_id)
+        if company is None:
+            return
+        company.etag = etag
+        company.last_modified = last_modified
 
 
 def _refuse_shrunk_board(company_id: int, slug: str, postings: list[SourcePosting]) -> None:

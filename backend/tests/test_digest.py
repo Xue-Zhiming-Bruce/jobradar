@@ -61,7 +61,7 @@ from app.services.digest import (
     send_digest,
 )
 from app.services.pipeline import run_pipeline
-from app.sources.base import SourceError, SourcePosting
+from app.sources.base import BoardPostings, SourceError, SourcePosting
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 APP_ROOT = BACKEND_ROOT / "app"
@@ -137,9 +137,11 @@ class FakeSource:
         self.postings = postings
         self.calls: list[str] = []
 
-    def __call__(self, slug: str) -> list[SourcePosting]:
+    def __call__(
+        self, slug: str, *, etag: str | None = None, last_modified: str | None = None
+    ) -> BoardPostings:
         self.calls.append(slug)
-        return list(self.postings)
+        return BoardPostings(list(self.postings), None, None)
 
 
 @pytest.fixture(autouse=True)

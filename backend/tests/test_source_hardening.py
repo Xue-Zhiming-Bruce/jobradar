@@ -29,12 +29,20 @@ from app.main import app
 from app.routes.watchlist import get_source
 from app.sources import greenhouse, lever
 from app.sources.base import (
+    ETAG_HEADER,
+    IF_MODIFIED_SINCE_HEADER,
+    IF_NONE_MATCH_HEADER,
+    LAST_MODIFIED_HEADER,
     MAX_BODY_BYTES,
     REQUEST_TIMEOUT_SECONDS,
     RETRY_ATTEMPTS,
     RETRY_BACKOFF_SECONDS,
+    BoardAnswer,
+    BoardPostings,
+    BoardShrunk,
     BoardUnavailable,
     MalformedPayload,
+    NotModified,
     OversizedPayload,
     SourceError,
     SourcePosting,
@@ -159,7 +167,7 @@ def test_two_refusals_then_an_answer_returns_the_postings_after_exactly_three_re
         httpx2.Response(503), httpx2.Response(503), httpx2.Response(200, content=body)
     )
 
-    postings = adapter.fetch(slug, client=board.client(), sleep=waits.append)
+    postings = adapter.fetch(slug, client=board.client(), sleep=waits.append).postings
 
     assert isinstance(postings, list)
     assert len(postings) == 2
@@ -371,9 +379,9 @@ def test_a_body_exactly_at_the_cap_is_accepted() -> None:
     body = b"y" * MAX_BODY_BYTES
     board = Board(httpx2.Response(200, content=body))
 
-    text = fetch_body("acme", BODY_URL, params={}, client=board.client())
+    answer = fetch_body("acme", BODY_URL, params={}, client=board.client())
 
-    assert text == body.decode()
+    assert answer.body == body.decode()
 
 
 # No payload text leaves the helper: neither on a raised message nor on the wire.
@@ -444,3 +452,201 @@ def test_the_watchlist_probe_answers_a_board_it_could_not_read_as_502_and_never_
     assert response.status_code == 502
     assert "could not be read" in response.json()["detail"]
     assert SENTINEL not in response.text
+
+
+# The conditional request: the validator a company stores, sent back, and the 304 it earns.
+
+
+# A validator as a board would send it: an `ETag` keeps its quotes, and a
+# `Last-Modified` is the date string the board chose.
+STORED_ETAG = 'W/"v1"'
+STORED_LAST_MODIFIED = "Wed, 21 Oct 2015 07:28:00 GMT"
+
+_VALIDATOR_CASES = [
+    pytest.param(STORED_ETAG, None, {IF_NONE_MATCH_HEADER: STORED_ETAG}, id="an etag only"),
+    pytest.param(
+        None,
+        STORED_LAST_MODIFIED,
+        {IF_MODIFIED_SINCE_HEADER: STORED_LAST_MODIFIED},
+        id="a date only",
+    ),
+    pytest.param(
+        STORED_ETAG,
+        STORED_LAST_MODIFIED,
+        {IF_NONE_MATCH_HEADER: STORED_ETAG, IF_MODIFIED_SINCE_HEADER: STORED_LAST_MODIFIED},
+        id="both",
+    ),
+]
+
+
+@pytest.mark.parametrize("adapter, slug, body", ADAPTERS)
+def test_a_first_run_asks_an_unconditional_question(
+    adapter: object, slug: str, body: bytes
+) -> None:
+    """No validator stored, so neither conditional header is sent -- read from the request."""
+    board = Board(httpx2.Response(200, content=body))
+
+    answer = adapter.fetch(slug, client=board.client(), sleep=lambda seconds: None)
+
+    assert len(board.requests) == 1
+    request = board.requests[0]
+    assert IF_NONE_MATCH_HEADER not in request.headers
+    assert IF_MODIFIED_SINCE_HEADER not in request.headers
+    assert (answer.etag, answer.last_modified) == (None, None)
+
+
+@pytest.mark.parametrize("adapter, slug, body", ADAPTERS)
+@pytest.mark.parametrize("etag, last_modified, sent", _VALIDATOR_CASES)
+def test_a_stored_validator_is_sent_back_and_each_header_only_when_its_value_is(
+    adapter: object,
+    slug: str,
+    body: bytes,
+    etag: str | None,
+    last_modified: str | None,
+    sent: dict[str, str],
+) -> None:
+    """The value as the board sent it, quotes and all, and each header on its own."""
+    board = Board(httpx2.Response(304))
+
+    answer = adapter.fetch(
+        slug,
+        etag=etag,
+        last_modified=last_modified,
+        client=board.client(),
+        sleep=lambda seconds: None,
+    )
+
+    assert type(answer) is NotModified
+    assert len(board.requests) == 1
+    request = board.requests[0]
+    conditional = (IF_NONE_MATCH_HEADER, IF_MODIFIED_SINCE_HEADER)
+    assert {name: request.headers[name] for name in conditional if name in request.headers} == sent
+
+
+@pytest.mark.parametrize("adapter, slug, body", ADAPTERS)
+def test_an_empty_validator_asks_no_conditional_question(
+    adapter: object, slug: str, body: bytes
+) -> None:
+    """`value or None` on the way in as well: an empty conditional header is never sent."""
+    board = Board(httpx2.Response(200, content=body))
+
+    adapter.fetch(slug, etag="", last_modified="", client=board.client(), sleep=lambda _: None)
+
+    request = board.requests[0]
+    assert IF_NONE_MATCH_HEADER not in request.headers
+    assert IF_MODIFIED_SINCE_HEADER not in request.headers
+
+
+@pytest.mark.parametrize("adapter, slug, body", ADAPTERS)
+def test_a_304_to_a_conditional_request_is_not_modified_after_one_request_and_no_wait(
+    adapter: object, slug: str, body: bytes
+) -> None:
+    """A returned outcome: not one of the six error classes, and the loop does not try again."""
+    waits: list[float] = []
+    board = Board(httpx2.Response(304))
+
+    answer = adapter.fetch(slug, etag=STORED_ETAG, client=board.client(), sleep=waits.append)
+
+    assert type(answer) is NotModified
+    assert not isinstance(answer, SourceError)
+    family = (
+        UnknownSlug,
+        BoardUnavailable,
+        MalformedPayload,
+        SourceTimeout,
+        OversizedPayload,
+        BoardShrunk,
+    )
+    assert not any(isinstance(answer, error) for error in family)
+    assert len(board.requests) == 1
+    assert waits == []
+
+
+@pytest.mark.parametrize("adapter, slug, body", ADAPTERS)
+def test_a_304_to_a_request_that_carried_no_validator_is_a_protocol_violation(
+    adapter: object, slug: str, body: bytes
+) -> None:
+    """Never read as "not modified": a board this app holds no validator for could not be read."""
+    waits: list[float] = []
+    board = Board(httpx2.Response(304))
+
+    with pytest.raises(SourceError) as raised:
+        adapter.fetch(slug, client=board.client(), sleep=waits.append)
+
+    assert type(raised.value) is BoardUnavailable
+    assert "304" in str(raised.value)
+    assert len(board.requests) == 1
+    assert waits == []
+
+
+@pytest.mark.parametrize("adapter, slug, body", ADAPTERS)
+def test_a_retry_can_end_in_a_304_and_the_304_is_where_the_loop_ends(
+    adapter: object, slug: str, body: bytes
+) -> None:
+    waits: list[float] = []
+    board = Board(httpx2.Response(503), httpx2.Response(304))
+
+    answer = adapter.fetch(slug, etag=STORED_ETAG, client=board.client(), sleep=waits.append)
+
+    assert type(answer) is NotModified
+    assert len(board.requests) == 2
+    assert waits == [RETRY_BACKOFF_SECONDS] == [0.5]
+
+
+def test_the_helper_answers_with_the_body_and_the_validator_it_arrived_with() -> None:
+    board = Board(
+        httpx2.Response(
+            200,
+            text="a body",
+            headers={ETAG_HEADER: STORED_ETAG, LAST_MODIFIED_HEADER: STORED_LAST_MODIFIED},
+        )
+    )
+
+    answer = fetch_body("acme", BODY_URL, params={}, client=board.client())
+
+    assert type(answer) is BoardAnswer
+    assert (answer.body, answer.etag, answer.last_modified) == (
+        "a body",
+        STORED_ETAG,
+        STORED_LAST_MODIFIED,
+    )
+
+
+@pytest.mark.parametrize("adapter, slug, body", ADAPTERS)
+def test_a_200_hands_the_boards_own_validator_out_verbatim(
+    adapter: object, slug: str, body: bytes
+) -> None:
+    """Nothing parsed and no quote stripped: the value goes back out as it arrived."""
+    board = Board(
+        httpx2.Response(
+            200,
+            content=body,
+            headers={ETAG_HEADER: STORED_ETAG, LAST_MODIFIED_HEADER: STORED_LAST_MODIFIED},
+        )
+    )
+
+    answer = adapter.fetch(slug, client=board.client(), sleep=lambda seconds: None)
+
+    assert type(answer) is BoardPostings
+    assert (answer.etag, answer.last_modified) == (STORED_ETAG, STORED_LAST_MODIFIED)
+    assert len(answer.postings) == 2
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        pytest.param({}, id="no validator headers at all"),
+        pytest.param(
+            {ETAG_HEADER: "", LAST_MODIFIED_HEADER: ""}, id="an empty one on each"
+        ),
+    ],
+)
+@pytest.mark.parametrize("adapter, slug, body", ADAPTERS)
+def test_a_200_that_sent_no_usable_validator_hands_out_none_for_both(
+    adapter: object, slug: str, body: bytes, headers: dict[str, str]
+) -> None:
+    board = Board(httpx2.Response(200, content=body, headers=headers))
+
+    answer = adapter.fetch(slug, client=board.client(), sleep=lambda seconds: None)
+
+    assert (answer.etag, answer.last_modified) == (None, None)

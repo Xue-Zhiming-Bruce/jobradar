@@ -42,6 +42,7 @@ from app.services import resume
 from app.services.pipeline import run_pipeline
 from app.sources import SOURCES
 from app.sources.base import (
+    BoardPostings,
     BoardUnavailable,
     MalformedPayload,
     SourceError,
@@ -127,9 +128,11 @@ class BoardSource:
         self.boards = boards
         self.calls: list[str] = []
 
-    def __call__(self, slug: str) -> list[SourcePosting]:
+    def __call__(
+        self, slug: str, *, etag: str | None = None, last_modified: str | None = None
+    ) -> BoardPostings:
         self.calls.append(slug)
-        return self.boards[slug]
+        return BoardPostings(self.boards[slug], None, None)
 
 
 @pytest.fixture(autouse=True)

@@ -134,7 +134,7 @@ serves both, so there is one origin, no CORS and no second service.
 `docker compose ps` shows both as `healthy`, and the container names the revision
 it applied:
 
-    docker compose exec api alembic current   # 0006_run_matches_emailed (head)
+    docker compose exec api alembic current   # 0007_company_board_validator (head)
 
 There is no migration step to run by hand. The image ships `alembic.ini` and
 `migrations/`, and the container applies them at startup against the same

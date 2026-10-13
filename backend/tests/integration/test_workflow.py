@@ -37,6 +37,7 @@ from app.routes.internal import get_mailer
 from app.routes.watchlist import get_source
 from app.services import resume
 from app.services.digest import DIGEST_SUBJECT, FakeMailer
+from app.sources.base import BoardPostings
 from app.sources.greenhouse import SourcePosting
 from tests.integration.support import RUNNING, rows_of, wait_for_terminal
 
@@ -96,11 +97,13 @@ class ScriptedSource:
         self.boards = boards
         self.slugs: list[str] = []
 
-    def __call__(self, slug: str) -> list[SourcePosting]:
+    def __call__(
+        self, slug: str, *, etag: str | None = None, last_modified: str | None = None
+    ) -> BoardPostings:
         self.slugs.append(slug)
         if slug not in self.boards:
             raise AssertionError(f"No board is scripted for '{slug}'")
-        return list(self.boards[slug])
+        return BoardPostings(list(self.boards[slug]), None, None)
 
 
 @pytest.fixture

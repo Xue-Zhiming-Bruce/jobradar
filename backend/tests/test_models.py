@@ -37,7 +37,7 @@ _EXPECTED_COLUMNS = {
         "uploaded_at",
         "is_active",
     },
-    "company": {"id", "name", "slug", "is_active", "created_at"},
+    "company": {"id", "name", "slug", "is_active", "created_at", "etag", "last_modified"},
     "posting": {
         "id",
         "company_id",
@@ -77,7 +77,7 @@ _EXPECTED_COLUMNS = {
 
 # The length of every string column: the budget #2 declared, so a column is not
 # resized by accident. `None` means unbounded, which `String(255)` would not be
-# on PostgreSQL -- the seven columns whose source text has no known budget.
+# on PostgreSQL -- the nine columns whose source text has no known budget.
 _STRING_LENGTHS = {
     ("resume", "filename"): 255,
     ("resume", "content_type"): 100,
@@ -87,6 +87,8 @@ _STRING_LENGTHS = {
     ("company", "name"): 255,
     ("company", "slug"): 255,
     ("company", "source"): 20,
+    ("company", "etag"): None,
+    ("company", "last_modified"): None,
     ("posting", "external_id"): 255,
     ("posting", "title"): None,
     ("posting", "location"): 255,
@@ -105,6 +107,8 @@ _STRING_LENGTHS = {
 _UNBOUNDED_STRING_COLUMNS = {
     ("resume", "text"),
     ("resume", "parsed_fields"),
+    ("company", "etag"),
+    ("company", "last_modified"),
     ("posting", "title"),
     ("posting", "url"),
     ("posting", "description"),
@@ -258,7 +262,7 @@ def test_every_string_column_carries_the_length_declared_for_it() -> None:
     assert lengths == _STRING_LENGTHS
 
 
-def test_only_the_seven_columns_with_no_length_budget_are_unbounded() -> None:
+def test_only_the_nine_columns_with_no_length_budget_are_unbounded() -> None:
     unbounded = {
         (table.name, column.name)
         for table in Base.metadata.sorted_tables

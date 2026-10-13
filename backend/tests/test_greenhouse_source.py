@@ -106,7 +106,7 @@ def test_one_request_is_made_to_the_board_endpoint_with_content_requested() -> N
     """The recorded board drives the fetch, and the request is the one the payload needs."""
     requests: list[httpx2.Request] = []
 
-    postings = fetch(SLUG, client=_client_serving(BOARD_BODY, requests))
+    postings = fetch(SLUG, client=_client_serving(BOARD_BODY, requests)).postings
 
     assert len(postings) == 2
     assert len(requests) == 1
@@ -118,7 +118,7 @@ def test_one_request_is_made_to_the_board_endpoint_with_content_requested() -> N
 
 def test_every_field_of_each_posting_comes_from_the_payload() -> None:
     """Fields compared whole, one posting per job: a hard-coded answer cannot pass."""
-    postings = fetch(SLUG, client=_client_serving(BOARD_BODY, []))
+    postings = fetch(SLUG, client=_client_serving(BOARD_BODY, [])).postings
 
     assert isinstance(postings, list)
     assert all(isinstance(posting, SourcePosting) for posting in postings)
@@ -143,7 +143,7 @@ def test_every_field_of_each_posting_comes_from_the_payload() -> None:
 
 def test_a_description_is_the_visible_text_of_the_escaped_html() -> None:
     """The scorer (#8) gets sentences, not the payload's escaped markup."""
-    first, second = fetch(SLUG, client=_client_serving(BOARD_BODY, []))
+    first, second = fetch(SLUG, client=_client_serving(BOARD_BODY, [])).postings
 
     assert "Abuse Operations is the front-line incident response" in first.description
     assert "Design and build internal products used daily by engineering" in second.description
@@ -161,7 +161,7 @@ def test_a_posting_without_a_location_or_a_description_is_a_posting() -> None:
     del payload["jobs"][1]["location"]
     del payload["jobs"][1]["content"]
 
-    first, second = fetch(SLUG, client=_client_serving(_body_of(payload), []))
+    first, second = fetch(SLUG, client=_client_serving(_body_of(payload), [])).postings
 
     assert first.location is None
     assert first.description is None
@@ -173,7 +173,7 @@ def test_a_posting_without_a_location_or_a_description_is_a_posting() -> None:
 def test_an_empty_board_is_an_empty_list_and_still_one_request() -> None:
     requests: list[httpx2.Request] = []
 
-    postings = fetch(SLUG, client=_client_serving(EMPTY_BOARD_BODY, requests))
+    postings = fetch(SLUG, client=_client_serving(EMPTY_BOARD_BODY, requests)).postings
 
     assert isinstance(postings, list)
     assert postings == []
@@ -185,8 +185,8 @@ def test_meta_is_not_read() -> None:
     disagreeing = _board_payload()
     disagreeing["meta"] = {"total": 0}
 
-    assert fetch(SLUG, client=_client_serving(_body_of({"jobs": []}), [])) == []
-    assert len(fetch(SLUG, client=_client_serving(_body_of(disagreeing), []))) == 2
+    assert fetch(SLUG, client=_client_serving(_body_of({"jobs": []}), [])).postings == []
+    assert len(fetch(SLUG, client=_client_serving(_body_of(disagreeing), [])).postings) == 2
 
 
 MALFORMED_BODIES = [
@@ -243,7 +243,7 @@ def test_a_slug_shaped_value_is_sent_as_it_is(slug: str) -> None:
     """No real board is refused by the gate, and no slug is lower-cased on the way out."""
     requests: list[httpx2.Request] = []
 
-    postings = fetch(slug, client=_client_serving(BOARD_BODY, requests, slug=slug))
+    postings = fetch(slug, client=_client_serving(BOARD_BODY, requests, slug=slug)).postings
 
     assert len(postings) == 2
     assert len(requests) == 1
@@ -287,7 +287,7 @@ def test_the_client_it_builds_carries_the_module_timeout(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(httpx2, "Client", build)
 
-    assert len(fetch(SLUG)) == 2
+    assert len(fetch(SLUG).postings) == 2
     assert built == [{"timeout": REQUEST_TIMEOUT_SECONDS}]
 
 

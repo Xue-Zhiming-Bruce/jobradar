@@ -2,12 +2,14 @@
 
 Two adapters present one shape and one family of failures to the rest of the app,
 so both live here rather than in either adapter: `SourcePosting`, the five fields
-`ingest` (#6) stores; `SourceError` and its six members, the family the tick (#9)
-catches and `POST /watchlist` (#5) maps to `404` and `502`; the slug gate every
-adapter calls before it builds a URL; `fetch_body`, the one `GET` both make, with
-the timeout, the bounded retry and the body cap; the html-to-text helper both
-strip markup with; and `Source`, the one-call interface `SOURCES` in
-`app.sources` resolves to.
+`ingest` (#6) stores; `BoardAnswer` and `BoardPostings`, the postings an answer
+carried and the board's own validator beside them; `NotModified`, the `304` that
+is a returned outcome rather than a failure; `SourceError` and its six members,
+the family the tick (#9) catches and `POST /watchlist` (#5) maps to `404` and
+`502`; the slug gate every adapter calls before it builds a URL; `fetch_body`,
+the one conditional `GET` both make, with the timeout, the bounded retry and the
+body cap; the html-to-text helper both strip markup with; and `Source`, the
+one-call interface `SOURCES` in `app.sources` resolves to.
 
 This module names no board's payload, no board's address and no board's key names:
 an adapter is a module, a registry entry and a stored name, so a third source adds
@@ -54,6 +56,13 @@ RETRY_BACKOFF_SECONDS = 0.5
 # The memory bound on one answer, enforced while reading rather than after it: it is
 # a bound and not a filter, and a real board is far below it.
 MAX_BODY_BYTES = 8 * 1024 * 1024
+
+# The two conditional headers a stored validator asks with, and the two an answer
+# carries it in. Spelled once, so nothing retypes a header name.
+IF_NONE_MATCH_HEADER = "If-None-Match"
+IF_MODIFIED_SINCE_HEADER = "If-Modified-Since"
+ETAG_HEADER = "ETag"
+LAST_MODIFIED_HEADER = "Last-Modified"
 
 # What a slug can be: the characters a board puts in a board name. Anything else
 # -- blank, a space, a `/`, a `?` -- is refused before it can reach a URL, because
@@ -124,15 +133,61 @@ class SourcePosting:
     description: str | None
 
 
+@dataclass(frozen=True)
+class BoardAnswer:
+    """One board's body, and the validator that body arrived with.
+
+    `etag` and `last_modified` are the board's own opaque strings, echoed as they
+    arrived -- an `ETag` keeps its quotes -- or `None` when the answer carried
+    neither (or an empty one). Neither is parsed: the value exists to be sent back
+    in `If-None-Match`/`If-Modified-Since` and for nothing else.
+    """
+
+    body: str
+    etag: str | None
+    last_modified: str | None
+
+
+@dataclass(frozen=True)
+class BoardPostings:
+    """An adapter's answer: the postings it parsed, plus the validator they came with."""
+
+    postings: list[SourcePosting]
+    etag: str | None
+    last_modified: str | None
+
+
+@dataclass(frozen=True)
+class NotModified:
+    """The board answered `304` to a request that carried a validator: nothing changed.
+
+    A returned outcome and never an error: it is not a `SourceError`, so nothing
+    fails and no route answers `502` on account of it, and it is never retried.
+    The walk (#55) skips the company it names, so a board that was not read closes
+    nothing.
+    """
+
+
 class Source(Protocol):
     """One board adapter: a slug in, that board's postings out, or a `SourceError`.
 
     `SOURCES` maps a stored name to one of these, and both the watchlist probe and
-    the tick call through it. Each adapter keeps its own `client` keyword -- the
-    way a test stays off the network -- but a caller passes only the slug.
+    the tick call through it. The walk hands the stored validator back as the two
+    keyword-only parameters, and gets either the postings that validator names or
+    the `NotModified` that means the board has not changed. Each adapter keeps its
+    own `client` and `sleep` keywords -- the way a test stays off the network and
+    off the clock.
     """
 
-    def __call__(self, slug: str) -> list[SourcePosting]: ...
+    def __call__(
+        self,
+        slug: str,
+        *,
+        etag: str | None = None,
+        last_modified: str | None = None,
+        client: httpx2.Client | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> BoardPostings | NotModified: ...
 
 
 def require_slug(slug: str) -> None:
@@ -146,29 +201,46 @@ def fetch_body(
     url: str,
     *,
     params: Mapping[str, str],
+    etag: str | None = None,
+    last_modified: str | None = None,
     client: httpx2.Client | None = None,
     sleep: Callable[[float], None] = time.sleep,
-) -> str:
-    """One board's answer as text, or a `SourceError` -- never an `httpx2` exception.
+) -> BoardAnswer | NotModified:
+    """One board's answer, or a `SourceError` -- never an `httpx2` exception.
 
     One `GET`, over `client` when one is injected and over a client built here
-    otherwise, carrying `REQUEST_TIMEOUT_SECONDS` on every attempt. A failure a
-    retry can heal -- a connection error, a read/connect/write timeout, any `5xx`
-    -- is tried `RETRY_ATTEMPTS` times in all, waiting `RETRY_BACKOFF_SECONDS` and
-    then twice that; `sleep` is the seam a test replaces, so a real wait is only
-    ever the default. Nothing else is retried: a `404` is an `UnknownSlug` at once,
-    every other `4xx` -- `429` included -- is a `BoardUnavailable` at once, and an
-    oversized body is refused without asking the same board the same thing again. A
-    later answer ends the loop where it stands, so a retry that answers `404` is an
-    `UnknownSlug` after two requests rather than a third try. A value that cannot
-    be a slug makes no request at all.
+    otherwise, carrying `REQUEST_TIMEOUT_SECONDS` on every attempt. The request is
+    conditional exactly as far as the stored validator goes: `If-None-Match` when
+    `etag` is stored, `If-Modified-Since` when `last_modified` is, each on its own,
+    and neither when the company holds no validator.
+
+    A `304` to that conditional request is `NotModified`, returned where it stands:
+    it is a cached answer and not a failure, so it is not retried and no wait
+    happens. A `304` to a request that carried no validator is a protocol
+    violation and not a cached answer -- reading it as "not modified" would skip a
+    board this app holds no validator for on every later run -- so it keeps the
+    behaviour every other unexpected status has: a `BoardUnavailable` naming HTTP
+    304, after one request and no wait.
+
+    A failure a retry can heal -- a connection error, a read/connect/write timeout,
+    any `5xx` -- is tried `RETRY_ATTEMPTS` times in all, waiting
+    `RETRY_BACKOFF_SECONDS` and then twice that; `sleep` is the seam a test
+    replaces, so a real wait is only ever the default. Nothing else is retried: a
+    `404` is an `UnknownSlug` at once, every other `4xx` -- `429` included -- is a
+    `BoardUnavailable` at once, and an oversized body is refused without asking the
+    same board the same thing again. A later answer ends the loop where it stands,
+    so a retry that answers `404` is an `UnknownSlug` after two requests rather
+    than a third try. A value that cannot be a slug makes no request at all.
 
     The body is read here rather than by the client, because `MAX_BODY_BYTES` has
-    to bite while the answer is still arriving: `_body_within_cap` enforces it.
+    to bite while the answer is still arriving: `_body_within_cap` enforces it. A
+    `200` answers with the body and the two validator headers the board sent, each
+    verbatim and each `None` when it sent none.
     """
     require_slug(slug)
     if client is None:
         client = httpx2.Client(timeout=REQUEST_TIMEOUT_SECONDS)
+    conditional = _conditional_headers(etag, last_modified)
     failure: SourceError
     cause: Exception | None
     for attempt in range(RETRY_ATTEMPTS):
@@ -176,12 +248,22 @@ def fetch_body(
             # `stream`, not `get`: a client that read the body itself would buffer a
             # payload this helper has not yet measured against the cap.
             with client.stream(
-                "GET", url, params=params, timeout=REQUEST_TIMEOUT_SECONDS
+                "GET",
+                url,
+                params=params,
+                headers=conditional or None,
+                timeout=REQUEST_TIMEOUT_SECONDS,
             ) as response:
+                if response.status_code == 304 and conditional:
+                    return NotModified()
                 if response.status_code == 404:
                     raise UnknownSlug(f"There is no board named '{slug}'")
                 if response.is_success:
-                    return _body_within_cap(response, slug)
+                    return BoardAnswer(
+                        _body_within_cap(response, slug),
+                        response.headers.get(ETAG_HEADER) or None,
+                        response.headers.get(LAST_MODIFIED_HEADER) or None,
+                    )
                 failure = BoardUnavailable(
                     f"The board '{slug}' refused to answer: HTTP {response.status_code}"
                 )
@@ -199,6 +281,20 @@ def fetch_body(
         sleep(RETRY_BACKOFF_SECONDS * 2**attempt)
     # Unreachable while `RETRY_ATTEMPTS` is at least one: every attempt raises or returns.
     raise AssertionError(f"RETRY_ATTEMPTS must be at least 1, not {RETRY_ATTEMPTS}")
+
+
+def _conditional_headers(etag: str | None, last_modified: str | None) -> dict[str, str]:
+    """The conditional headers a stored validator asks with: each only when its value is stored.
+
+    An empty value asks nothing, the way an answer's empty one is stored as `None`,
+    so no empty conditional header is ever sent.
+    """
+    headers: dict[str, str] = {}
+    if etag:
+        headers[IF_NONE_MATCH_HEADER] = etag
+    if last_modified:
+        headers[IF_MODIFIED_SINCE_HEADER] = last_modified
+    return headers
 
 
 def _body_within_cap(response: httpx2.Response, slug: str) -> str:
