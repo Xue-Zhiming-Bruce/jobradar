@@ -127,6 +127,7 @@ def test_contract_describes_the_watchlist_routes() -> None:
     schemas = contract["components"]["schemas"]
     listed = contract["paths"]["/watchlist"]["get"]
     created = contract["paths"]["/watchlist"]["post"]
+    updated = contract["paths"]["/watchlist/{id}"]["patch"]
     removed = contract["paths"]["/watchlist/{id}"]["delete"]
 
     array_schema = listed["responses"]["200"]["content"]["application/json"]["schema"]
@@ -146,6 +147,23 @@ def test_contract_describes_the_watchlist_routes() -> None:
     assert created["responses"]["201"]["content"]["application/json"]["schema"]["$ref"] == (
         company_ref
     )
+
+    # The update joins the existing path -- no eleventh path -- and answers with
+    # the same company body the list and the addition do.
+    assert set(contract["paths"]["/watchlist/{id}"]) == {"delete", "patch"}
+    assert set(updated["responses"]) == {"200", "404", "422"}
+    assert updated["responses"]["200"]["content"]["application/json"]["schema"][
+        "$ref"
+    ] == company_ref
+    # The two fields it may write, both optional, and nothing else: a body naming
+    # `slug` or `source` is refused rather than written, and the rendered schema
+    # carries no `required` key at all.
+    assert updated["requestBody"]["required"] is True
+    update_ref = updated["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    edit = schemas[update_ref.rsplit("/", 1)[-1]]
+    assert set(edit["properties"]) == {"name", "is_active"}
+    assert edit["additionalProperties"] is False
+    assert not edit.get("required")
 
     # The id is a path parameter and an integer, and the delete answers with no body.
     assert set(removed["responses"]) == {"204", "404", "422"}

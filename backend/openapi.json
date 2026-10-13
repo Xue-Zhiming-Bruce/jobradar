@@ -277,6 +277,53 @@
       }
     },
     "/watchlist/{id}": {
+      "patch": {
+        "tags": [
+          "watchlist"
+        ],
+        "summary": "Rename a watched company, or take it out of the poll",
+        "description": "Write the fields the body names on that company, and answer as `GET /watchlist` renders it.\n\nThe id is a path parameter and an `int`: a value that is not one never reaches\nthis function and is refused by the path's own validation as `422`, and an id\nthat finds no row is a `404` that writes nothing. No board is asked on this\npath -- neither `slug` nor `source` is editable here -- so this route answers\nno `409` and no `502` either.\n\n`is_active: false` takes the company out of the tick's walk and is not a\ndeletion: the row, its postings and their matches stay untouched, and\n`GET /watchlist` keeps listing the company as inactive. Sending the same body\nagain is the same answer twice, and no request here creates a row.",
+        "operationId": "update_company_watchlist__id__patch",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompanyUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchedCompany"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No board goes by that slug, or no company has that id"
+          },
+          "422": {
+            "description": "The body, or the path, is not something this route can use"
+          }
+        }
+      },
       "delete": {
         "tags": [
           "watchlist"
@@ -498,6 +545,40 @@
         ],
         "title": "CompanyCreate",
         "description": "Body of an addition: the name to show, the board slug to poll, and its source.\n\n`name` and `slug` are required strings, and a string that carries nothing but\nwhitespace is refused as well: the name labels a row a person reads, and the\nslug is what the source is asked about. `source` is optional and means\nGreenhouse when it is absent, so a client that sends `{name, slug}` keeps\nworking; a value outside the two known names -- a case variant included -- is\na `422` from this model, before any request is made. The values are left\nexactly as they were sent; normalising the slug is `app.models.Company`'s."
+      },
+      "CompanyUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "is_active": {
+            "anyOf": [
+              {
+                "type": "boolean",
+                "enum": [
+                  true,
+                  false
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Active"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "CompanyUpdate",
+        "description": "Body of an edit: the label to show, the poll state, or both, and nothing else.\n\nBoth fields are optional and at least one of them has to be supplied: `{}` is\na request that says nothing, and answering it `200` would report a write that\ndid not happen. `name` is a label stored exactly as it arrived, with only a\nblank value refused -- `CompanyCreate._not_blank`'s rule, and no normaliser,\nbecause the one in `app.models` touches `slug`. `is_active` is a `Literal` of\nthe two booleans, so `\"false\"` is refused rather than read as one: whether a\nboard is polled is a state and not a truthy string.\n\nThe board is not here, and refusing it is the point: `extra=\"forbid\"` -- the\n`ResumeActivation`/`MatchVerdict` precedent -- makes `slug` and `source` a\n`422` rather than a write this route ignores, because the postings stored\nunder the old slug would be stranded by a new one (#60). Nothing clears a\nfield either: `name` is a `NOT NULL` column and `is_active` is the whole of\n\"is it polled\"."
       },
       "Health": {
         "properties": {

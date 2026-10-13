@@ -5,8 +5,16 @@ source the slug names -- Greenhouse when the body does not say -- and only after
 that source has answered for that slug: a slug no board goes by is `404`, a board
 that is down, slow or malformed is `502`, and a slug that is already watched is
 `409`. `GET /watchlist` lists every company with its slug, its source and its
-active state, and `DELETE /watchlist/{id}` removes one. Nobody renames a company
-or writes `is_active` here; that is #29.
+active state, `PATCH /watchlist/{id}` renames one and switches whether its board
+is polled, and `DELETE /watchlist/{id}` removes one.
+
+`PATCH` is the one route here that asks no board, and it writes nothing but a
+label and a boolean: the board a company points at -- its `slug` and its
+`source` -- is not editable on this path, because a posting is identified by
+`(company_id, external_id)` (#6) and a new slug would strand the rows the old
+board left behind; that rule is #60's to state. `is_active: false` is the poll's
+switch and not a deletion: it takes the company out of `app.services.pipeline`'s
+walk and leaves the row, its postings and their matches exactly as they were.
 
 The probe is a validity check and nothing more. #6 is where a board's postings
 are stored and deduped, and #9 is where the tick calls the source for real; this
@@ -30,7 +38,7 @@ from collections.abc import Mapping
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -65,6 +73,46 @@ class CompanyCreate(BaseModel):
         if not value.strip():
             raise ValueError("must not be blank")
         return value
+
+
+class CompanyUpdate(BaseModel):
+    """Body of an edit: the label to show, the poll state, or both, and nothing else.
+
+    Both fields are optional and at least one of them has to be supplied: `{}` is
+    a request that says nothing, and answering it `200` would report a write that
+    did not happen. `name` is a label stored exactly as it arrived, with only a
+    blank value refused -- `CompanyCreate._not_blank`'s rule, and no normaliser,
+    because the one in `app.models` touches `slug`. `is_active` is a `Literal` of
+    the two booleans, so `"false"` is refused rather than read as one: whether a
+    board is polled is a state and not a truthy string.
+
+    The board is not here, and refusing it is the point: `extra="forbid"` -- the
+    `ResumeActivation`/`MatchVerdict` precedent -- makes `slug` and `source` a
+    `422` rather than a write this route ignores, because the postings stored
+    under the old slug would be stranded by a new one (#60). Nothing clears a
+    field either: `name` is a `NOT NULL` column and `is_active` is the whole of
+    "is it polled".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    is_active: Literal[True, False] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _not_blank(cls, value: str | None) -> str | None:
+        """Refuse a blank label as a body this route cannot use: a name is what a person reads."""
+        if value is not None and not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def _names_a_field(self) -> "CompanyUpdate":
+        """Refuse a body naming neither field, so no `200` reports a write that did not happen."""
+        if self.name is None and self.is_active is None:
+            raise ValueError("must carry a name, an is_active, or both")
+        return self
 
 
 class WatchedCompany(BaseModel):
@@ -103,6 +151,7 @@ CREATE_RESPONSES = (
     | UNUSABLE_REQUEST_RESPONSE
     | UNREADABLE_BOARD_RESPONSE
 )
+UPDATE_RESPONSES = NOT_FOUND_RESPONSE | UNUSABLE_REQUEST_RESPONSE
 DELETE_RESPONSES = NOT_FOUND_RESPONSE | UNUSABLE_REQUEST_RESPONSE
 
 
@@ -202,6 +251,41 @@ def add_company(
         raise HTTPException(
             status_code=409, detail=f"The slug '{company.slug}' is already watched"
         ) from duplicate
+
+
+@router.patch(
+    "/watchlist/{id}",
+    response_model=WatchedCompany,
+    tags=["watchlist"],
+    summary="Rename a watched company, or take it out of the poll",
+    responses=UPDATE_RESPONSES,
+)
+def update_company(id: int, body: CompanyUpdate) -> WatchedCompany:
+    """Write the fields the body names on that company, and answer as `GET /watchlist` renders it.
+
+    The id is a path parameter and an `int`: a value that is not one never reaches
+    this function and is refused by the path's own validation as `422`, and an id
+    that finds no row is a `404` that writes nothing. No board is asked on this
+    path -- neither `slug` nor `source` is editable here -- so this route answers
+    no `409` and no `502` either.
+
+    `is_active: false` takes the company out of the tick's walk and is not a
+    deletion: the row, its postings and their matches stay untouched, and
+    `GET /watchlist` keeps listing the company as inactive. Sending the same body
+    again is the same answer twice, and no request here creates a row.
+    """
+    with db.session_scope() as session:
+        company = session.get(Company, id)
+        if company is None:
+            raise HTTPException(
+                status_code=404, detail=f"There is no watched company with id {id}"
+            )
+        if body.name is not None:
+            company.name = body.name
+        if body.is_active is not None:
+            company.is_active = body.is_active
+        session.flush()
+        return _watched(company)  # read before the commit expires it
 
 
 @router.delete(
