@@ -177,6 +177,10 @@ and the kind without ever printing the matched text.
 
 ### Configuration
 
+`.env.example` at the repository root lists every variable in the table below,
+one line each with its default and what an unset value does; `.env` --
+gitignored -- is where the real values go.
+
 `compose.yaml` passes every variable the app reads. Unset or empty means:
 
 | Variable | Unset means |
