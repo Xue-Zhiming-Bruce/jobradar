@@ -17,6 +17,7 @@ credential, so the last case proves neither reaches a body or a log record.
 """
 
 import ast
+import base64
 import inspect
 import io
 import json
@@ -28,6 +29,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 from httpx2 import Response
@@ -169,6 +171,38 @@ def docx_bytes(paragraphs: list[str]) -> bytes:
 def upload(client: TestClient, filename: str, data: bytes, content_type: str) -> Response:
     """One multipart upload, the way a client sends it."""
     return client.post("/resume", files={"file": (filename, data, content_type)})
+
+
+def ocr_answer(text: str | None) -> str:
+    """One well-formed Chat Completions body stating `text` as the scan's read text."""
+    return json.dumps({"choices": [{"message": {"content": json.dumps({"text": text})}}]})
+
+
+def vision_transport(bodies: list[str | BaseException], requests: list[Any]) -> httpx2.Client:
+    """The real reader's stub provider: it answers `bodies` in turn, repeating the last.
+
+    `test_resume_ocr.py`'s `_serving` is the reader's own stub; this is the route's,
+    so a long scan's windows are counted at the client the route actually made the
+    requests through. A body that is an exception is raised, so a timeout or a
+    refused connection is one case of the same stub.
+    """
+
+    def handle(request: httpx2.Request) -> Response:
+        requests.append(request)
+        served = bodies[min(len(requests) - 1, len(bodies) - 1)]
+        if isinstance(served, BaseException):
+            raise served
+        return Response(200, content=served)
+
+    return httpx2.Client(transport=httpx2.MockTransport(handle))
+
+
+def window_images(request: httpx2.Request) -> list[bytes]:
+    """The page images one request carried, decoded back from its data URLs."""
+    parts = json.loads(request.content)["messages"][0]["content"]
+    return [
+        base64.b64decode(part["image_url"]["url"].split(",", 1)[1]) for part in parts[1:]
+    ]
 
 
 def rows() -> list[dict[str, Any]]:
@@ -455,6 +489,90 @@ def test_a_scan_the_reader_yielded_no_text_for_is_the_422_that_names_no_text(
         f"No text found in the {content_type} file: it is blank, or carries no text layer"
     )
     assert reader.calls == [(content_type, data)]  # asked once, and the answer was nothing
+    assert rows() == []
+    assert stored_files(uploads_dir) == []
+
+
+# A long scan: one request per window of the cap, in order, and a window that fails.
+
+
+def test_a_scan_past_the_cap_is_read_in_two_requests_and_stored_whole(
+    client: TestClient, uploads_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sixth page's text lands after the first five, joined by the one separator."""
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    pdf = scanned_pdf_bytes([(40 + index, 30) for index in range(6)])
+    requests: list[Any] = []
+    install(
+        LlmResumeOcr(
+            client=vision_transport(
+                [ocr_answer("pages one to five"), ocr_answer("the sixth page")], requests
+            )
+        )
+    )
+
+    response = upload(client, "long.pdf", pdf, APPLICATION_PDF)
+
+    assert response.status_code == 201, response.text
+    assert len(requests) == 2
+    pages = resume_service.scan_images(APPLICATION_PDF, pdf)
+    assert [window_images(request) for request in requests] == [pages[0:5], pages[5:6]]
+    (row,) = rows()
+    assert row["text"] == "pages one to five\nthe sixth page"
+    assert stored_files(uploads_dir) == [row["stored_path"]]
+
+
+@pytest.mark.parametrize(
+    ("second", "message"),
+    [
+        pytest.param(
+            httpx2.ConnectError("no route to host"),
+            "the model call failed",
+            id="a transport failure",
+        ),
+        pytest.param(
+            "junk", "the model's answer was unusable after 3 attempts", id="an unusable answer"
+        ),
+    ],
+)
+def test_a_window_that_fails_mid_scan_is_502_and_stores_nothing(
+    client: TestClient,
+    uploads_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    second: str | BaseException,
+    message: str,
+) -> None:
+    """The first window's text is discarded with the failed call: no row and no file."""
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    pdf = scanned_pdf_bytes([(40 + index, 30) for index in range(6)])
+    install(
+        LlmResumeOcr(client=vision_transport([ocr_answer("pages one to five"), second], []))
+    )
+
+    detail = refusal(upload(client, "long.pdf", pdf, APPLICATION_PDF), 502)
+
+    assert detail == message
+    assert rows() == []
+    assert stored_files(uploads_dir) == []
+
+
+def test_a_multi_window_scan_whose_windows_all_answer_null_is_422(
+    client: TestClient, uploads_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scan whose every window answered nothing joins to whitespace: #3's own refusal."""
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    pdf = scanned_pdf_bytes([(40 + index, 30) for index in range(6)])
+    requests: list[Any] = []
+    install(
+        LlmResumeOcr(client=vision_transport([ocr_answer(None), ocr_answer(None)], requests))
+    )
+
+    message = refusal(upload(client, "long.pdf", pdf, APPLICATION_PDF), 422)
+
+    assert message == (
+        f"No text found in the {APPLICATION_PDF} file: it is blank, or carries no text layer"
+    )
+    assert len(requests) == 2
     assert rows() == []
     assert stored_files(uploads_dir) == []
 

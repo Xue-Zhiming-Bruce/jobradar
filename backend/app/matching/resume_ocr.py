@@ -3,8 +3,9 @@
 `ResumeOcr` is the interface -- one method, `read`, over an upload's media type and
 its bytes -- `FakeResumeOcr` stands in for the real one so a route test can assert
 what was read and with which bytes without a model, a key or a network, and
-`LlmResumeOcr` is the real one: one vision call per scan, and nothing else in this
-project calls a model for an upload.
+`LlmResumeOcr` is the real one: one vision call per window of at most
+`OCR_MAX_IMAGES` page images, and nothing else in this project calls a model for
+an upload.
 
 The call is the scorer's, not a second one. `LlmResumeOcr` builds its request body
 with `scorer.request_body` -- the page images attached, which is the one argument
@@ -13,8 +14,12 @@ endpoint, the model, `temperature: 0`, the JSON-object answer format,
 `MODEL_TIMEOUT_SECONDS` and the failure wording are the scorer's, and a retry costs
 one of the scorer's own `SCORER_MAX_ATTEMPTS`. The pages come from
 `app.services.resume.scan_images`: this module owns the call, that one owns what a
-scan's images are. The prompt is `ocr_prompt.txt` beside this module, read on every
-scan rather than at import, and it carries no text -- the pages are the input.
+scan's images are. A scan with more page images than `OCR_MAX_IMAGES` is read by
+consecutive bounded requests -- one per window of at most `OCR_MAX_IMAGES`
+images, in page order -- and the window answers are joined in order by one `"\n"`,
+the separator `_pdf_text` puts between a PDF's own pages. The prompt is
+`ocr_prompt.txt` beside this module, read on every scan rather than at import, and
+it carries no text -- the pages are the input.
 
 The answer is read strictly and nothing is coerced: `choices[0].message.content`
 has to be a JSON object whose `text` is a string or JSON `null`, and every other
@@ -29,10 +34,10 @@ the scorer's own call does.
 The page images are user data and `LLM_API_KEY` is a credential, so neither reaches
 a message or a log line: every failure this module raises is one of the scorer's
 own wordings plus at most a status code, the one log line it writes names the
-media type, the byte count and the number of page images and never a pixel of the
-scan, and the key is read through `scorer.api_key()`. Nothing here reads
-`os.environ`, and no byte of the scan is written to a file: the images are request
-payloads and nothing else.
+media type, the byte count, the number of page images and the number of requests
+and never a pixel of the scan, and the key is read through `scorer.api_key()`.
+Nothing here reads `os.environ`, and no byte of the scan is written to a file: the
+images are request payloads and nothing else.
 """
 
 import json
@@ -118,9 +123,13 @@ class LlmResumeOcr:
         The configuration check happens before any request, so an unconfigured
         JobRadar fails once and loudly instead of asking a model with no
         credential. A scan whose pages hold no readable image answers the empty
-        string without a request -- there is nothing to send. A transport failure
-        answers on the spot -- one request -- and a malformed answer costs an
-        attempt: `SCORER_MAX_ATTEMPTS` requests and then `ResumeOcrError`.
+        string without a request -- there is nothing to send. Otherwise the page
+        images are sliced into consecutive windows of at most `OCR_MAX_IMAGES`
+        and one request is made per window, in page order, the answers joined in
+        order by one `"\n"`. A transport failure answers on the spot -- one
+        request for that window -- and a malformed answer costs an attempt:
+        `SCORER_MAX_ATTEMPTS` requests and then `ResumeOcrError`, which fails the
+        whole scan rather than answering part of it.
         """
         key = api_key()
         if not key:
@@ -131,26 +140,42 @@ class LlmResumeOcr:
         images = resume_service.scan_images(content_type, data)
         if not images:
             return ""
-        body = request_body(_prompt(), images)
+        windows = [
+            images[start : start + resume_service.OCR_MAX_IMAGES]
+            for start in range(0, len(images), resume_service.OCR_MAX_IMAGES)
+        ]
         client = self._client
         if client is None:
             client = httpx2.Client(timeout=MODEL_TIMEOUT_SECONDS)
         logger.info(
-            "Reading a scan: %s, %s bytes, %s page images",
+            "Reading a scan: %s, %s bytes, %s page images, %s requests",
             content_type,
             len(data),
             len(images),
+            len(windows),
         )
-        for _ in range(SCORER_MAX_ATTEMPTS):
-            answer, failure = ask_model(client, body, key)
-            if failure:
-                raise ResumeOcrError(failure)
-            text = _read(answer)
-            if text is not None:
-                return text
-        raise ResumeOcrError(
-            f"the model's answer was unusable after {SCORER_MAX_ATTEMPTS} attempts"
-        )
+        return "\n".join(_read_window(client, window, key) for window in windows)
+
+
+def _read_window(client: httpx2.Client, window: list[bytes], key: str) -> str:
+    """One window's text, read by one request, or the typed error saying why there is none.
+
+    The body is `scorer.request_body(_prompt(), window)` and the call is
+    `scorer.ask_model`'s, so a window is the one request #27 pinned: at most
+    `OCR_MAX_IMAGES` image parts. A malformed answer costs one of the scorer's
+    own `SCORER_MAX_ATTEMPTS`; a transport failure answers at once.
+    """
+    body = request_body(_prompt(), window)
+    for _ in range(SCORER_MAX_ATTEMPTS):
+        answer, failure = ask_model(client, body, key)
+        if failure:
+            raise ResumeOcrError(failure)
+        text = _read(answer)
+        if text is not None:
+            return text
+    raise ResumeOcrError(
+        f"the model's answer was unusable after {SCORER_MAX_ATTEMPTS} attempts"
+    )
 
 
 def _prompt() -> str:

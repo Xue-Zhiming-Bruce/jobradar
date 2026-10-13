@@ -21,6 +21,7 @@ import ast
 import base64
 import inspect
 import json
+import logging
 import socket
 from io import BytesIO
 from pathlib import Path
@@ -160,6 +161,22 @@ def _expected_content(png: bytes) -> list[dict]:
             }
             for page in resume_service.scan_images(IMAGE_PNG, png)
         ),
+    ]
+
+
+def _distinct_pages(count: int) -> bytes:
+    """A scan of `count` page images, each a different size, so their order is provable."""
+    images = [Image.new("L", (40 + index, 30), color=200) for index in range(count)]
+    buffer = BytesIO()
+    images[0].save(buffer, format="PDF", save_all=True, append_images=images[1:])
+    return buffer.getvalue()
+
+
+def _window_pages(request: httpx2.Request) -> list[bytes]:
+    """The page images one request carried, decoded back from its data URLs."""
+    parts = _body_of(request)["messages"][0]["content"]
+    return [
+        base64.b64decode(part["image_url"]["url"].split(",", 1)[1]) for part in parts[1:]
     ]
 
 
@@ -384,6 +401,205 @@ def test_a_scan_with_no_page_images_answers_nothing_without_a_request(
 
     assert reader.read(APPLICATION_PDF, BLANK_PAGE_PDF.read_bytes()) == ""
     assert requests == []
+
+
+# The window: one request per `OCR_MAX_IMAGES` page images, answers joined in page order.
+
+
+def test_a_scan_at_the_cap_makes_one_request_with_every_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    pdf = _distinct_pages(resume_service.OCR_MAX_IMAGES)
+    reader = LlmResumeOcr(client=_serving([_response(_answer({"text": SCAN_TEXT}))], requests))
+
+    assert reader.read(APPLICATION_PDF, pdf) == SCAN_TEXT
+
+    assert len(requests) == 1
+    pages = resume_service.scan_images(APPLICATION_PDF, pdf)
+    assert len(pages) == resume_service.OCR_MAX_IMAGES == 5
+    assert _window_pages(requests[0]) == pages
+
+
+def test_a_scan_one_page_past_the_cap_makes_two_requests_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    pdf = _distinct_pages(resume_service.OCR_MAX_IMAGES + 1)
+    reader = LlmResumeOcr(
+        client=_serving(
+            [
+                _response(_answer({"text": "pages one to five"})),
+                _response(_answer({"text": "the sixth page"})),
+            ],
+            requests,
+        )
+    )
+
+    assert reader.read(APPLICATION_PDF, pdf) == "pages one to five\nthe sixth page"
+
+    assert len(requests) == 2
+    pages = resume_service.scan_images(APPLICATION_PDF, pdf)
+    assert len(pages) == 6
+    assert [_window_pages(request) for request in requests] == [pages[0:5], pages[5:6]]
+
+
+def test_a_scan_many_times_the_cap_makes_one_request_per_window_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    pdf = _distinct_pages(12)
+    answers = ["window one", "window two", "window three"]
+    reader = LlmResumeOcr(
+        client=_serving([_response(_answer({"text": text})) for text in answers], requests)
+    )
+
+    assert reader.read(APPLICATION_PDF, pdf) == "\n".join(answers)
+
+    assert len(requests) == 3
+    pages = resume_service.scan_images(APPLICATION_PDF, pdf)
+    assert len(pages) == 12
+    # Two windows of five and one of two: no body carries more than the cap.
+    assert [len(_window_pages(request)) for request in requests] == [5, 5, 2]
+    assert [_window_pages(request) for request in requests] == [
+        pages[0:5],
+        pages[5:10],
+        pages[10:12],
+    ]
+
+
+def test_the_joined_text_is_the_window_answers_joined_by_one_newline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A window's answer is stored exactly as it arrived, and one `"\n"` joins the windows."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    first = 'Line one\n\n  indented "quotes" \u2014 \u00fcn\u00efcode'
+    second = "\tthe sixth page\u00a0"
+    reader = LlmResumeOcr(
+        client=_serving(
+            [
+                _response(_answer({"text": first, "confidence": 0.9})),
+                _response(_answer({"text": second, "confidence": 0.9})),
+            ],
+            requests,
+        )
+    )
+
+    assert reader.read(APPLICATION_PDF, _distinct_pages(6)) == f"{first}\n{second}"
+
+
+def test_a_window_answering_null_contributes_an_empty_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    reader = LlmResumeOcr(
+        client=_serving(
+            [
+                _response(_answer({"text": None})),
+                _response(_answer({"text": "the middle window"})),
+                _response(_answer({"text": None})),
+            ],
+            requests,
+        )
+    )
+
+    assert reader.read(APPLICATION_PDF, _distinct_pages(12)) == "\nthe middle window\n"
+    assert len(requests) == 3
+
+
+def test_a_multi_window_scan_whose_windows_all_answer_null_is_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing legible in any window joins to whitespace: the route's `422`, not a retry."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    reader = LlmResumeOcr(
+        client=_serving(
+            [_response(_answer({"text": None})), _response(_answer({"text": None}))], requests
+        )
+    )
+
+    assert reader.read(APPLICATION_PDF, _distinct_pages(6)) == "\n"
+    assert len(requests) == 2
+
+
+def test_a_second_window_that_fails_mid_scan_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The window that failed raises the same typed error: the whole scan fails, not part of it."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    reader = LlmResumeOcr(
+        client=_serving(
+            [
+                _response(_answer({"text": "pages one to five"})),
+                httpx2.ConnectError("no route to host"),
+            ],
+            requests,
+        )
+    )
+
+    with pytest.raises(ResumeOcrError) as raised:
+        reader.read(APPLICATION_PDF, _distinct_pages(6))
+
+    assert str(raised.value) == "the model call failed"
+    assert len(requests) == 2, "the first window was read, then the second failed at once"
+
+
+def test_a_second_window_that_answers_uselessly_costs_every_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    reader = LlmResumeOcr(
+        client=_serving(
+            [_response(_answer({"text": "pages one to five"})), _response("junk")], requests
+        )
+    )
+
+    with pytest.raises(ResumeOcrError) as raised:
+        reader.read(APPLICATION_PDF, _distinct_pages(6))
+
+    assert str(raised.value) == "the model's answer was unusable after 3 attempts"
+    assert len(requests) == 1 + SCORER_MAX_ATTEMPTS
+
+
+def test_the_log_line_names_the_counts_and_the_media_type_and_nothing_else(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One line, written before the first request: counts and the media type, no page."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    pdf = _distinct_pages(6)
+    caplog.set_level(logging.INFO, logger=resume_ocr_module.__name__)
+    reader = LlmResumeOcr(
+        client=_serving(
+            [
+                _response(_answer({"text": "pages one to five"})),
+                _response(_answer({"text": "the sixth page"})),
+            ],
+            requests,
+        )
+    )
+
+    reader.read(APPLICATION_PDF, pdf)
+
+    (record,) = [
+        record for record in caplog.records if record.name == resume_ocr_module.__name__
+    ]
+    assert record.levelno == logging.INFO
+    assert record.args == (APPLICATION_PDF, len(pdf), 6, 2)
+    line = record.getMessage()
+    assert f"{APPLICATION_PDF}, {len(pdf)} bytes, 6 page images, 2 requests" in line
+    first_page = base64.b64encode(resume_service.scan_images(APPLICATION_PDF, pdf)[0]).decode(
+        "ascii"
+    )
+    assert first_page not in line
+    assert "data:image" not in line
+    assert THE_KEY not in line
 
 
 # The prompt: one file beside this module, read on every scan.

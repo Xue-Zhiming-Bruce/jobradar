@@ -95,11 +95,11 @@ _ZIP_MAGIC = b"PK\x03\x04"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _JPEG_MAGIC = b"\xff\xd8\xff"
 
-# At most this many page images reach one request, and none of them has a long
-# edge over this many pixels: the cap bounds the payload a scan can make the way
-# the upload limit bounds its bytes. Reading a longer scan in full is its own
-# decision, and both are module constants rather than settings because nothing
-# about a deployment changes either number.
+# At most this many page images reach ONE REQUEST, and none of them has a long
+# edge over this many pixels: the cap bounds the payload one request can carry
+# the way the upload limit bounds its bytes, and the reader spends it as a window
+# over however many page images a scan has. Both are module constants rather than
+# settings because nothing about a deployment changes either number.
 OCR_MAX_IMAGES = 5
 OCR_MAX_IMAGE_EDGE = 1600
 _WORD_DOCUMENT_PART = "word/document.xml"
@@ -238,11 +238,12 @@ def scan_images(content_type: str, data: bytes) -> list[bytes]:
     """The page images of a scan, each re-encoded as a PNG with a long edge of at most 1600 px.
 
     A PNG or a JPEG upload is its own one page image; a PDF contributes the images
-    its pages carry, in page order, which is what a scan is. Only the first
-    `OCR_MAX_IMAGES` are read, so no upload can make an unbounded request, and the
-    format is normalised here so nothing downstream depends on how the scanner
-    stored the stream. A PDF whose pages hold no readable image is `[]` -- there
-    is no image to send and no request to make.
+    its pages carry, in page order, which is what a scan is. Every page image is
+    returned, so no page is silently dropped: the reader bounds how many reach one
+    request (`OCR_MAX_IMAGES`), and the format is normalised here so nothing
+    downstream depends on how the scanner stored the stream. A PDF whose pages
+    hold no readable image is `[]` -- there is no image to send and no request to
+    make.
 
     The bytes are user data and this function neither logs them nor returns them
     to a client: they are request payloads and nothing else. What will not load as
@@ -568,17 +569,16 @@ def _decoded_image(data: bytes) -> Image.Image:
 
 
 def _pdf_page_images(data: bytes) -> list[bytes]:
-    """A PDF's page images, in page order, at most `OCR_MAX_IMAGES` of them.
+    """A PDF's page images, in page order, however many the pages carry.
 
-    The pages past the cap are not decoded at all: nothing reads them, and a
-    scan's later pages would otherwise be work nobody asked for.
+    Every page image is decoded: how many go into one request is the reader's
+    bound (`OCR_MAX_IMAGES`), not this one's, so a scan longer than the cap is
+    read whole rather than truncated at it.
     """
     images: list[bytes] = []
     for page in PdfReader(BytesIO(data)).pages:
         for found in page.images:
             images.append(_png_page(found.image))
-            if len(images) == OCR_MAX_IMAGES:
-                return images
     return images
 
 
