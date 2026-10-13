@@ -30,6 +30,7 @@ the pool's later connections unguarded. PostgreSQL enforces foreign keys always
 and queues writers on its own, so it needs neither pragma.
 """
 
+import logging
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -46,6 +47,13 @@ from app.models import Base
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATABASE_PATH = BACKEND_ROOT / "data" / "jobradar.db"
+
+# A resume's text is user data (`AGENTS.md`): never logged. SQLAlchemy logs a
+# statement's parameters and a result's rows at DEBUG, and an INSERT into a `text`
+# column cannot avoid carrying the value -- so the ORM's own loggers are held at
+# WARNING here, where the engine is built. Raising them again is a deliberate
+# choice to print user data, and it is the deployment's to make.
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 # The URL spellings the app accepts: the local default, the bare PostgreSQL form
 # Neon and Render hand out, and the driver-qualified form the engine matrix
