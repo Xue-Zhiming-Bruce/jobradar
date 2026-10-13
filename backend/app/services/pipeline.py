@@ -10,8 +10,10 @@ the sources and the scorer arrive as arguments, and the only configuration it
 reads is the two settings a run has for itself, below. It writes one row of its
 own, the `run_company` outcome of each company it attempted.
 
-One run does this, in this order, for every company whose `is_active` is true, in
-ascending `company.id` order:
+One run does this, in this order, for every company whose `is_active` is true,
+least recently attempted first and ties by ascending `company.id` -- the order
+`_active_companies()` derives from the `run_company` rows below, so a budget that
+stops the walk leaves a different company at the head of the next run:
 
 - `sources[company.source](company.slug)` -- once per company, through the adapter
   the row names and with the slug the row stores, never a value rebuilt from the
@@ -51,7 +53,7 @@ failure, and the next tick re-runs the whole thing idempotently on #6's dedupe.
 
 A run asks a bounded number of boards. `request_budget()` is read once, before the
 first call, and the walk stops before the call that would be the (`budget + 1`)st,
-in ascending `company.id` order: a company past the bound is asked nothing at all,
+in the walk's own order: a company past the bound is asked nothing at all,
 so no `posting` row of its is inserted, updated, closed or reopened, no `match` row
 of its changes, no count of its reaches either column, and `_store_validator`
 leaves its `etag`/`last_modified` exactly as they were. One unit is one board call
@@ -366,18 +368,39 @@ def _postings_to_rematch() -> list[tuple[int, SourcePosting]]:
 
 
 def _active_companies() -> list[tuple[int, str, str, str | None, str | None]]:
-    """Every active company's `id`, stored `slug`, `source` and stored validator.
+    """Every active company's `id`, `slug`, `source` and validator, least recently
+    attempted first.
 
     All five values are read while the session is open, because a row handed out
     of `db.session_scope()` is expired by its commit. An inactive company is
     simply not in this list, so the source is never asked about a board this app
     has stopped watching.
+
+    The walk's order, derived from `run_company` rather than carried: the company
+    whose greatest `run_company.id` is lowest goes first, a company with no such
+    row before every company that has one, ties by ascending `company.id`. The id
+    is written in the walk's own call order for every outcome an attempt can have
+    (`'fetched'`, `'not_modified'`, `'failed'`), so a failed board rotates to the
+    back the way any other asked company does, and a company the budget refused
+    has no row and stays ahead. Nothing is stored to make this work: a company
+    added, deactivated, reactivated or deleted needs no cursor moved, and a
+    watchlist shorter than the budget is still walked whole on every run.
+
+    `NULLS FIRST` is stated rather than left to the engine, because the two
+    engines disagree by default: SQLite sorts `NULL` first for `ASC`, PostgreSQL
+    sorts it last -- and a never-attempted company has to come first on both.
+    One statement, one grouped aggregate over `run_company`; the aggregate is
+    fine at this app's scale, a watchlist of tens and a run a day.
     """
     with db.session_scope() as session:
         return [
             (row.id, row.slug, row.source, row.etag, row.last_modified)
             for row in session.scalars(
-                select(Company).where(Company.is_active.is_(True)).order_by(Company.id)
+                select(Company)
+                .outerjoin(RunCompany, RunCompany.company_id == Company.id)
+                .where(Company.is_active.is_(True))
+                .group_by(Company.id)
+                .order_by(func.max(RunCompany.id).asc().nullsfirst(), Company.id)
             )
         ]
 

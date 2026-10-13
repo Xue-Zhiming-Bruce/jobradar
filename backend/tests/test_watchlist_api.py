@@ -1484,7 +1484,7 @@ def test_a_run_asks_the_active_company_only_and_leaves_the_other_s_postings_alon
     assert stored["closed_at"] is None  # the board it was not fetched from left it open
 
 
-def test_reactivating_a_company_puts_its_board_back_in_the_walk_in_id_order(
+def test_reactivating_a_company_puts_its_board_at_the_head_of_the_next_walk(
     engine_client: TestClient,
 ) -> None:
     watch("Acme Inc", "acme")
@@ -1501,7 +1501,7 @@ def test_reactivating_a_company_puts_its_board_back_in_the_walk_in_id_order(
 
     run_pipeline(new_run(), sources={"greenhouse": source}, scorer=FakeScorer(a_result()))
 
-    assert source.calls == ["acme", "globex"]  # both, in ascending id order
+    assert source.calls == ["globex", "acme"]  # never attempted, so ahead of the company run 1 asked
 
 
 def test_a_run_fetches_two_rows_that_share_a_slug_once_each_on_their_own_source(

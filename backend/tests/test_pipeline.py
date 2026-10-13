@@ -407,10 +407,15 @@ def _imported_roots(source: str) -> set[str]:
 # The walk: the active watchlist, one fetch per company, with the slug the row stores.
 
 
-def test_one_fetch_per_active_company_with_the_stored_slug_in_ascending_id_order(
+def test_one_fetch_per_active_company_with_the_stored_slug_in_the_walk_s_order(
     engine: Engine,
 ) -> None:
-    """Beta is watched first and has the lower id, so an alphabetical walk fails here."""
+    """Beta is watched first and has the lower id: neither company has an attempt row.
+
+    Ties in the walk's order -- least recently attempted first -- are broken by
+    ascending `company.id`, so beta's board is asked first and an alphabetical
+    walk fails here.
+    """
     first = _company("beta", name="Beta GmbH")
     second = _company("acme", name="Acme Corporation")
     source = FakeSource({"beta": [_posting("1")], "acme": [_posting("2")]})
@@ -1596,8 +1601,9 @@ def test_a_failed_board_leaves_no_payload_text_in_a_message_a_client_reads(
 # The run's outbound budget and its pacing: how many boards one run may ask, how far
 # apart, and what the companies it never reached keep.
 
-# Three active companies, one posting each, scripted so a walk's call order is its
-# ascending `company.id` order: `acme`, `beta`, `globex`.
+# Three active companies, one posting each, created in ascending `company.id` order:
+# `acme`, `beta`, `globex`. A fresh watchlist has no `run_company` rows, so a first
+# run's call order is this order too -- the walk's tie-break.
 THREE_BOARDS = {
     "acme": [_posting("1")],
     "beta": [_posting("2")],
@@ -1661,7 +1667,7 @@ def test_both_settings_are_read_once_per_run_and_never_at_import(
 
     run_pipeline(second, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
 
-    assert source.calls == ["acme", "acme", "beta", "globex"]  # the second run's own bound
+    assert source.calls == ["acme", "beta", "globex", "acme"]  # the second run's own bound
     assert _run_row(second)["companies_not_fetched"] is None
     assert waits == [0.0, 0.0]  # the second run's own interval, one wait per gap
 
@@ -1728,7 +1734,7 @@ def test_the_budget_bounds_the_walk_and_never_writes_a_zero(
     run_pipeline(run, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
 
     row = _run_row(run)
-    assert source.calls == called  # ascending `company.id`, and nothing past the bound
+    assert source.calls == called  # a fresh watchlist's ties, so ascending `company.id`
     assert (row["postings_seen"], row["matches_created"]) == (len(called), len(called))
     assert row["companies_not_fetched"] == not_fetched
     assert _rows(Posting) == len(called)  # a refused company stored nothing
@@ -1822,7 +1828,11 @@ def test_a_304_spends_its_unit_and_is_not_a_not_fetched_company(
 def test_the_next_run_with_room_fetches_the_rest_and_closes_nothing_of_it(
     engine: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """What the bound left is untouched, and a later run with room stores and scores it."""
+    """What the bound left is untouched, and a later run with room stores and scores it.
+
+    The later run asks it first, ahead of both companies run 1 did ask, because it
+    is the least recently attempted -- it was never attempted at all.
+    """
     companies = [_company(slug) for slug in THREE_BOARDS]
     source = FakeSource(THREE_BOARDS)
     _active_resume()
@@ -1837,7 +1847,9 @@ def test_the_next_run_with_room_fetches_the_rest_and_closes_nothing_of_it(
 
     run_pipeline(second, sources={"greenhouse": source}, scorer=second_scorer)
 
-    assert source.calls == ["acme", "beta", "acme", "beta", "globex"]
+    # Run 2 starts where run 1 stopped: the company the bound refused is ahead of
+    # both companies run 1 did ask, because it has no `run_company` row at all.
+    assert source.calls == ["acme", "beta", "globex", "acme", "beta"]
     first_row = _run_row(first)
     assert (first_row["postings_seen"], first_row["matches_created"]) == (2, 2)
     assert first_row["companies_not_fetched"] == 1
