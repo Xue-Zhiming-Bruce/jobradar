@@ -15,6 +15,13 @@ export default function RunDigestNow() {
   // 0 is contract-legal but never written -- the walk only records a stop.
   const notFetched = run?.companiesNotFetched ?? 0
 
+  // The count this run's own digest emailed. Keyed off the count, not `status`:
+  // the pipeline sends the digest before `_run` derives `failed` from a failed
+  // board, so a `running` or `failed` row can already carry it. `null` is no
+  // answer yet -- the `202`'s fresh row, or a send that raised -- and gets no
+  // sentence, while `0` is the answer "ran and emailed nothing".
+  const emailed = run?.matchesEmailed ?? null
+
   return (
     <section>
       <h2>Digest</h2>
@@ -30,6 +37,13 @@ export default function RunDigestNow() {
         ) : (
           <p>Digest running...</p>
         ))}
+      {emailed !== null && (
+        <p>
+          {emailed === 0
+            ? 'Digest emailed: no matches.'
+            : `Digest emailed: ${emailed} ${emailed === 1 ? 'match' : 'matches'}.`}
+        </p>
+      )}
       {notFetched > 0 && (
         <p>
           {notFetched} {notFetched === 1 ? 'company was' : 'companies were'} not fetched: the
