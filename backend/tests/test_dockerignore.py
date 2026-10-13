@@ -91,6 +91,11 @@ _KEPT_PATHS = [
     "backend/app/main.py",
     "backend/app/export_openapi.py",
     "backend/app/matching/score_prompt.txt",
+    # The hosted MCP endpoint (#43) copies the tool source into the runtime image
+    # from the repository root, so those files are build inputs too.
+    "mcp/pyproject.toml",
+    "mcp/jobradar_mcp/__init__.py",
+    "mcp/jobradar_mcp/hosted.py",
     "frontend/package.json",
     "frontend/package-lock.json",
     "frontend/index.html",

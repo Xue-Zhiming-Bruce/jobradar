@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from app import db
+from app import db, mcp
 from app.main import DEFAULT_STATIC_DIR, static_dir
 from app.matching import prefilter, scorer
 from app.routes import internal
@@ -267,6 +267,7 @@ def test_the_app_keeps_its_own_defaults_with_every_documented_name_unset(
     assert resume.uploads_dir() == resume.DEFAULT_UPLOADS_DIR
     assert resume.max_upload_bytes() == resume.DEFAULT_MAX_UPLOAD_BYTES
     assert internal.tick_secret() == ""
+    assert mcp.auth_token() == ""
     assert prefilter.title_terms() == prefilter.DEFAULT_TERMS
     assert prefilter.seniority_terms() == prefilter.DEFAULT_TERMS
     assert prefilter.location_terms() == prefilter.DEFAULT_TERMS
