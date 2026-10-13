@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { getRun, type RunSummary } from '../api/client'
+import { publishRunEnded } from './runEnded'
 
 /** How long a screen waits between two reads of the run it started. */
 const POLL_MS = 1000
@@ -37,11 +38,20 @@ export default function useRun(start: () => Promise<RunSummary>) {
   useEffect(() => {
     if (!polling || id === undefined) return
     const timer = setInterval(() => {
-      getRun(id).then(setRun, (failure: unknown) => {
-        setError(failure instanceof Error ? failure.message : String(failure))
-        // A run row that could not be read is not one to keep reading.
-        setRun(null)
-      })
+      getRun(id).then(
+        (row) => {
+          setRun(row)
+          // The one place a terminal status is observed, so the one publish: a
+          // `failed` run may have written rows before it failed, so the terminal
+          // set is exactly what the poll already stops on (#79).
+          if (TERMINAL.includes(row.status)) publishRunEnded()
+        },
+        (failure: unknown) => {
+          setError(failure instanceof Error ? failure.message : String(failure))
+          // A run row that could not be read is not one to keep reading.
+          setRun(null)
+        },
+      )
     }, POLL_MS)
     return () => clearInterval(timer)
   }, [polling, id])
