@@ -225,7 +225,7 @@ def test_contract_describes_the_tick_and_the_run_it_started() -> None:
     read = contract["paths"]["/runs/{id}"]["get"]
 
     # One shape for a run wherever a client meets one: the `202` answers with the
-    # body the read answers with, and that body is the row's eight columns.
+    # body the read answers with, and that body is the row's nine columns.
     started = tick["responses"]["202"]["content"]["application/json"]["schema"]
     summary = read["responses"]["200"]["content"]["application/json"]["schema"]
     assert started["$ref"] == summary["$ref"]
@@ -239,11 +239,17 @@ def test_contract_describes_the_tick_and_the_run_it_started() -> None:
         "postings_seen",
         "matches_created",
         "matches_emailed",
+        "companies_not_fetched",
     }
     assert run["required"] == list(run["properties"])
-    # The one field that may be null by the wire's own reckoning: `0` is a run
-    # that emailed nothing and NULL is a run that never recorded a count (#36).
+    # The two fields that may be null by the wire's own reckoning: `0` is a run
+    # that emailed nothing and NULL is a run that never recorded a count (#36),
+    # and NULL is also every run whose board-call budget stopped no walk (#56).
     assert run["properties"]["matches_emailed"]["anyOf"] == [
+        {"type": "integer"},
+        {"type": "null"},
+    ]
+    assert run["properties"]["companies_not_fetched"]["anyOf"] == [
         {"type": "integer"},
         {"type": "null"},
     ]

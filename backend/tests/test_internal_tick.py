@@ -301,6 +301,7 @@ def test_a_valid_tick_answers_202_with_the_running_row_it_wrote_before_the_work_
         "postings_seen",
         "matches_created",
         "matches_emailed",
+        "companies_not_fetched",
     }
     assert body["status"] == "running"
     assert (body["finished_at"], body["error"]) == (None, None)

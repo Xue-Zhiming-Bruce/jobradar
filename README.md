@@ -134,7 +134,7 @@ serves both, so there is one origin, no CORS and no second service.
 `docker compose ps` shows both as `healthy`, and the container names the revision
 it applied:
 
-    docker compose exec api alembic current   # 0007_company_board_validator (head)
+    docker compose exec api alembic current   # 0008_run_companies_not_fetched (head)
 
 There is no migration step to run by hand. The image ships `alembic.ini` and
 `migrations/`, and the container applies them at startup against the same
@@ -215,6 +215,8 @@ gitignored -- is where the real values go.
 | `LLM_BASE_URL` | `https://api.openai.com/v1`; every model call posts to `<base>/chat/completions` |
 | `LLM_FALLBACK_MODEL` | no fallback: only `LLM_MODEL` is tried |
 | `SCORER_MAX_POSTINGS` | 50 postings scored per run |
+| `RUN_REQUEST_BUDGET` | 200 board calls per run; `0` asks no board at all and the run row says how many companies were left |
+| `RUN_REQUEST_INTERVAL_SECONDS` | 1 second between two board calls; `0` waits nothing |
 | `PREFILTER_TITLE_TERMS`, `PREFILTER_SENIORITY_TERMS`, `PREFILTER_LOCATION_TERMS`, `PREFILTER_MUST_HAVE_KEYWORDS` | that rule rejects nothing, so a posting goes to the scorer |
 | `PREFILTER_MUST_HAVE_FROM_RESUME` | off: the resume's parsed skills gate no posting, so the must-have rule reads `PREFILTER_MUST_HAVE_KEYWORDS` alone |
 | `DIGEST_MIN_SCORE` | 70 |

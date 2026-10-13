@@ -24,6 +24,10 @@ closure reference, a session a background thread still holds -- fails the suite
 instead of leaking quietly into the next test. A connection that is merely
 dropped, with no reference left, is returned by the pool before this runs, and
 that is the one case the count cannot close.
+
+One autouse fixture here is not about the engine: `waits` replaces the walk's own
+`sleep` default with a collector, so no case in the suite waits and every case
+that asserts the pacing reads the list it collected.
 """
 
 import os
@@ -35,6 +39,7 @@ from sqlalchemy.engine import Engine
 
 from app import db
 from app.models import Base
+from app.services.pipeline import run_pipeline
 
 TEST_DATABASE_URL = "TEST_DATABASE_URL"
 
@@ -51,6 +56,23 @@ def configured_test_database_url() -> str | None:
 def test_database_url() -> str | None:
     """The variable that turns the PostgreSQL cases on, read the way the fixture reads it."""
     return configured_test_database_url()
+
+
+@pytest.fixture(autouse=True)
+def waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """The walk's pacing seam, replaced by a collector: no case in this suite waits.
+
+    `run_pipeline`'s `sleep` default is `time.sleep`, and four modules drive the
+    walk -- `test_pipeline.py` alone has 42 call sites, and the integration suite
+    drives the real provider and cannot pass a keyword at all -- so the default
+    itself is replaced here, once, rather than at every call site. The list the
+    fixture returns is the waits in the order the walk made them, and `monkeypatch`
+    puts the real default back when the test ends. `time.sleep` is left alone: the
+    integration suite's own polling uses it.
+    """
+    waits: list[float] = []
+    monkeypatch.setitem(run_pipeline.__kwdefaults__, "sleep", waits.append)
+    return waits
 
 
 @pytest.fixture(params=[SQLITE, POSTGRES])

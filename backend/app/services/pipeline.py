@@ -1,12 +1,13 @@
 """The work one digest run does: the walk, the fetch, the store, the gate, the score, the counts.
 
-`run_pipeline(run_id, *, sources, scorer)` is what #9's `get_pipeline()` provider
-returns, and the run row the id names already exists in `running`: the run's
-lifecycle, the concurrency guard and the thread are #9's, and this module touches
-none of them. It writes no `status`, no `finished_at` and no `error` -- a run that
-fails leaves the row as it found it and #9's `_run` records the failure, the
-message included -- and it opens no socket, sends no email and reads no
-configuration of its own: the sources and the scorer arrive as arguments.
+`run_pipeline(run_id, *, sources, scorer, sleep=time.sleep)` is what #9's
+`get_pipeline()` provider returns, and the run row the id names already exists in
+`running`: the run's lifecycle, the concurrency guard and the thread are #9's, and
+this module touches none of them. It writes no `status`, no `finished_at` and no
+`error` -- a run that fails leaves the row as it found it and #9's `_run` records
+the failure, the message included -- and it opens no socket and sends no email:
+the sources and the scorer arrive as arguments, and the only configuration it
+reads is the two settings a run has for itself, below.
 
 One run does this, in this order, for every company whose `is_active` is true, in
 ascending `company.id` order:
@@ -45,6 +46,29 @@ are written as they are earned rather than once at the end, so a run that fails
 half-way says how far it got: every write committed in its own
 `db.session_scope()`, so nothing already written is rolled back by a later
 failure, and the next tick re-runs the whole thing idempotently on #6's dedupe.
+
+A run asks a bounded number of boards. `request_budget()` is read once, before the
+first call, and the walk stops before the call that would be the (`budget + 1`)st,
+in ascending `company.id` order: a company past the bound is asked nothing at all,
+so no `posting` row of its is inserted, updated, closed or reopened, no `match` row
+of its changes, no count of its reaches either column, and `_store_validator`
+leaves its `etag`/`last_modified` exactly as they were. One unit is one board call
+-- `200` and `304` each spend one, because a `304` is a request to a board, and a
+retry inside `fetch_body` spends nothing extra -- so a company is either fetched
+completely or not fetched at all, and a run's worst case is `budget` times
+`RETRY_ATTEMPTS` requests. The bound stopping the walk is not a failure: the run
+still stores, scores and (through #10) emails what it fetched, and writes how many
+companies it left for a later run on `run.companies_not_fetched`, which is `NULL`
+for every run the bound did not stop.
+
+A run also paces its calls. `request_interval_seconds()` is read the same way, and
+`sleep` -- the walk's own keyword-only seam, `time.sleep` by default -- is called
+exactly once with that interval per gap between two consecutive board calls: never
+before the first call and never after the last, so a walk over `k` boards records
+`[interval] * (k - 1)` waits and a company the budget refused is never waited for.
+`0.0` is legitimate and calls the seam the same number of times, so a deployment
+that wants no pacing says so. The waits `fetch_body` itself makes on a retry are
+#54's and are not this.
 
 Three things are deliberately not done here:
 
@@ -85,7 +109,9 @@ Three things are deliberately not done here:
   next run asks the same question again.
 """
 
-from collections.abc import Mapping
+import os
+import time
+from collections.abc import Callable, Mapping
 
 from sqlalchemy import func, select
 
@@ -114,27 +140,98 @@ NO_ACTIVE_RESUME = "No active resume: upload one before a run can score postings
 # has: a company with three postings is a company whose board just changed.
 SHRINK_GUARD_MIN_OPEN_POSTINGS = 4
 
+# The two settings a run has for itself: how many boards one walk may ask, and how
+# long it waits between two calls. Both are read once per run, at the top of
+# `run_pipeline` and never at import, so a run obeys what the deployment held when
+# the walk started and a later tick obeys what it holds then.
+RUN_REQUEST_BUDGET_VARIABLE = "RUN_REQUEST_BUDGET"
+DEFAULT_REQUEST_BUDGET = 200
+RUN_REQUEST_INTERVAL_SECONDS_VARIABLE = "RUN_REQUEST_INTERVAL_SECONDS"
+DEFAULT_REQUEST_INTERVAL_SECONDS = 1.0
+
+
+def request_budget() -> int:
+    """`RUN_REQUEST_BUDGET`, or `DEFAULT_REQUEST_BUDGET` when it is unset or empty.
+
+    A whole number of board calls, `0` included: `0` asks no board at all this
+    run. A negative value and a value that is not a number are refused rather
+    than read as zero, with a message naming the variable and the value it could
+    not read. Read before the first board call, so a misconfigured run fails
+    loudly on its row instead of silently fetching nothing, and costs no request.
+    """
+    configured = os.environ.get(RUN_REQUEST_BUDGET_VARIABLE, "").strip()
+    if not configured:
+        return DEFAULT_REQUEST_BUDGET
+    refused = (
+        f"{RUN_REQUEST_BUDGET_VARIABLE} must be a whole number of board calls, 0 or"
+        f" more, not '{configured}'"
+    )
+    try:
+        budget = int(configured)
+    except ValueError:
+        raise ValueError(refused) from None
+    if budget < 0:
+        raise ValueError(refused)
+    return budget
+
+
+def request_interval_seconds() -> float:
+    """`RUN_REQUEST_INTERVAL_SECONDS`, or `DEFAULT_REQUEST_INTERVAL_SECONDS` unset.
+
+    The wait between two board calls, `0.0` included: `0.0` waits nothing. A
+    negative value and a value that is not a number are refused rather than read
+    as zero, with a message naming the variable and the value it could not read,
+    for the reason `request_budget()` gives.
+    """
+    configured = os.environ.get(RUN_REQUEST_INTERVAL_SECONDS_VARIABLE, "").strip()
+    if not configured:
+        return DEFAULT_REQUEST_INTERVAL_SECONDS
+    refused = (
+        f"{RUN_REQUEST_INTERVAL_SECONDS_VARIABLE} must be a number of seconds, 0 or"
+        f" more, not '{configured}'"
+    )
+    try:
+        interval = float(configured)
+    except ValueError:
+        raise ValueError(refused) from None
+    if interval < 0:
+        raise ValueError(refused)
+    return interval
+
 
 def run_pipeline(
     run_id: int,
     *,
     sources: Mapping[str, Source],
     scorer: MatchScorer,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     """Walk the watchlist once for the run `run_id` names, and count what it did.
 
     Both collaborators are arguments -- `sources` maps a stored source name to a
     board adapter and the scorer is one per run, the way its own cap requires --
-    so this module reaches no socket, knows no payload shape and reads no
-    configuration. Anything either collaborator raises escapes this function the
-    way it was raised: #9's `_run` is what turns it into the run row's failure.
+    so this module reaches no socket, knows no payload shape and reads the run's
+    own two settings and nothing else. `sleep` is the pacing seam: the wait before
+    every board call but the first, `time.sleep` by default and a recorder in
+    every test. Anything either collaborator raises escapes this function the way
+    it was raised: #9's `_run` is what turns it into the run row's failure.
     """
+    budget = request_budget()
+    interval = request_interval_seconds()
     resume_text = resume.active_resume_text()
     if resume_text is None or not resume_text.strip():
         raise RuntimeError(NO_ACTIVE_RESUME)
     resume_must_haves = tuple(resume.active_resume_skills())
 
-    for company_id, slug, source, etag, last_modified in _active_companies():
+    companies = _active_companies()
+    for index, (company_id, slug, source, etag, last_modified) in enumerate(companies):
+        if index >= budget:
+            # The bound, not a failure: the companies past it are not called, not
+            # probed and skipped, and the row says how many were left for a later run.
+            _record_not_fetched(run_id, len(companies) - budget)
+            break
+        if index:
+            sleep(interval)  # one wait per gap, and none before the first call
         fetched = _fetched(sources[source], slug, etag=etag, last_modified=last_modified)
         if isinstance(fetched, NotModified):
             continue  # the board has not changed: nothing to store, close or count
@@ -263,6 +360,21 @@ def _source_posting(row: Posting) -> SourcePosting:
         url=row.url,
         description=row.description,
     )
+
+
+def _record_not_fetched(run_id: int, count: int) -> None:
+    """Write how many active companies the run's budget stopped it from asking.
+
+    Written by the walk, which is the one place that knows the bound stopped it;
+    #9's `_end_run` keeps writing the status, the end and the error. One
+    `db.session_scope()`, the way `_add_counts` writes a step of its own, and a row
+    that is no longer there is nothing to write and not a failure.
+    """
+    with db.session_scope() as session:
+        run = session.get(Run, run_id)
+        if run is None:
+            return
+        run.companies_not_fetched = count
 
 
 def _add_counts(run_id: int, *, postings_seen: int = 0, matches_created: int = 0) -> None:

@@ -60,7 +60,7 @@ from app.services.digest import (
     Mailer,
     send_digest,
 )
-from app.services.pipeline import run_pipeline
+from app.services.pipeline import RUN_REQUEST_BUDGET_VARIABLE, run_pipeline
 from app.sources.base import BoardPostings, SourceError, SourcePosting
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
@@ -89,6 +89,7 @@ RUN_COLUMNS = (
     "postings_seen",
     "matches_created",
     "matches_emailed",
+    "companies_not_fetched",
 )
 
 # Two instants a day apart, so "newest first" has something to sort and the
@@ -1012,10 +1013,15 @@ def test_a_run_whose_pipeline_raises_sends_no_email_and_the_match_goes_out_next_
 
 
 def test_the_pipeline_module_gains_no_socket_no_email_and_no_configuration() -> None:
-    """#34's own test pins its imports; this pins that #10 added nothing to that module."""
+    """#34's own test pins its imports; this pins that #10 added nothing to that module.
+
+    `os` was in that pinned set while the walk read no environment at all; #56's two
+    settings are the only reason it is imported now, and `#34's` own test in
+    `test_pipeline.py` pins that they are the only two names it reads.
+    """
     roots = _imported_roots(PIPELINE_SOURCE)
 
-    assert {"smtplib", "email", "os"} & roots == set()
+    assert {"smtplib", "email"} & roots == set()
     assert "send_digest" not in PIPELINE_SOURCE
     assert "Mailer" not in PIPELINE_SOURCE
 
@@ -1138,3 +1144,49 @@ def test_the_resume_marker_reaches_no_subject_and_no_body_through_a_tick(
     row = _run_row(response.json()["id"])
     assert (row["status"], row["postings_seen"], row["matches_created"]) == ("succeeded", 1, 1)
     assert _notified(_rows_of(Match)[0]["id"]) is not None
+
+
+def test_a_budget_stopped_walk_still_sends_its_digest_and_records_the_count(
+    client: TestClient,
+    fake_mailer: FakeMailer,
+    inline_starter: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that ran out of budget is not a failed run: the day's mail goes out over what it fetched.
+
+    The real walk, bounded to one of the two watched companies, then #10's real
+    digest over the matches that one board produced. The second company is asked
+    nothing, the run ends `succeeded`, and its own row carries both the count of
+    companies left for a later run and the count of matches this digest emailed.
+    """
+    _active_resume()
+    _company("acme")
+    _company("globex")
+    source = FakeSource(
+        [
+            SourcePosting(
+                external_id="1",
+                title="Backend Engineer",
+                location="Berlin",
+                url="https://boards.test/1",
+                description="Synthetic description.",
+            )
+        ]
+    )
+    scorer = FakeScorer(MatchResult(score=90, reason="Synthetic fit.", gaps=["No Kubernetes."]))
+    monkeypatch.setattr(
+        internal,
+        "run_pipeline",
+        lambda run_id, **_: run_pipeline(run_id, sources={"greenhouse": source}, scorer=scorer),
+    )
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, "1")
+
+    response = _tick(client)
+
+    _, body = _only_message(fake_mailer)
+    assert "Backend Engineer" in body
+    assert source.calls == ["acme"]  # the company past the bound was asked nothing
+    row = _run_row(response.json()["id"])
+    assert (row["status"], row["error"]) == ("succeeded", None)
+    assert row["companies_not_fetched"] == 1
+    assert row["matches_emailed"] == 1  # the digest behind the stopped walk still wrote its count

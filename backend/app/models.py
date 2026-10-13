@@ -251,3 +251,12 @@ class Run(Base):
     # that did. `matches_created` (above) is not this: it counts `record_score`
     # writes, and only the digest writes this.
     matches_emailed: Mapped[int | None] = mapped_column(Integer)
+    # How many active companies this run's budget stopped it from asking. Three
+    # readings, and a `0` is not one of them: NULL is "the budget did not stop this
+    # walk" -- the run reached the last active company, failed on a board before
+    # the bound, or is a row written before this column existed -- and a positive
+    # value is that many active companies the run did not fetch. Nullable with no
+    # default of either kind, so a row that predates the column reads NULL rather
+    # than claiming a walk nobody bounded. Written by `services.pipeline`, the one
+    # place that knows the bound stopped the walk; #9 writes neither side.
+    companies_not_fetched: Mapped[int | None] = mapped_column(Integer)

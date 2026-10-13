@@ -33,7 +33,7 @@ from app import db
 from app.main import DEFAULT_STATIC_DIR, static_dir
 from app.matching import prefilter, scorer
 from app.routes import internal
-from app.services import digest, resume
+from app.services import digest, pipeline, resume
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 EXAMPLE_FILE = REPO_ROOT / ".env.example"
@@ -283,3 +283,5 @@ def test_the_app_keeps_its_own_defaults_with_every_documented_name_unset(
     assert digest.smtp_password() == ""
     assert digest.digest_from() == ""
     assert digest.digest_to() == ""
+    assert pipeline.request_budget() == pipeline.DEFAULT_REQUEST_BUDGET
+    assert pipeline.request_interval_seconds() == pipeline.DEFAULT_REQUEST_INTERVAL_SECONDS

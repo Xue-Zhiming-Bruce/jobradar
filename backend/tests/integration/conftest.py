@@ -61,6 +61,10 @@ from app.services.digest import (
     SMTP_PORT,
     SMTP_USERNAME,
 )
+from app.services.pipeline import (
+    RUN_REQUEST_BUDGET_VARIABLE,
+    RUN_REQUEST_INTERVAL_SECONDS_VARIABLE,
+)
 from app.services.resume import UPLOADS_DIR_VARIABLE
 
 TEST_DATABASE_URL = "TEST_DATABASE_URL"
@@ -88,14 +92,16 @@ THROWAWAY_TEST_DATABASE_URL = (
 )
 
 # Every variable a run reads for itself, deleted in every case: the model's key,
-# name and cap, the six mail variables, the cutoff, the four prefilter terms and
-# the resume-skills flag. A case that wants one of them sets it, so what a case
-# drives is what the case wrote and never what the developer's shell happened to
-# hold.
+# name and cap, the six mail variables, the cutoff, the four prefilter terms, the
+# resume-skills flag and the run's own board-call bound and interval. A case that
+# wants one of them sets it, so what a case drives is what the case wrote and
+# never what the developer's shell happened to hold.
 UNSET_VARIABLES = (
     LLM_API_KEY,
     LLM_MODEL,
     SCORER_MAX_POSTINGS,
+    RUN_REQUEST_BUDGET_VARIABLE,
+    RUN_REQUEST_INTERVAL_SECONDS_VARIABLE,
     SMTP_HOST,
     SMTP_PORT,
     SMTP_USERNAME,

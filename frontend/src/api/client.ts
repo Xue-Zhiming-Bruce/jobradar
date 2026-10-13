@@ -43,6 +43,7 @@ export type RunSummary = {
   error: string | null
   postingsSeen: number
   matchesCreated: number
+  companiesNotFetched: number | null
 }
 
 /**
@@ -99,6 +100,7 @@ type WireRunSummary = {
   error: string | null
   postings_seen: number
   matches_created: number
+  companies_not_fetched: number | null
 }
 
 type WireMatch = {
@@ -147,6 +149,7 @@ const decodeRun = (wire: WireRunSummary): RunSummary => ({
   error: wire.error,
   postingsSeen: wire.postings_seen,
   matchesCreated: wire.matches_created,
+  companiesNotFetched: wire.companies_not_fetched,
 })
 
 /** The server's `detail`, or the status text when the answer carries no JSON. */

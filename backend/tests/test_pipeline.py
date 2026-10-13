@@ -2,9 +2,9 @@
 
 Every case here runs with `socket.socket.connect` patched to raise the way
 `tests/test_greenhouse_source.py` does, so a run that reached for a board fails
-instead of quietly passing, and with the model's three variables and the
-prefilter's five deleted, so a key or a term in the developer's shell cannot
-decide a case. The source and the scorer are this module's own fakes: the source
+instead of quietly passing, and with the model's three variables, the prefilter's
+five and the walk's own two deleted, so a key, a term or a request bound in the
+developer's shell cannot decide a case. The source and the scorer are this module's own fakes: the source
 records every slug it was asked for and answers from a script, and the scorer
 records every `(posting, resume_text)` pair it was given.
 
@@ -63,7 +63,14 @@ from app.routes.internal import TICK_SECRET_HEADER, get_pipeline, get_run_starte
 from app.services import pipeline as pipeline_module
 from app.services import resume
 from app.services.ingest import IngestResult
-from app.services.pipeline import NO_ACTIVE_RESUME, run_pipeline
+from app.services.pipeline import (
+    DEFAULT_REQUEST_BUDGET,
+    DEFAULT_REQUEST_INTERVAL_SECONDS,
+    NO_ACTIVE_RESUME,
+    RUN_REQUEST_BUDGET_VARIABLE,
+    RUN_REQUEST_INTERVAL_SECONDS_VARIABLE,
+    run_pipeline,
+)
 from app.sources import greenhouse
 from app.sources.base import (
     MAX_BODY_BYTES,
@@ -84,9 +91,9 @@ BACKEND_ROOT = Path(__file__).resolve().parent.parent
 PIPELINE_MODULE = BACKEND_ROOT / "app" / "services" / "pipeline.py"
 PIPELINE_SOURCE = PIPELINE_MODULE.read_text(encoding="utf-8")
 
-# The variables the pipeline must not read, and the modules it must not import:
-# the source and the scorer arrive as arguments, so neither configuration nor a
-# client belongs in this module.
+# The variables no case may inherit from the developer's shell, and the modules the
+# pipeline must not import: the source and the scorer arrive as arguments, and the
+# walk's own two settings are set explicitly by the cases that are about them.
 CONFIGURATION_VARIABLES = (
     LLM_API_KEY,
     LLM_MODEL,
@@ -96,6 +103,8 @@ CONFIGURATION_VARIABLES = (
     PREFILTER_LOCATION_TERMS,
     PREFILTER_MUST_HAVE_KEYWORDS,
     PREFILTER_MUST_HAVE_FROM_RESUME,
+    RUN_REQUEST_BUDGET_VARIABLE,
+    RUN_REQUEST_INTERVAL_SECONDS_VARIABLE,
 )
 NETWORK_MODULES = {"http", "httpx", "httpx2", "requests", "socket", "urllib", "aiohttp"}
 
@@ -109,8 +118,9 @@ RESUME_TEXT = "QA-RESUME-SENTINEL-TEXT: synthetic resume, Python and PostgreSQL.
 # is matched and the clause it names carries that form.
 SKILL_SENTINEL = "qa-skill-sentinel-3a8e51"
 
-# Every column of a run row: the two counts the pipeline writes, and the three the
-# lifecycle owns and the pipeline must leave alone.
+# Every column of a run row: the three counts the walk writes -- the postings the
+# boards returned, the matches that landed and the active companies its budget left
+# -- and the three the lifecycle owns and the walk must leave alone.
 RUN_COLUMNS = (
     "id",
     "status",
@@ -119,6 +129,7 @@ RUN_COLUMNS = (
     "error",
     "postings_seen",
     "matches_created",
+    "companies_not_fetched",
 )
 MATCH_COLUMNS = (
     "id",
@@ -220,7 +231,7 @@ def no_outbound_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def no_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each case starts with no key, no model, no cap and no prefilter terms set."""
+    """Each case starts with no key, no model, no cap, no prefilter term and no bound set."""
     for name in CONFIGURATION_VARIABLES:
         monkeypatch.delenv(name, raising=False)
 
@@ -939,22 +950,28 @@ def test_each_source_error_fails_the_run_and_the_message_names_the_slug(
 # The seam, the wiring, and what the module is not allowed to reach.
 
 
-def test_the_seam_is_the_run_id_and_the_two_injected_collaborators() -> None:
+def test_the_seam_is_the_run_id_the_two_collaborators_and_the_pacing() -> None:
     """The shape #9's provider returns and the tests drive, named so a change fails loudly."""
     parameters = inspect.signature(run_pipeline).parameters
 
-    assert list(parameters) == ["run_id", "sources", "scorer"]
+    assert list(parameters) == ["run_id", "sources", "scorer", "sleep"]
     assert parameters["run_id"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
     assert parameters["sources"].kind is inspect.Parameter.KEYWORD_ONLY
     assert parameters["scorer"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameters["sleep"].kind is inspect.Parameter.KEYWORD_ONLY
+    # The production default, read from the source: the shared `waits` fixture
+    # replaces it for every case, which is what makes a real wait impossible here.
+    assert "sleep: Callable[[float], None] = time.sleep" in PIPELINE_SOURCE
 
 
-def test_the_pipeline_reads_no_configuration_and_imports_no_network_client() -> None:
-    assert "environ" not in PIPELINE_SOURCE
-    assert "getenv" not in PIPELINE_SOURCE
+def test_the_pipeline_reads_only_its_own_two_variables_and_imports_no_network_client() -> None:
+    """The two settings a run has, and nothing else the process holds."""
+    assert f"os.environ.get({RUN_REQUEST_BUDGET_VARIABLE}" in PIPELINE_SOURCE
+    assert f"os.environ.get({RUN_REQUEST_INTERVAL_SECONDS_VARIABLE}" in PIPELINE_SOURCE
+    assert PIPELINE_SOURCE.count("environ") == 2  # the bound and the interval, one read each
     roots = _imported_roots(PIPELINE_SOURCE)
     assert roots & NETWORK_MODULES == set()
-    assert {"os", "smtplib", "email"} & roots == set()
+    assert {"smtplib", "email"} & roots == set()
 
 
 # The tick: the real provider runs this pipeline, and a run's record carries no resume text.
@@ -1500,3 +1517,348 @@ def test_a_failed_board_puts_no_payload_text_on_the_run_row(
     assert expected in row["error"]  # the typed refusal reached the row, and not a traceback
     assert PAYLOAD_SENTINEL not in row["error"]
     assert _rows(Posting) == 0
+
+
+# The run's outbound budget and its pacing: how many boards one run may ask, how far
+# apart, and what the companies it never reached keep.
+
+# Three active companies, one posting each, scripted so a walk's call order is its
+# ascending `company.id` order: `acme`, `beta`, `globex`.
+THREE_BOARDS = {
+    "acme": [_posting("1")],
+    "beta": [_posting("2")],
+    "globex": [_posting("3")],
+}
+
+
+def test_the_two_readers_answer_the_variable_or_the_module_s_own_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset and empty are the default, `0` is a value, and a set one is read as it stands."""
+    for variable in (RUN_REQUEST_BUDGET_VARIABLE, RUN_REQUEST_INTERVAL_SECONDS_VARIABLE):
+        monkeypatch.setenv(variable, "")
+        assert pipeline_module.request_budget() == DEFAULT_REQUEST_BUDGET == 200
+        assert (
+            pipeline_module.request_interval_seconds()
+            == DEFAULT_REQUEST_INTERVAL_SECONDS
+            == 1.0
+        )
+        monkeypatch.delenv(variable, raising=False)
+    assert pipeline_module.request_budget() == DEFAULT_REQUEST_BUDGET
+    assert pipeline_module.request_interval_seconds() == DEFAULT_REQUEST_INTERVAL_SECONDS
+
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, "0")
+    monkeypatch.setenv(RUN_REQUEST_INTERVAL_SECONDS_VARIABLE, "0")
+    assert pipeline_module.request_budget() == 0
+    assert pipeline_module.request_interval_seconds() == 0.0
+
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, "7")
+    monkeypatch.setenv(RUN_REQUEST_INTERVAL_SECONDS_VARIABLE, "2.5")
+    assert pipeline_module.request_budget() == 7
+    assert pipeline_module.request_interval_seconds() == 2.5
+
+
+def test_both_settings_are_read_once_per_run_and_never_at_import(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, waits: list[float]
+) -> None:
+    """Two runs in one process: the second obeys what the environment holds when it starts.
+
+    The first run is bounded to one board and paced at 2.5 seconds, the second is
+    unbounded and paced at 0. A value read at import, or read once for the process,
+    would make the second run behave like the first.
+    """
+    for slug in THREE_BOARDS:
+        _company(slug)
+    source = FakeSource(THREE_BOARDS)
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, "1")
+    monkeypatch.setenv(RUN_REQUEST_INTERVAL_SECONDS_VARIABLE, "2.5")
+    first = _run()
+
+    run_pipeline(first, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme"]
+    assert _run_row(first)["companies_not_fetched"] == 2
+    assert waits == []  # one call, so no gap to wait in
+
+    monkeypatch.delenv(RUN_REQUEST_BUDGET_VARIABLE)
+    monkeypatch.setenv(RUN_REQUEST_INTERVAL_SECONDS_VARIABLE, "0")
+    second = _run()
+
+    run_pipeline(second, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme", "acme", "beta", "globex"]  # the second run's own bound
+    assert _run_row(second)["companies_not_fetched"] is None
+    assert waits == [0.0, 0.0]  # the second run's own interval, one wait per gap
+
+
+_BAD_VALUES = [
+    pytest.param(RUN_REQUEST_BUDGET_VARIABLE, "-1", id="a negative budget"),
+    pytest.param(RUN_REQUEST_BUDGET_VARIABLE, "soon", id="a budget that is not a number"),
+    pytest.param(RUN_REQUEST_INTERVAL_SECONDS_VARIABLE, "-0.5", id="a negative interval"),
+    pytest.param(
+        RUN_REQUEST_INTERVAL_SECONDS_VARIABLE, "soon", id="an interval that is not a number"
+    ),
+]
+
+
+@pytest.mark.parametrize("variable, value", _BAD_VALUES)
+def test_a_value_the_reader_cannot_read_fails_the_run_naming_the_variable_and_the_value(
+    engine: Engine,
+    client: TestClient,
+    inline_starter: None,
+    monkeypatch: pytest.MonkeyPatch,
+    variable: str,
+    value: str,
+) -> None:
+    """Read before the first board call: no request, nothing stored, and the row says what."""
+    _company("acme")
+    source = FakeSource({"acme": [_posting("1")]})
+    _active_resume()
+    monkeypatch.setenv(variable, value)
+
+    row = _tick(client, {"greenhouse": source})
+
+    assert row["status"] == "failed"
+    assert variable in row["error"] and value in row["error"]
+    assert source.calls == []  # nothing was asked, because nothing was read
+    assert (row["postings_seen"], row["matches_created"]) == (0, 0)
+    assert row["companies_not_fetched"] is None  # and the new column was not written
+    assert _rows(Posting) == 0
+
+
+_BUDGET_CASES = [
+    pytest.param(0, [], 3, id="zero asks no board at all"),
+    pytest.param(1, ["acme"], 2, id="one asks only the lowest id"),
+    pytest.param(3, ["acme", "beta", "globex"], None, id="exactly n calls every board"),
+    pytest.param(4, ["acme", "beta", "globex"], None, id="n + 1 behaves exactly as n"),
+]
+
+
+@pytest.mark.parametrize("budget, called, not_fetched", _BUDGET_CASES)
+def test_the_budget_bounds_the_walk_and_never_writes_a_zero(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    budget: int,
+    called: list[str],
+    not_fetched: int | None,
+) -> None:
+    """Three active companies, one posting each, and the row's own record of what the walk did."""
+    for slug in THREE_BOARDS:
+        _company(slug)
+    source = FakeSource(THREE_BOARDS)
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, str(budget))
+    run = _run()
+
+    run_pipeline(run, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    row = _run_row(run)
+    assert source.calls == called  # ascending `company.id`, and nothing past the bound
+    assert (row["postings_seen"], row["matches_created"]) == (len(called), len(called))
+    assert row["companies_not_fetched"] == not_fetched
+    assert _rows(Posting) == len(called)  # a refused company stored nothing
+
+
+def test_the_companies_the_budget_refuses_are_untouched(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Skipped, not probed and skipped: no call, no ingest, no row moved and no validator written."""
+    first = _company("acme")
+    second = _company("beta")
+    refused = _company("globex")
+    source = FakeSource(
+        THREE_BOARDS, validators={"globex": (ANSWERED_ETAG, STORED_LAST_MODIFIED)}
+    )
+    _active_resume()
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+    _mark_saved(_matches()[2]["id"])  # the owner acted on the refused company's match
+    source.validators["globex"] = ("W/\"elsewhere\"", None)  # a call now would store this
+
+    source.calls.clear()
+    postings_before = _postings_of(refused)
+    matches_before = _matches()
+    validator_before = _stored_validator(refused)
+    calls: list[int] = []
+
+    def recording_ingest(company_id: int, postings: list[SourcePosting]) -> IngestResult:
+        calls.append(company_id)
+        return IngestResult(created_ids=[], reopened_ids=[])
+
+    monkeypatch.setattr(pipeline_module, "ingest_postings", recording_ingest)
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, "2")
+    third_run = _run()
+
+    run_pipeline(third_run, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme", "beta"]  # the refused company's board was asked nothing
+    assert calls == [first, second]  # and its payload reached no ingest
+    assert _postings_of(refused) == postings_before
+    assert all(row["closed_at"] is None for row in postings_before.values())
+    assert _matches() == matches_before  # its saved match included, state and alert time too
+    assert _stored_validator(refused) == validator_before
+    assert _run_row(third_run)["companies_not_fetched"] == 1
+
+
+@pytest.mark.parametrize(
+    "budget, called, not_fetched, fetched",
+    [
+        pytest.param(2, ["acme", "beta"], 1, 1, id="the 304 spends the second unit"),
+        pytest.param(
+            3, ["acme", "beta", "globex"], None, 2, id="the same watchlist walked to the end"
+        ),
+    ],
+)
+def test_a_304_spends_its_unit_and_is_not_a_not_fetched_company(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    budget: int,
+    called: list[str],
+    not_fetched: int | None,
+    fetched: int,
+) -> None:
+    """The middle board answers `304`: it was asked, so it is counted and spends a unit."""
+    _company("acme")
+    unchanged = _company("beta")
+    _stored_posting(unchanged, external_id="old")
+    _seed_validator(unchanged, etag=STORED_ETAG, last_modified=STORED_LAST_MODIFIED)
+    _company("globex")
+    source = FakeSource(
+        {"acme": [_posting("1")], "globex": [_posting("3")]}, not_modified={"beta"}
+    )
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, str(budget))
+    run = _run()
+
+    run_pipeline(run, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    row = _run_row(run)
+    assert source.calls == called
+    assert (row["postings_seen"], row["matches_created"]) == (
+        fetched,
+        fetched,
+    )  # the 200 boards' postings, and the 304 board's none
+    assert row["companies_not_fetched"] == not_fetched
+    assert {external: value["closed_at"] for external, value in _postings_of(unchanged).items()} == {
+        "old": None
+    }
+    assert _stored_validator(unchanged) == (STORED_ETAG, STORED_LAST_MODIFIED)
+
+
+def test_the_next_run_with_room_fetches_the_rest_and_closes_nothing_of_it(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the bound left is untouched, and a later run with room stores and scores it."""
+    companies = [_company(slug) for slug in THREE_BOARDS]
+    source = FakeSource(THREE_BOARDS)
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, "2")
+    first = _run()
+
+    run_pipeline(first, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    monkeypatch.delenv(RUN_REQUEST_BUDGET_VARIABLE)
+    second = _run()
+    second_scorer = FakeScorer(_result())
+
+    run_pipeline(second, sources={"greenhouse": source}, scorer=second_scorer)
+
+    assert source.calls == ["acme", "beta", "acme", "beta", "globex"]
+    first_row = _run_row(first)
+    assert (first_row["postings_seen"], first_row["matches_created"]) == (2, 2)
+    assert first_row["companies_not_fetched"] == 1
+    second_row = _run_row(second)
+    assert second_row["companies_not_fetched"] is None
+    assert (second_row["postings_seen"], second_row["matches_created"]) == (3, 1)
+    assert len(second_scorer.calls) == 1  # only the company fetch 1 never reached was new
+    assert all(
+        row["closed_at"] is None
+        for company in companies
+        for row in _postings_of(company).values()
+    )
+
+
+def test_the_walk_waits_the_interval_between_calls_and_none_before_the_first(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, waits: list[float]
+) -> None:
+    """Four boards at one interval: exactly three gaps, in the order the calls were made."""
+    slugs = ("acme", "beta", "globex", "initech")
+    for slug in slugs:
+        _company(slug)
+    source = FakeSource({slug: [_posting(slug)] for slug in slugs})
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_INTERVAL_SECONDS_VARIABLE, "2.5")
+
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == list(slugs)
+    assert waits == [2.5, 2.5, 2.5]
+
+
+def test_a_one_company_walk_never_waits(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, waits: list[float]
+) -> None:
+    """One call, no gap, and no wait after the last one either."""
+    _company("acme")
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_INTERVAL_SECONDS_VARIABLE, "2.5")
+
+    run_pipeline(
+        _run(),
+        sources={"greenhouse": FakeSource({"acme": [_posting("1")]})},
+        scorer=FakeScorer(_result()),
+    )
+
+    assert waits == []
+
+
+def test_a_refused_company_is_never_waited_for(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, waits: list[float]
+) -> None:
+    """Five companies bounded to two: one gap, and nothing for the three past the bound."""
+    slugs = ("acme", "beta", "globex", "initech", "umbrella")
+    for slug in slugs:
+        _company(slug)
+    source = FakeSource({slug: [_posting(slug)] for slug in slugs})
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_INTERVAL_SECONDS_VARIABLE, "2.5")
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, "2")
+
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme", "beta"]
+    assert waits == [2.5]
+
+
+def test_a_304_board_is_paced_like_any_other_call(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, waits: list[float]
+) -> None:
+    """Two companies where the second answers `304`: it was asked, so the gap before it was waited."""
+    _company("acme")
+    _company("beta")
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_INTERVAL_SECONDS_VARIABLE, "2.5")
+
+    run_pipeline(
+        _run(),
+        sources={"greenhouse": FakeSource({"acme": [_posting("1")]}, not_modified={"beta"})},
+        scorer=FakeScorer(_result()),
+    )
+
+    assert waits == [2.5]
+
+
+def test_an_interval_of_zero_calls_the_seam_once_per_gap_all_the_same(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, waits: list[float]
+) -> None:
+    """`0` is a legitimate interval: the seam is called `k - 1` times whatever the value."""
+    for slug in THREE_BOARDS:
+        _company(slug)
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_INTERVAL_SECONDS_VARIABLE, "0")
+
+    run_pipeline(
+        _run(), sources={"greenhouse": FakeSource(THREE_BOARDS)}, scorer=FakeScorer(_result())
+    )
+
+    assert waits == [0.0, 0.0]

@@ -72,6 +72,7 @@ _EXPECTED_COLUMNS = {
         "postings_seen",
         "matches_created",
         "matches_emailed",
+        "companies_not_fetched",
     },
 }
 

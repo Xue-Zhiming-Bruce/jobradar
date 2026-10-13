@@ -4,7 +4,7 @@ A tick answers `202` with a run row while the work is still ahead of it, so this
 route is how a client -- the owner's browser, and #12's UI -- reads the rest:
 `running` while the run is in flight, then `succeeded` or `failed` with the
 counts the run earned and the failure's message when there was one. Nothing here
-is computed or invented: the body is the row's own eight columns, because the row
+is computed or invented: the body is the row's own nine columns, because the row
 is the whole progress record this app keeps, and `app.models.Run` is where their
 meaning is declared.
 
@@ -39,7 +39,7 @@ router = APIRouter()
 
 
 class RunSummary(BaseModel):
-    """One `run` row as this API renders it: its eight columns, and no derived field.
+    """One `run` row as this API renders it: its nine columns, and no derived field.
 
     The same body a `202` from `POST /internal/tick` carries. `finished_at` and
     `error` are absent until the run ends, and the two counts the walk earns are
@@ -49,6 +49,9 @@ class RunSummary(BaseModel):
     (#36), NULL until that digest records it -- which is the honest value for a
     run still in flight, a row written before the column existed, and a run whose
     send failed, and a different answer from a run that really did email none.
+    `companies_not_fetched` is NULL for a run the board-call budget did not stop,
+    which includes a run still in flight, and holds the count of active companies
+    the walk left for a later run when it did (#56).
     """
 
     id: int
@@ -59,6 +62,7 @@ class RunSummary(BaseModel):
     postings_seen: int
     matches_created: int
     matches_emailed: int | None
+    companies_not_fetched: int | None
 
 
 # The refusals this route answers with, named in the contract the way
@@ -79,6 +83,7 @@ def run_summary(run: Run) -> RunSummary:
         postings_seen=run.postings_seen,
         matches_created=run.matches_created,
         matches_emailed=run.matches_emailed,
+        companies_not_fetched=run.companies_not_fetched,
     )
 
 

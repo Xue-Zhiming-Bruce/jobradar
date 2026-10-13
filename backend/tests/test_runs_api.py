@@ -39,7 +39,7 @@ from app.routes import internal
 from app.routes.internal import get_pipeline, get_run_starter
 from app.routes.runs import REAPED_RUN_ERROR, reap_stale_runs
 
-# The eight columns of a run, and therefore the whole body this route may answer
+# The nine columns of a run, and therefore the whole body this route may answer
 # with. A field that is not here is a field the route invented.
 RUN_FIELDS = {
     "id",
@@ -50,6 +50,7 @@ RUN_FIELDS = {
     "postings_seen",
     "matches_created",
     "matches_emailed",
+    "companies_not_fetched",
 }
 
 # Values that must not reach the wire: the shared secret a tick would carry, and
@@ -96,6 +97,7 @@ def test_a_running_run_reads_back_exactly_as_its_row_holds_it(client: TestClient
     assert body["postings_seen"] == 0
     assert body["matches_created"] == 0
     assert body["matches_emailed"] is None  # no digest of this run has recorded one yet
+    assert body["companies_not_fetched"] is None  # and no budget stopped it yet
     assert datetime.fromisoformat(body["started_at"]) is not None
 
 
@@ -166,6 +168,38 @@ def test_the_body_tells_a_run_that_emailed_nothing_from_one_that_did(engine: Eng
     assert answered == {emailed_nothing: 0, emailed_two: 2, never_recorded: None}
 
 
+# What a run's row says about the companies its outbound budget left for a later
+# run: a count, and NULL for every walk the bound did not stop (#56).
+
+
+def test_the_body_tells_a_run_the_budget_stopped_from_one_that_reached_the_end(
+    engine: Engine,
+) -> None:
+    """A count and a NULL are two different answers, and the read serves the row's own value.
+
+    Two finished runs, seeded through the app's own session: one the board-call
+    budget stopped after two of five companies, and one that walked its whole
+    watchlist. Each is told apart by its own row -- no board and no walk is
+    involved -- and the read answers each with that row's value.
+    """
+    ended = datetime.now(UTC)
+    stopped = seed(status="succeeded", finished_at=ended, companies_not_fetched=3)
+    reached_the_end = seed(status="succeeded", finished_at=ended)
+
+    assert [run_row(run_id).companies_not_fetched for run_id in (stopped, reached_the_end)] == [
+        3,
+        None,
+    ]
+
+    with TestClient(app) as read_client:
+        answered = {
+            run_id: read(read_client, run_id).json()["companies_not_fetched"]
+            for run_id in (stopped, reached_the_end)
+        }
+
+    assert answered == {stopped: 3, reached_the_end: None}
+
+
 def test_the_read_answers_for_the_id_it_was_asked_for(client: TestClient) -> None:
     first = seed(status="succeeded")
     second = seed(status="failed", error="a board was down")
@@ -206,7 +240,7 @@ def test_reading_a_run_needs_no_secret(
 def test_the_body_carries_no_secret_no_resume_text_and_no_database_url(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The body is the row's eight columns: nothing private can ride along on it."""
+    """The body is the row's nine columns: nothing private can ride along on it."""
     monkeypatch.setenv("TICK_SECRET", SECRET)
     run_id = seed(status="failed", error="the board refused: acme")
 

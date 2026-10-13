@@ -60,6 +60,7 @@ describe('the wire is decoded into the UI', () => {
           error: null,
           postings_seen: 12,
           matches_created: 4,
+          companies_not_fetched: 3,
         }),
       ),
     )
@@ -72,6 +73,7 @@ describe('the wire is decoded into the UI', () => {
       error: null,
       postingsSeen: 12,
       matchesCreated: 4,
+      companiesNotFetched: 3,
     })
   })
 
@@ -159,6 +161,7 @@ describe('the wire is decoded into the UI', () => {
             error: null,
             postings_seen: 0,
             matches_created: 0,
+            companies_not_fetched: null,
           },
           { status: 202 },
         )
@@ -173,6 +176,7 @@ describe('the wire is decoded into the UI', () => {
       error: null,
       postingsSeen: 0,
       matchesCreated: 0,
+      companiesNotFetched: null,
     })
     expect(requests).toHaveLength(1)
     expect(requests[0].headers.has('x-tick-secret')).toBe(false)

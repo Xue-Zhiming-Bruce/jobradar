@@ -5,7 +5,8 @@
 tables -- the baseline, then the column #26 added, then the source column and
 check #28 added, then the outcome column, its check and its backfill #30 added,
 then the model and prompt-version columns #32 added, then the run's emailed
-count #36 added, then the two board-validator columns #55 added. Two paths to one schema
+count #36 added, then the two board-validator columns #55 added, then the run's
+unfetched-company count #56 added. Two paths to one schema
 can drift, so nothing here assumes a revision is right: every test runs `alembic
 upgrade head` -- in-process, through `alembic.command.upgrade` -- against the
 database the shared `engine` fixture in `tests/conftest.py` supplies, and then
@@ -72,7 +73,7 @@ ALEMBIC_INI = BACKEND_ROOT / "alembic.ini"
 REVISIONS_DIR = BACKEND_ROOT / "migrations" / "versions"
 
 # The readable revision ids, in the order they apply, and the files that hold
-# them. The head is the last of the seven.
+# them. The head is the last of the eight.
 BASELINE_REVISION = "0001_baseline"
 BASELINE_REVISION_FILE = "0001_baseline_five_tables.py"
 PARSED_FIELDS_REVISION = "0002_parsed_fields"
@@ -87,6 +88,8 @@ RUN_MATCHES_EMAILED_REVISION = "0006_run_matches_emailed"
 RUN_MATCHES_EMAILED_REVISION_FILE = "0006_run_matches_emailed.py"
 BOARD_VALIDATOR_REVISION = "0007_company_board_validator"
 BOARD_VALIDATOR_REVISION_FILE = "0007_company_board_validator.py"
+COMPANIES_NOT_FETCHED_REVISION = "0008_run_companies_not_fetched"
+COMPANIES_NOT_FETCHED_REVISION_FILE = "0008_run_companies_not_fetched.py"
 THE_REVISION_FILES = (
     BASELINE_REVISION_FILE,
     PARSED_FIELDS_REVISION_FILE,
@@ -95,8 +98,9 @@ THE_REVISION_FILES = (
     PROVENANCE_REVISION_FILE,
     RUN_MATCHES_EMAILED_REVISION_FILE,
     BOARD_VALIDATOR_REVISION_FILE,
+    COMPANIES_NOT_FETCHED_REVISION_FILE,
 )
-HEAD_REVISION = BOARD_VALIDATOR_REVISION
+HEAD_REVISION = COMPANIES_NOT_FETCHED_REVISION
 
 # Alembic's own bookkeeping table: one row per applied revision. It is not one of
 # the five the models declare, and `alembic current` reads it.
@@ -440,12 +444,14 @@ def _run_rows_before_the_column(engine: Engine) -> list[tuple[object, ...]]:
         ]
 
 
-def _matches_emailed_values(engine: Engine) -> list[object]:
-    """The new column's values, in id order, read with SQL for the reason above."""
+def _run_column_values(engine: Engine, column: str) -> list[object]:
+    """One run column's values, in id order, read with SQL for the reason above."""
     with engine.connect() as connection:
         return [
             row[0]
-            for row in connection.exec_driver_sql("SELECT matches_emailed FROM run ORDER BY id")
+            for row in connection.exec_driver_sql(
+                f"SELECT {column} FROM run ORDER BY id"
+            )
         ]
 
 
@@ -897,7 +903,7 @@ def test_the_run_column_is_added_null_with_no_backfill(database: Engine) -> None
     command.upgrade(_config(), "head")
 
     assert _reflected_columns(database, "run")["matches_emailed"] == ("INTEGER", True)
-    assert _matches_emailed_values(database) == [None, None]
+    assert _run_column_values(database, "matches_emailed") == [None, None]
     assert _run_rows_before_the_column(database) == before
     assert [row[1] for row in before] == ["succeeded", "failed"]
     assert [row[3] is not None for row in before] == [True, True]  # both ended, read as the engine's own type
@@ -907,6 +913,47 @@ def test_the_run_column_is_added_null_with_no_backfill(database: Engine) -> None
     command.downgrade(_config(), PROVENANCE_REVISION)
 
     assert "matches_emailed" not in _reflected_columns(database, "run")
+    assert _run_rows_before_the_column(database) == before
+
+
+def test_the_unfetched_company_count_is_added_null_with_no_backfill(database: Engine) -> None:
+    """#56's column: a database at #55 with two run rows gains it, both NULL.
+
+    The fixture's database is rebuilt at #55 -- the schema before this revision --
+    and two run rows go in, the same two the #36 case seeds. `upgrade head` adds
+    the column: every row reads NULL, which means "the budget did not stop this
+    walk" and not "it fetched nothing" -- a `NOT NULL` default of `0` would make a
+    row written before the bound existed claim a bounded, complete walk -- and no
+    row's status, end, error or other count is rewritten. `downgrade()` takes the
+    column away again and leaves the rows exactly as they were.
+    """
+    Base.metadata.drop_all(database)
+    command.upgrade(_config(), BOARD_VALIDATOR_REVISION)
+    _store_a_run_row_before_this_revision(
+        database, status="succeeded", error=None, postings_seen=12, matches_created=4
+    )
+    _store_a_run_row_before_this_revision(
+        database,
+        status="failed",
+        error="the board refused: acme",
+        postings_seen=1,
+        matches_created=0,
+    )
+    before = _run_rows_before_the_column(database)
+    assert "companies_not_fetched" not in _reflected_columns(database, "run")
+
+    command.upgrade(_config(), "head")
+
+    assert _reflected_columns(database, "run")["companies_not_fetched"] == ("INTEGER", True)
+    assert _run_column_values(database, "companies_not_fetched") == [None, None]
+    assert _run_rows_before_the_column(database) == before
+    assert [row[1] for row in before] == ["succeeded", "failed"]
+    assert [row[4] for row in before] == [None, "the board refused: acme"]
+    assert [row[5:] for row in before] == [(12, 4), (1, 0)]
+
+    command.downgrade(_config(), BOARD_VALIDATOR_REVISION)
+
+    assert "companies_not_fetched" not in _reflected_columns(database, "run")
     assert _run_rows_before_the_column(database) == before
 
 
