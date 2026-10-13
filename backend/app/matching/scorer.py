@@ -10,8 +10,16 @@ without a model, a key or a network, and `LlmScorer` is the real one.
 `chat_completions_url()` builds -- the base URL `LLM_BASE_URL` names, OpenAI's
 own by default, and the one path the provider serves -- carrying the prompt
 rendered from `PROMPT_PATH` (the file `score_prompt.txt` beside this module, read
-on every call) and reading the answer at `choices[0].message.content`. The answer
-is parsed strictly and nothing is coerced: a score that is not a JSON integer in
+on every call) and reading the answer at `choices[0].message.content`. One call
+may name a second model: `LLM_FALLBACK_MODEL`, when a deployment sets it, is
+tried after the configured one, each with its own `SCORER_MAX_ATTEMPTS` budget,
+so one call makes at most two models' worth of requests and never loops. The
+fallback is tried for the four failures below -- a timeout, an unreachable
+endpoint, a non-2xx and an answer still unusable after that model's budget -- and
+never for a `ScorerConfigurationError`: a missing key, an empty resume and an
+unusable base URL are all refused before any request, and a second model would
+fix none of them. The answer is parsed strictly and nothing is coerced: a score
+that is not a JSON integer in
 0-100, a reason that is not a non-blank string, or a `gaps` list holding anything
 but strings is a malformed answer, and a malformed answer costs one of
 `SCORER_MAX_ATTEMPTS` attempts. There is no LLM SDK in this project: the call is
@@ -31,19 +39,21 @@ reach #9's run row instead of its traceback. A score of 0 is below any cutoff, s
 #10's digest cannot alert on one. `record_score` reads that same prefix to mark the
 row `outcome = 'not_scored'`: the prefix stays on the stored reason, and the
 column is what #10's selection now reads. The only exceptions `score` raises are
-`ScorerConfigurationError`'s two -- no key, no resume text -- and both happen
-before any request.
+`ScorerConfigurationError`'s three -- no key, no resume text, a base URL that is
+not an http or https one -- and all three happen before any request.
 
 `record_score(posting_id, result)` is this module's only writer, the mirror of
 `prefilter.record_rejection`: it stores the result on the single `match` row
 `posting_id` is allowed, updating the row a rejection already wrote instead of
-inserting a second one.
+inserting a second one. It also records the row's provenance -- `result.model`,
+the model that produced the result, and `SCORE_PROMPT_VERSION` -- for a scored and
+a not-scored row alike; a rejection row keeps both NULL, because no model ran.
 """
 
 import base64
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
@@ -59,6 +69,7 @@ from app.sources.base import SourcePosting
 # service and the prefilter read their own settings in one place.
 LLM_API_KEY = "LLM_API_KEY"
 LLM_MODEL = "LLM_MODEL"
+LLM_FALLBACK_MODEL = "LLM_FALLBACK_MODEL"
 SCORER_MAX_POSTINGS = "SCORER_MAX_POSTINGS"
 LLM_BASE_URL = "LLM_BASE_URL"
 
@@ -73,9 +84,11 @@ DEFAULT_MAX_POSTINGS = 50
 # one place the two are joined.
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
-# The total number of calls one posting's `score` makes -- not three retries on
-# top of an original -- and deliberately not configurable: an answer that cannot
-# be read three times will not become readable on the fourth.
+# The total number of calls one posting's `score` makes for one model -- not three
+# retries on top of an original -- and deliberately not configurable: an answer
+# that cannot be read three times will not become readable on the fourth. A model
+# with a fallback behind it gets this budget each, so one call makes at most twice
+# this many requests.
 SCORER_MAX_ATTEMPTS = 3
 
 # One constant for the request and for the client built when none is injected: a
@@ -97,6 +110,12 @@ NOT_STATED = "Not stated"
 # `backend/` or from the repository root reads the same file.
 PROMPT_PATH = Path(__file__).parent / "score_prompt.txt"
 
+# The version of `score_prompt.txt` a stored score records, written to
+# `match.prompt_version` by `record_score`: bump it whenever that file's text
+# changes, so two rows scored by two prompts are told apart by their column
+# rather than by guessing from their reasons.
+SCORE_PROMPT_VERSION = "1"
+
 # One wording per cause, after `NOT_SCORED_PREFIX`.
 _OUT_OF_TIME = "the model call did not answer in time"
 _CALL_FAILED = "the model call failed"
@@ -116,11 +135,20 @@ class ScorerConfigurationError(RuntimeError):
 
 @dataclass(frozen=True)
 class MatchResult:
-    """How well one posting fits: the score, why, and what is missing."""
+    """How well one posting fits: the score, why, and what is missing.
+
+    `model` is the model that produced this result -- the fallback's name when the
+    fallback answered, and the model that was attempted on a not-scored one. It is
+    None when a caller that ran no model built the result, a test's fake say, and
+    it takes no part in equality: two results are the same result whatever produced
+    them, and the provenance is read from the `match` row `record_score` writes it
+    to.
+    """
 
     score: int
     reason: str
     gaps: list[str]
+    model: str | None = field(default=None, compare=False)
 
 
 @runtime_checkable
@@ -163,6 +191,17 @@ def api_key() -> str:
 def model() -> str:
     """`LLM_MODEL`, or `DEFAULT_MODEL` when it is unset or empty."""
     return os.environ.get(LLM_MODEL, "").strip() or DEFAULT_MODEL
+
+
+def fallback_model() -> str | None:
+    """`LLM_FALLBACK_MODEL`, or `None` when it is unset or empty.
+
+    Read per call, so a deployment gives scoring a second model by setting the
+    variable and a test needs none. `None` means no fallback: the configured model
+    is the only one tried, and the request count is what it was before this
+    variable existed.
+    """
+    return os.environ.get(LLM_FALLBACK_MODEL, "").strip() or None
 
 
 def max_postings() -> int:
@@ -248,7 +287,9 @@ class LlmScorer:
 
         Both configuration checks happen before the posting is counted and before
         any request; the count is incremented once per posting offered, whatever
-        the calls that follow do.
+        the calls that follow do. Every attempt a model gets is this module's own
+        `SCORER_MAX_ATTEMPTS`, and a configured fallback gets that budget in its
+        turn rather than this model's leftovers.
         """
         key = api_key()
         if not key:
@@ -264,20 +305,32 @@ class LlmScorer:
             return _not_scored(f"the run's cap of {limit} postings was reached")
         self._offered += 1
 
+        # The body is built once and re-named per model: `request_body` keeps its
+        # signature and its one shape, and the fallback's request names the
+        # fallback. The models are tried in order, each with the whole attempt
+        # budget, and the last failure is what a call that never answered returns.
         body = request_body(render_prompt(posting, resume_text))
+        fallback = fallback_model()
         client = self._client
         if client is None:
             client = httpx2.Client(timeout=MODEL_TIMEOUT_SECONDS)
-        for _ in range(SCORER_MAX_ATTEMPTS):
-            answer, failure = ask_model(client, body, key)
-            if failure:
-                return _not_scored(failure)
-            result = _parsed(answer)
-            if result is not None:
-                return result
-        return _not_scored(
-            f"the model's answer was unusable after {SCORER_MAX_ATTEMPTS} attempts"
-        )
+        last_failure: MatchResult | None = None
+        for name in [model()] + ([fallback] if fallback else []):
+            body["model"] = name
+            for _ in range(SCORER_MAX_ATTEMPTS):
+                answer, failure = ask_model(client, body, key)
+                if failure:
+                    last_failure = _not_scored(failure, name)
+                    break
+                result = _parsed(answer, name)
+                if result is not None:
+                    return result
+            else:
+                last_failure = _not_scored(
+                    f"the model's answer was unusable after {SCORER_MAX_ATTEMPTS} attempts",
+                    name,
+                )
+        return last_failure
 
 
 def record_score(posting_id: int, result: MatchResult) -> None:
@@ -301,6 +354,13 @@ def record_score(posting_id: int, result: MatchResult) -> None:
     `state` and `notified_at` are left alone on an update, so a row the owner
     saved stays saved and a digest that already went out is not re-sent. `gaps` is
     stored as JSON text -- "[]" for no gaps -- which is the format #10 and #12 read.
+
+    `model` and `prompt_version` are this writer's provenance, written for a
+    scored row and a not-scored one alike: `model` is `result.model`, the model
+    that produced the result (the fallback's name when the fallback answered, and
+    NULL on a result a caller built without one), and `prompt_version` is
+    `SCORE_PROMPT_VERSION`. `record_rejection` writes neither -- a rejection ran
+    no model -- so a rejection row stays NULL.
     """
     gaps = json.dumps(result.gaps)
     # One writer per state, decided here rather than by the caller that got the
@@ -316,6 +376,8 @@ def record_score(posting_id: int, result: MatchResult) -> None:
                     reason=result.reason,
                     gaps=gaps,
                     outcome=outcome,
+                    model=result.model,
+                    prompt_version=SCORE_PROMPT_VERSION,
                 )
             )
         else:
@@ -323,6 +385,8 @@ def record_score(posting_id: int, result: MatchResult) -> None:
             row.reason = result.reason
             row.gaps = gaps
             row.outcome = outcome
+            row.model = result.model
+            row.prompt_version = SCORE_PROMPT_VERSION
 
 
 def request_body(prompt: str, images: list[bytes] | None = None) -> dict[str, object]:
@@ -389,7 +453,7 @@ def ask_model(client: httpx2.Client, body: dict[str, object], key: str) -> tuple
     return response.text, ""
 
 
-def _parsed(answer: str) -> MatchResult | None:
+def _parsed(answer: str, model_name: str) -> MatchResult | None:
     """The result in one answer, or `None` when the answer is unusable.
 
     The whole response contract in one place: the body is JSON, `choices` is a
@@ -398,6 +462,9 @@ def _parsed(answer: str) -> MatchResult | None:
     non-blank string and whose `gaps` is a list of strings. Nothing is coerced
     (`85.0`, `"85"` and `true` are all malformed), extra keys are ignored, and the
     values that do pass are returned as the model sent them, in its order.
+
+    `model_name` is the model whose answer this was, carried on the result so
+    `record_score` writes it to the row.
     """
     try:
         payload = json.loads(answer)
@@ -421,7 +488,7 @@ def _parsed(answer: str) -> MatchResult | None:
         return None
     if not isinstance(gaps, list) or not all(isinstance(gap, str) for gap in gaps):
         return None
-    return MatchResult(score=score, reason=reason, gaps=gaps)
+    return MatchResult(score=score, reason=reason, gaps=gaps, model=model_name)
 
 
 def _content_of(payload: object) -> str | None:
@@ -439,11 +506,13 @@ def _content_of(payload: object) -> str | None:
     return content if isinstance(content, str) else None
 
 
-def _not_scored(reason: str) -> MatchResult:
+def _not_scored(reason: str, model_name: str | None = None) -> MatchResult:
     """One failure as an ordinary result: no score, no gaps, and the prefix #10 reads.
 
     Returned rather than raised, so #9 stores it like any other score and the
     digest cannot alert on a 0. The reason is built from this module's own words
-    and a status: never the model's raw output and never the key.
+    and a status: never the model's raw output and never the key. `model_name` is
+    the model that was attempted, so the row that stores this result names it too;
+    a refusal that ran no model -- the run's cap -- leaves it None.
     """
-    return MatchResult(score=0, reason=NOT_SCORED_PREFIX + reason, gaps=[])
+    return MatchResult(score=0, reason=NOT_SCORED_PREFIX + reason, gaps=[], model=model_name)

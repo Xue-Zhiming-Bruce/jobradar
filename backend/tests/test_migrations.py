@@ -3,8 +3,8 @@
 `app.db.init_db()` creates the five tables in an empty database; the revisions in
 `migrations/versions/` bring a database that already exists to the same five
 tables -- the baseline, then the column #26 added, then the source column and
-check #28 added, then the outcome column, its check and its backfill #30 added.
-Two paths to one schema
+check #28 added, then the outcome column, its check and its backfill #30 added,
+then the model and prompt-version columns #32 added. Two paths to one schema
 can drift, so nothing here assumes a revision is right: every test runs `alembic
 upgrade head` -- in-process, through `alembic.command.upgrade` -- against the
 database the shared `engine` fixture in `tests/conftest.py` supplies, and then
@@ -71,7 +71,7 @@ ALEMBIC_INI = BACKEND_ROOT / "alembic.ini"
 REVISIONS_DIR = BACKEND_ROOT / "migrations" / "versions"
 
 # The readable revision ids, in the order they apply, and the files that hold
-# them. The head is the last of the four.
+# them. The head is the last of the five.
 BASELINE_REVISION = "0001_baseline"
 BASELINE_REVISION_FILE = "0001_baseline_five_tables.py"
 PARSED_FIELDS_REVISION = "0002_parsed_fields"
@@ -80,13 +80,16 @@ SOURCE_REVISION = "0003_company_source"
 SOURCE_REVISION_FILE = "0003_company_source.py"
 OUTCOME_REVISION = "0004_match_outcome"
 OUTCOME_REVISION_FILE = "0004_match_outcome.py"
+PROVENANCE_REVISION = "0005_match_provenance"
+PROVENANCE_REVISION_FILE = "0005_match_provenance.py"
 THE_REVISION_FILES = (
     BASELINE_REVISION_FILE,
     PARSED_FIELDS_REVISION_FILE,
     SOURCE_REVISION_FILE,
     OUTCOME_REVISION_FILE,
+    PROVENANCE_REVISION_FILE,
 )
-HEAD_REVISION = OUTCOME_REVISION
+HEAD_REVISION = PROVENANCE_REVISION
 
 # Alembic's own bookkeeping table: one row per applied revision. It is not one of
 # the five the models declare, and `alembic current` reads it.
@@ -306,17 +309,18 @@ def _parsed_fields_values(engine: Engine) -> list[object]:
         ]
 
 
-def _store_a_match_row_before_the_outcome_column(
+def _store_a_match_row_before_this_revision(
     engine: Engine, *, external_id: str, score: int, reason: str
 ) -> None:
-    """Insert one match row the way #7 and #8 stored them before this revision.
+    """Insert one match row with only the columns this schema has always had.
 
     The company and the posting go in through the app's own session, because
     neither table gains a column here, and the match row with SQL: the model
-    declares the column this case is about to add, so an INSERT naming it fails on
-    the schema that predates it. `reason` is the caller's, written from the
-    writers' own prefix constants, so a prefix that moved fails this case instead
-    of silently backfilling nothing.
+    declares columns the schema under test does not have yet, so an INSERT naming
+    them would fail on the schema that predates the revision -- which is the schema
+    this row is written into. `reason` is the caller's, written from the writers'
+    own prefix constants, so a prefix that moved fails a case instead of silently
+    backfilling nothing.
     """
     with db.session_scope() as session:
         company = Company(name=f"Acme {external_id}", slug=f"acme-{external_id}")
@@ -358,6 +362,17 @@ def _outcome_column_values(engine: Engine) -> list[object]:
         return [
             row[0]
             for row in connection.exec_driver_sql("SELECT outcome FROM match ORDER BY id")
+        ]
+
+
+def _provenance_values(engine: Engine) -> list[tuple[object, object]]:
+    """The `model` and `prompt_version` values, in id order, read with SQL for the reason above."""
+    with engine.connect() as connection:
+        return [
+            (row[0], row[1])
+            for row in connection.exec_driver_sql(
+                "SELECT model, prompt_version FROM match ORDER BY id"
+            )
         ]
 
 
@@ -687,7 +702,7 @@ def test_the_outcome_column_is_backfilled_from_the_reasons_a_database_already_ho
         "Synthetic fit: Python and SQL.",
     )
     for number, reason in enumerate(reasons, start=1):
-        _store_a_match_row_before_the_outcome_column(
+        _store_a_match_row_before_this_revision(
             database, external_id=str(number), score=0 if number < len(reasons) else 87, reason=reason
         )
     before = _stored_match_texts(database)
@@ -699,6 +714,38 @@ def test_the_outcome_column_is_backfilled_from_the_reasons_a_database_already_ho
     assert _outcome_column_values(database) == ["rejected", "not_scored", "scored"]
     assert _stored_match_texts(database) == before
     assert [reason for reason, _, _ in before] == list(reasons)
+
+
+def test_the_provenance_columns_are_added_null_with_no_backfill(database: Engine) -> None:
+    """#32's columns: a database at #30 with three rows gains them, all three NULL.
+
+    The fixture's database is rebuilt at #30 -- the schema before this revision --
+    and one row of each kind goes in: a rejection, a not-scored result and a
+    genuine score. `upgrade head` adds the two columns: every row's model and
+    prompt version is NULL, which means "unknown" and not "none" -- a row written
+    before them had no way to say which model produced it, so inventing one would
+    be a lie -- and not one character of any reason nor any score is rewritten.
+    """
+    Base.metadata.drop_all(database)
+    command.upgrade(_config(), OUTCOME_REVISION)
+    reasons = (
+        REJECTION_REASON_PREFIX + "title term 'intern'",
+        NOT_SCORED_PREFIX + "the model call failed",
+        "Synthetic fit: Python and SQL.",
+    )
+    for number, reason in enumerate(reasons, start=1):
+        _store_a_match_row_before_this_revision(
+            database, external_id=str(number), score=0 if number < len(reasons) else 87, reason=reason
+        )
+    before = _stored_match_texts(database)
+    assert "model" not in _reflected_columns(database, "match")
+
+    command.upgrade(_config(), "head")
+
+    assert _reflected_columns(database, "match")["model"] == ("VARCHAR(100)", True)
+    assert _reflected_columns(database, "match")["prompt_version"] == ("VARCHAR(50)", True)
+    assert _provenance_values(database) == [(None, None)] * len(reasons)
+    assert _stored_match_texts(database) == before
 
 
 def test_the_four_documented_commands_do_what_they_say(database: Engine, tmp_path: Path) -> None:

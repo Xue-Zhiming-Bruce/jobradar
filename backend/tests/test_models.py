@@ -58,6 +58,8 @@ _EXPECTED_COLUMNS = {
         "gaps",
         "state",
         "outcome",
+        "model",
+        "prompt_version",
         "created_at",
         "notified_at",
     },
@@ -93,6 +95,8 @@ _STRING_LENGTHS = {
     ("match", "gaps"): None,
     ("match", "state"): 20,
     ("match", "outcome"): 20,
+    ("match", "model"): 100,
+    ("match", "prompt_version"): 50,
     ("run", "status"): 20,
     ("run", "error"): None,
 }
@@ -192,17 +196,17 @@ def test_no_app_module_names_a_dialect() -> None:
     assert naming_a_dialect == []
 
 
-def _assigns_the_outcome_column(source: str) -> bool:
-    """Whether this module writes a `match` row's outcome: `row.outcome = ...` or `Match(outcome=...)`.
+def _assigns_a_match_column(source: str, column: str) -> bool:
+    """Whether this module writes a `match` row's `column`: `row.column = ...` or `Match(column=...)`.
 
     Those two spellings and no others, because the fact is who *writes* the
-    column: rendering it into a response (`MatchSummary(outcome=...)`), comparing
-    it (`Match.outcome != 'scored'`) and declaring it in the model are none of
-    them writes.
+    column: rendering it into a response (`MatchSummary(column=...)`), comparing
+    it (`Match.column != ...`) and declaring it in the model are none of them
+    writes.
     """
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Match":
-            if any(keyword.arg == "outcome" for keyword in node.keywords):
+            if any(keyword.arg == column for keyword in node.keywords):
                 return True
         if isinstance(node, ast.Assign):
             targets = node.targets
@@ -210,7 +214,7 @@ def _assigns_the_outcome_column(source: str) -> bool:
             targets = [node.target]
         else:
             targets = []
-        if any(getattr(target, "attr", None) == "outcome" for target in targets):
+        if any(getattr(target, "attr", None) == column for target in targets):
             return True
     return False
 
@@ -220,10 +224,26 @@ def test_the_two_writers_are_the_only_modules_that_assign_an_outcome() -> None:
     assigning = sorted(
         path.relative_to(APP_ROOT).as_posix()
         for path in APP_ROOT.rglob("*.py")
-        if _assigns_the_outcome_column(path.read_text(encoding="utf-8"))
+        if _assigns_a_match_column(path.read_text(encoding="utf-8"), "outcome")
     )
 
     assert assigning == ["matching/prefilter.py", "matching/scorer.py"]
+
+
+def test_only_the_scorer_writes_the_provenance_columns() -> None:
+    """One writer for the model and the prompt version: the scorer's `record_score`.
+
+    `record_rejection` writes neither -- a rejection ran no model -- so the
+    prefilter is not one of them, and no other module assigns either column.
+    """
+    for column in ("model", "prompt_version"):
+        assigning = sorted(
+            path.relative_to(APP_ROOT).as_posix()
+            for path in APP_ROOT.rglob("*.py")
+            if _assigns_a_match_column(path.read_text(encoding="utf-8"), column)
+        )
+
+        assert assigning == ["matching/scorer.py"], column
 
 
 def test_every_string_column_carries_the_length_declared_for_it() -> None:

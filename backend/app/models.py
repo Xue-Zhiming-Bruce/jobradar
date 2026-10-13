@@ -207,6 +207,13 @@ class Match(Base):
     # One writer per state: `prefilter.record_rejection` and
     # `scorer.record_score`, the two modules that also decide the reason's prefix.
     outcome: Mapped[str] = mapped_column(String(20), nullable=False, server_default="scored")
+    # Which model produced this row's score and which version of the scoring
+    # prompt it was read with, written by `scorer.record_score` for a scored row
+    # and a not-scored one alike. Both nullable and neither defaulted: NULL is
+    # "unknown", which is what a rejection row (no model ran) and every row written
+    # before this marker existed keep -- it does not mean "none".
+    model: Mapped[str | None] = mapped_column(String(100))
+    prompt_version: Mapped[str | None] = mapped_column(String(50))
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow)
     notified_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 

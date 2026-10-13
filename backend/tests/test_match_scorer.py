@@ -40,10 +40,12 @@ from app.matching.scorer import (
     DEFAULT_MODEL,
     LLM_API_KEY,
     LLM_BASE_URL,
+    LLM_FALLBACK_MODEL,
     LLM_MODEL,
     MODEL_TIMEOUT_SECONDS,
     NOT_SCORED_PREFIX,
     PROMPT_PATH,
+    SCORE_PROMPT_VERSION,
     SCORER_MAX_ATTEMPTS,
     SCORER_MAX_POSTINGS,
     FakeScorer,
@@ -54,6 +56,7 @@ from app.matching.scorer import (
     api_key,
     base_url,
     chat_completions_url,
+    fallback_model,
     max_postings,
     model,
     record_score,
@@ -72,14 +75,20 @@ THE_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 # A synthetic gateway: not a real host, and the base URL no other case configures.
 TEST_BASE_URL = "https://gateway.example.test/v1"
 
-# The four variables, in the order this module reads them, with the reader beside
+# The five variables, in the order this module reads them, with the reader beside
 # each, so one case can drive the configuration without naming it twice.
-THE_FOUR = (
+THE_FIVE = (
     (LLM_API_KEY, api_key),
     (LLM_MODEL, model),
+    (LLM_FALLBACK_MODEL, fallback_model),
     (SCORER_MAX_POSTINGS, max_postings),
     (LLM_BASE_URL, base_url),
 )
+
+# The two model names a fallback case uses: neither is a deployment's real choice,
+# and the second is only ever reached through the variable the case sets.
+THE_MODEL = "gpt-4o-mini"
+THE_FALLBACK = "gpt-4o"
 
 # A recognisable key value and a recognisable resume: neither is a real
 # credential, a real resume, or allowed to appear in a message or a result.
@@ -112,6 +121,8 @@ MATCH_COLUMNS = (
     "gaps",
     "state",
     "outcome",
+    "model",
+    "prompt_version",
     "created_at",
     "notified_at",
 )
@@ -142,7 +153,7 @@ def no_outbound_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def no_model_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each case starts with no key, no model and no cap, whatever its shell holds."""
-    for name, _ in THE_FOUR:
+    for name, _ in THE_FIVE:
         monkeypatch.delenv(name, raising=False)
 
 
@@ -361,10 +372,23 @@ def test_the_seam_is_one_method_over_a_posting_and_a_resume_text() -> None:
         "resume_text",
     ]
     assert inspect.signature(MatchScorer.score).return_annotation is MatchResult
-    assert MatchResult.__dataclass_fields__.keys() == {"score", "reason", "gaps"}
+    # Criterion 6 gives the result a provenance field; the case below proves it
+    # takes no part in equality, so the field set alone is what is pinned here.
+    assert MatchResult.__dataclass_fields__.keys() == {"score", "reason", "gaps", "model"}
     assert MatchResult.__dataclass_params__.frozen
     assert list(inspect.signature(FakeScorer).parameters) == ["result"]
     assert hasattr(FakeScorer(_result()), "calls")
+
+
+def test_the_model_field_takes_no_part_in_a_results_equality() -> None:
+    """The provenance is the row's: two results are the same result whatever produced them."""
+    assert MatchResult(score=87, reason="Fits.", gaps=[]).model is None
+    assert MatchResult(score=87, reason="Fits.", gaps=[]) == MatchResult(
+        score=87, reason="Fits.", gaps=[], model=THE_MODEL
+    )
+    assert MatchResult(score=87, reason="Fits.", gaps=[], model=THE_MODEL) == MatchResult(
+        score=87, reason="Fits.", gaps=[], model=THE_FALLBACK
+    )
 
 
 def test_the_real_scorer_satisfies_the_protocol_without_moving_it() -> None:
@@ -462,7 +486,7 @@ def test_the_two_configuration_errors_are_distinct_rather_than_one_message(
     assert requests == []
 
 
-@pytest.mark.parametrize(("name", "reader"), THE_FOUR, ids=[name for name, _ in THE_FOUR])
+@pytest.mark.parametrize(("name", "reader"), THE_FIVE, ids=[name for name, _ in THE_FIVE])
 def test_each_variable_is_a_module_constant_and_its_reader_takes_no_argument(
     name: str, reader: object
 ) -> None:
@@ -470,29 +494,34 @@ def test_each_variable_is_a_module_constant_and_its_reader_takes_no_argument(
     assert list(inspect.signature(reader).parameters) == []
 
 
-def test_the_key_the_model_the_cap_and_the_base_url_are_read_per_call_not_at_import(
+def test_the_key_the_model_the_fallback_the_cap_and_the_base_url_are_read_per_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert api_key() == ""
     assert model() == DEFAULT_MODEL == "gpt-4o-mini"
+    assert fallback_model() is None
     assert max_postings() == DEFAULT_MAX_POSTINGS == 50
     assert base_url() == DEFAULT_BASE_URL
 
     monkeypatch.setenv(LLM_API_KEY, "  unit-test-key  ")
     monkeypatch.setenv(LLM_MODEL, "  gpt-4o  ")
+    monkeypatch.setenv(LLM_FALLBACK_MODEL, f"  {THE_FALLBACK}  ")
     monkeypatch.setenv(SCORER_MAX_POSTINGS, " 7 ")
     monkeypatch.setenv(LLM_BASE_URL, f"  {TEST_BASE_URL}  ")
     assert api_key() == "unit-test-key"
     assert model() == "gpt-4o"
+    assert fallback_model() == THE_FALLBACK
     assert max_postings() == 7
     assert base_url() == TEST_BASE_URL
 
     monkeypatch.setenv(LLM_API_KEY, "")
     monkeypatch.setenv(LLM_MODEL, "   ")
+    monkeypatch.setenv(LLM_FALLBACK_MODEL, "")
     monkeypatch.setenv(SCORER_MAX_POSTINGS, "")
     monkeypatch.setenv(LLM_BASE_URL, "")
     assert api_key() == ""
     assert model() == DEFAULT_MODEL
+    assert fallback_model() is None
     assert max_postings() == DEFAULT_MAX_POSTINGS
     assert base_url() == DEFAULT_BASE_URL
 
@@ -533,7 +562,14 @@ from app.matching import scorer
 assert [
     name
     for name in reads
-    if name in ("LLM_API_KEY", "LLM_MODEL", "SCORER_MAX_POSTINGS", "LLM_BASE_URL")
+    if name
+    in (
+        "LLM_API_KEY",
+        "LLM_MODEL",
+        "LLM_FALLBACK_MODEL",
+        "SCORER_MAX_POSTINGS",
+        "LLM_BASE_URL",
+    )
 ] == [], reads
 assert scorer.PROMPT_PATH.is_file(), scorer.PROMPT_PATH
 """
@@ -1045,6 +1081,248 @@ def test_a_call_that_produced_no_answer_is_reported_after_one_request(
         assert leaked not in result.reason
 
 
+# The fallback: one optional second model, for the failures above and no others.
+
+
+# One case per failure class #8 names, with the request count the class costs: a
+# transport failure and a non-2xx are answered at once, an unusable answer spends
+# the failing model's whole budget first.
+FALLBACK_TRIGGERS = [
+    pytest.param([httpx2.ConnectTimeout("slow")], 2, id="a timeout"),
+    pytest.param([httpx2.ConnectError("no route to host")], 2, id="a connection failure"),
+    pytest.param([_response("busy", status=429)], 2, id="a non-2xx status"),
+    pytest.param(
+        [_response("junk")] * SCORER_MAX_ATTEMPTS,
+        SCORER_MAX_ATTEMPTS + 1,
+        id="an unusable answer",
+    ),
+]
+
+
+@pytest.mark.parametrize(("failures", "made"), FALLBACK_TRIGGERS)
+def test_each_failure_the_scorer_knows_reaches_the_fallback(
+    failures: list[httpx2.Response | Exception], made: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The configured model fails, the fallback answers, and its answer is the result."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    monkeypatch.setenv(LLM_MODEL, THE_MODEL)
+    monkeypatch.setenv(LLM_FALLBACK_MODEL, THE_FALLBACK)
+    good = _response(_completion(json.dumps({"score": 61, "reason": "Fits.", "gaps": []})))
+    scorer = LlmScorer(client=_client_serving([*failures, good], requests))
+
+    result = scorer.score(_posting(), RESUME_TEXT)
+
+    assert len(requests) == made
+    assert [_body_of(request)["model"] for request in requests] == [THE_MODEL] * (
+        made - 1
+    ) + [THE_FALLBACK]
+    assert (result.score, result.reason, result.gaps) == (61, "Fits.", [])
+    assert str(requests[-1].url) == THE_ENDPOINT
+
+
+def test_the_fallback_request_is_the_same_body_naming_the_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one shape `request_body` builds, with the second model in it."""
+    requests: list[httpx2.Request] = []
+    posting = _posting()
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    monkeypatch.setenv(LLM_MODEL, THE_MODEL)
+    monkeypatch.setenv(LLM_FALLBACK_MODEL, THE_FALLBACK)
+
+    LlmScorer(client=_client_serving([httpx2.ConnectTimeout("slow")], requests)).score(
+        posting, RESUME_TEXT
+    )
+
+    first, second = (_body_of(request) for request in requests)
+    assert second == {**first, "model": THE_FALLBACK}
+    assert first == {
+        "model": THE_MODEL,
+        "messages": [{"role": "user", "content": _rendered(posting, RESUME_TEXT)}],
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+    }
+
+
+def test_a_model_that_answers_does_not_reach_the_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fallback that is never needed costs one model's requests and no more."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    monkeypatch.setenv(LLM_MODEL, THE_MODEL)
+    monkeypatch.setenv(LLM_FALLBACK_MODEL, THE_FALLBACK)
+
+    result = LlmScorer(client=_client_serving([], requests)).score(_posting(), RESUME_TEXT)
+
+    assert len(requests) == 1
+    assert _body_of(requests[0])["model"] == THE_MODEL
+    assert result.score == 87
+
+
+def test_no_fallback_is_one_model_and_the_unchanged_request_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset means `None`, which is exactly the call this module made before."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+
+    result = LlmScorer(client=_client_serving([_response("junk")], requests)).score(
+        _posting(), RESUME_TEXT
+    )
+
+    assert fallback_model() is None
+    assert len(requests) == SCORER_MAX_ATTEMPTS
+    assert {_body_of(request)["model"] for request in requests} == {DEFAULT_MODEL}
+    assert result.reason == "Not scored: the model's answer was unusable after 3 attempts"
+
+
+def test_the_fallback_is_read_per_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An instance built before the variable was set still honours it."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    scorer = LlmScorer(client=_client_serving([_response("junk")], requests))
+
+    monkeypatch.setenv(LLM_FALLBACK_MODEL, THE_FALLBACK)
+    result = scorer.score(_posting(), RESUME_TEXT)
+
+    assert [_body_of(request)["model"] for request in requests] == [
+        DEFAULT_MODEL
+    ] * SCORER_MAX_ATTEMPTS + [THE_FALLBACK] * SCORER_MAX_ATTEMPTS
+    assert result.reason == "Not scored: the model's answer was unusable after 3 attempts"
+
+
+def test_a_call_whose_every_model_fails_makes_one_budget_each(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two models' worth of `SCORER_MAX_ATTEMPTS` and no more: nothing loops."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    monkeypatch.setenv(LLM_MODEL, THE_MODEL)
+    monkeypatch.setenv(LLM_FALLBACK_MODEL, THE_FALLBACK)
+
+    result = LlmScorer(client=_client_serving([_response("junk")], requests)).score(
+        _posting(), RESUME_TEXT
+    )
+
+    assert len(requests) == 2 * SCORER_MAX_ATTEMPTS == 6
+    assert [_body_of(request)["model"] for request in requests] == [
+        THE_MODEL
+    ] * SCORER_MAX_ATTEMPTS + [THE_FALLBACK] * SCORER_MAX_ATTEMPTS
+    assert (result.score, result.gaps) == (0, [])
+    assert result.reason == "Not scored: the model's answer was unusable after 3 attempts"
+    assert result.reason.startswith(NOT_SCORED_PREFIX)
+
+
+def test_two_models_that_never_answered_make_one_request_each(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The existing wording, one request per model, and no exception."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    monkeypatch.setenv(LLM_MODEL, THE_MODEL)
+    monkeypatch.setenv(LLM_FALLBACK_MODEL, THE_FALLBACK)
+
+    result = LlmScorer(
+        client=_client_serving([httpx2.ConnectError("no route to host")], requests)
+    ).score(_posting(), RESUME_TEXT)
+
+    assert len(requests) == 2
+    assert result.reason == "Not scored: the model call failed"
+
+
+# The three ways scoring is refused before any request: a second model cannot fix
+# a missing key, an empty resume or a base URL no request can be sent to.
+CONFIGURATION_FAILURES = [
+    pytest.param("key", id="no key"),
+    pytest.param("resume", id="an empty resume"),
+    pytest.param("base_url", id="a base URL that is not a URL"),
+]
+
+
+@pytest.mark.parametrize("configured", CONFIGURATION_FAILURES)
+def test_a_configuration_error_is_never_answered_by_the_fallback(
+    configured: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_MODEL, THE_MODEL)
+    monkeypatch.setenv(LLM_FALLBACK_MODEL, THE_FALLBACK)
+    if configured != "key":
+        monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    if configured == "base_url":
+        monkeypatch.setenv(LLM_BASE_URL, "not a URL at all")
+    resume_text = "" if configured == "resume" else RESUME_TEXT
+
+    with pytest.raises(ScorerConfigurationError):
+        LlmScorer(client=_answering_client(requests)).score(_posting(), resume_text)
+
+    assert requests == []
+
+
+# The result carries the provenance its row will record.
+
+
+def test_the_prompt_version_is_a_non_empty_module_constant_that_names_its_prompt() -> None:
+    """A stored row's prompt version is readable after the prompt file changes."""
+    assert isinstance(SCORE_PROMPT_VERSION, str)
+    assert SCORE_PROMPT_VERSION.strip()
+    # The comment that defines it says to bump it when the prompt file changes.
+    assert "score_prompt.txt" in SCORER_SOURCE
+    assert "bump it whenever" in SCORER_SOURCE
+
+
+def test_a_result_names_the_model_that_answered(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    monkeypatch.setenv(LLM_MODEL, THE_MODEL)
+
+    result = LlmScorer(client=_client_serving([], requests)).score(_posting(), RESUME_TEXT)
+
+    assert result.model == THE_MODEL
+
+
+def test_a_result_names_the_fallback_when_the_fallback_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    monkeypatch.setenv(LLM_MODEL, THE_MODEL)
+    monkeypatch.setenv(LLM_FALLBACK_MODEL, THE_FALLBACK)
+    good = _response(_completion(json.dumps({"score": 61, "reason": "Fits.", "gaps": []})))
+
+    result = LlmScorer(
+        client=_client_serving([httpx2.ConnectTimeout("slow"), good], requests)
+    ).score(_posting(), RESUME_TEXT)
+
+    assert result.model == THE_FALLBACK
+
+
+def test_a_not_scored_result_names_the_model_that_was_attempted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    monkeypatch.setenv(LLM_MODEL, THE_MODEL)
+
+    result = LlmScorer(
+        client=_client_serving([httpx2.ConnectError("no route to host")], requests)
+    ).score(_posting(), RESUME_TEXT)
+
+    assert result.reason == "Not scored: the model call failed"
+    assert result.model == THE_MODEL
+
+
+def test_a_result_no_model_produced_names_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The run's cap refuses before any model is tried, so the provenance is unknown."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    monkeypatch.setenv(SCORER_MAX_POSTINGS, "0")
+
+    result = LlmScorer(client=_client_serving([], requests)).score(_posting(), RESUME_TEXT)
+
+    assert result.model is None
+    assert requests == []
+
+
 # A not-scored result is an ordinary result, and it is storable.
 
 
@@ -1345,14 +1623,101 @@ def test_scores_of_two_postings_are_two_rows(engine: Engine) -> None:
     ]
 
 
+def test_a_stored_score_records_the_model_that_produced_it(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Criterion 6: the row names the model and the prompt version that produced it."""
+    posting_id = _one_stored_posting()
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    monkeypatch.setenv(LLM_MODEL, THE_MODEL)
+
+    result = LlmScorer(client=_client_serving([], [])).score(_posting(), RESUME_TEXT)
+    record_score(posting_id, result)
+
+    stored = _matches()[0]
+    assert (stored["model"], stored["prompt_version"]) == (THE_MODEL, SCORE_PROMPT_VERSION)
+
+
+def test_a_fallback_that_answered_is_the_model_on_the_row(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    posting_id = _one_stored_posting()
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    monkeypatch.setenv(LLM_MODEL, THE_MODEL)
+    monkeypatch.setenv(LLM_FALLBACK_MODEL, THE_FALLBACK)
+
+    result = LlmScorer(client=_client_serving([httpx2.ConnectTimeout("slow")], [])).score(
+        _posting(), RESUME_TEXT
+    )
+    record_score(posting_id, result)
+
+    assert result.model == _matches()[0]["model"] == THE_FALLBACK
+
+
+def test_a_not_scored_row_records_the_model_that_was_attempted(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model outage still records which model was tried."""
+    posting_id = _one_stored_posting()
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+
+    result = LlmScorer(
+        client=_client_serving([httpx2.ConnectError("no route to host")], [])
+    ).score(_posting(), RESUME_TEXT)
+    record_score(posting_id, result)
+
+    stored = _matches()[0]
+    assert stored["outcome"] == "not_scored"
+    assert (stored["model"], stored["prompt_version"]) == (DEFAULT_MODEL, SCORE_PROMPT_VERSION)
+
+
+def test_a_rejection_row_keeps_both_provenance_columns_null(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No model ran, so `record_rejection` writes neither and NULL means unknown."""
+    posting_id = _one_stored_posting()
+    monkeypatch.setenv("PREFILTER_TITLE_TERMS", "intern")
+
+    record_rejection(posting_id, prefilter(_intern_posting()))
+
+    stored = _matches()[0]
+    assert stored["outcome"] == "rejected"
+    assert (stored["model"], stored["prompt_version"]) == (None, None)
+
+
+def test_a_prompt_change_and_a_model_change_are_told_apart_by_the_columns(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Criterion 7: the columns alone distinguish the change, with no prompt re-read."""
+    with_the_old_prompt, with_the_new_prompt, models_fallback = _stored_postings(3)
+    monkeypatch.setattr(scorer_module, "SCORE_PROMPT_VERSION", "7")
+    record_score(models_fallback, MatchResult(score=87, reason="Fits.", gaps=[], model=THE_MODEL))
+    record_score(
+        with_the_old_prompt, MatchResult(score=87, reason="Fits.", gaps=[], model=THE_FALLBACK)
+    )
+    monkeypatch.setattr(scorer_module, "SCORE_PROMPT_VERSION", "8")
+    record_score(with_the_new_prompt, MatchResult(score=87, reason="Fits.", gaps=[], model=THE_MODEL))
+
+    rows = {row["posting_id"]: row for row in _matches()}
+    # One prompt version, two different models: a model change, told apart by `model`.
+    assert rows[models_fallback]["prompt_version"] == "7"
+    assert rows[with_the_old_prompt]["prompt_version"] == "7"
+    assert rows[models_fallback]["model"] != rows[with_the_old_prompt]["model"]
+    # One model, two different prompt versions: a prompt change, told apart by the column.
+    assert rows[with_the_new_prompt]["model"] == THE_MODEL
+    assert rows[models_fallback]["model"] == THE_MODEL
+    assert rows[with_the_new_prompt]["prompt_version"] == "8"
+    assert rows[models_fallback]["prompt_version"] == "7"
+
+
 # The module's boundaries: one place per variable, one writer, one model client.
 
 
-def test_the_four_variables_are_read_in_one_module_only() -> None:
+def test_the_five_variables_are_read_in_one_module_only() -> None:
     """The one-place rule #7 proved for the rules, proved here for the model config.
 
-    `scorer` is the one module that reads the four variables --
-    `test_only_the_four_readers_touch_the_environment` is that proof -- and the
+    `scorer` is the one module that reads the five variables --
+    `test_only_the_five_readers_touch_the_environment` is that proof -- and the
     two modules that reach the model through it name the key as well: #26's resume
     parser, and #27's scan reader, each in the refusal it raises before any
     request.
@@ -1360,7 +1725,7 @@ def test_the_four_variables_are_read_in_one_module_only() -> None:
     naming = sorted(
         path.relative_to(BACKEND_ROOT).as_posix()
         for path in (BACKEND_ROOT / "app").rglob("*.py")
-        if any(name in path.read_text(encoding="utf-8") for name, _ in THE_FOUR)
+        if any(name in path.read_text(encoding="utf-8") for name, _ in THE_FIVE)
     )
 
     assert naming == [
@@ -1370,7 +1735,7 @@ def test_the_four_variables_are_read_in_one_module_only() -> None:
     ]
 
 
-def test_only_the_four_readers_touch_the_environment() -> None:
+def test_only_the_five_readers_touch_the_environment() -> None:
     """`os.environ` appears in one reader per value, and nowhere else in the module."""
     reading: list[str] = []
     for node in ast.parse(SCORER_SOURCE).body:
@@ -1382,7 +1747,7 @@ def test_only_the_four_readers_touch_the_environment() -> None:
         ):
             reading.append(node.name)
 
-    assert reading == ["api_key", "model", "max_postings", "base_url"]
+    assert reading == ["api_key", "model", "fallback_model", "max_postings", "base_url"]
 
 
 def test_only_the_recorder_opens_a_session() -> None:
