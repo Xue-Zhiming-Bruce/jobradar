@@ -214,7 +214,8 @@ describe("the watchlist screen's edit controls", () => {
 
     const acme = row('Acme (acme)')
 
-    expect(within(acme).getByRole('textbox')).toBeDefined() // a text box, not a select
+    // Two text boxes -- the name and the board slug -- and no select on a row.
+    expect(within(acme).getAllByRole('textbox')).toHaveLength(2)
     expect((within(acme).getByLabelText('New name') as HTMLInputElement).value).toBe('Acme')
     expect(within(acme).getByRole('button', { name: 'Rename' })).toBeDefined()
     expect(within(acme).getByRole('button', { name: 'Deactivate' })).toBeDefined()

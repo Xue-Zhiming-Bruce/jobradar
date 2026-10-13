@@ -15,7 +15,8 @@ const EMPTY = 'No watched companies yet.'
 
 /**
  * Adds a company by name, board slug and source, lists the watchlist, renames a
- * row, takes one out of the poll and puts it back, removes a row.
+ * row, points one at a corrected board, takes one out of the poll and puts it
+ * back, removes a row.
  */
 export default function WatchlistScreen() {
   // `null` is "not read yet", so loading is not the same screen as empty.
@@ -74,6 +75,15 @@ export default function WatchlistScreen() {
     void edit(id, { name: typed })
   }
 
+  // A move is the heavier edit, so its cost is on the screen before the button is
+  // clicked: the route closes the old board's open postings in the same write.
+  function move(event: FormEvent<HTMLFormElement>, id: number) {
+    event.preventDefault()
+    // Uncontrolled like the name: the route normalises the slug it is sent and answers it back.
+    const typed = new FormData(event.currentTarget).get('slug') as string
+    void edit(id, { slug: typed })
+  }
+
   return (
     <section>
       <h2>Watched companies</h2>
@@ -120,6 +130,14 @@ export default function WatchlistScreen() {
                   <input name="name" defaultValue={company.name} />
                 </label>
                 <button type="submit">Rename</button>
+              </form>
+              <form onSubmit={(event) => move(event, company.id)}>
+                <label>
+                  New board slug
+                  <input name="slug" defaultValue={company.slug} />
+                </label>
+                <button type="submit">Move to board</button>
+                <span>Moving closes this board's open postings; its matches are kept.</span>
               </form>
               <button
                 type="button"
