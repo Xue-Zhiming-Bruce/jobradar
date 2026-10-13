@@ -41,6 +41,15 @@ RUN uv sync --frozen --no-dev
 
 COPY backend/app ./app
 
+# The migration path ships in the image, beside `app/`: `alembic.ini` names
+# `migrations` as its script location and `migrations/env.py` takes the URL from
+# `app.db.database_url()`, so the container can bring a database that already
+# holds rows to this image's schema with no checkout and no second connection
+# setting (#47).
+COPY backend/alembic.ini ./alembic.ini
+COPY backend/migrations ./migrations
+COPY backend/docker-entrypoint.sh ./docker-entrypoint.sh
+
 # The build enters the image here and nowhere else: not from the host, not from a
 # mount. It lands in `app/static`, the directory `app.main` resolves from its own
 # location, so the running app serves this build as the UI and there is no second
@@ -60,5 +69,12 @@ RUN useradd --uid 10001 --user-group jobradar \
 USER jobradar
 
 EXPOSE 8000
+
+# Every start goes through the upgrade first (#47): the script runs
+# `alembic upgrade head` and then execs the command below, so uvicorn only ever
+# starts on the schema this image carries, and an upgrade that fails exits the
+# container non-zero instead of serving against a schema it does not match. The
+# script is read by the shell, so it needs no executable bit in the image.
+ENTRYPOINT ["/bin/sh", "/app/docker-entrypoint.sh"]
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
