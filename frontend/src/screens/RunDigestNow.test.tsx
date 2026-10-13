@@ -80,7 +80,14 @@ describe('the run digest now button', () => {
       http.post('/internal/tick', () => HttpResponse.json(runSummary, { status: 202 })),
       http.get('/runs/:id', ({ request }) => {
         reads.push(new URL(request.url).pathname)
-        return HttpResponse.json({ ...runSummary, status: 'failed', error: 'Greenhouse timed out' })
+        return HttpResponse.json({
+          ...runSummary,
+          status: 'failed',
+          error: 'Greenhouse timed out',
+          company_outcomes: [
+            { company_id: 1, slug: 'acme', outcome: 'failed', error: 'Connection refused' },
+          ],
+        })
       }),
     )
     render(<RunDigestNow />)
@@ -89,11 +96,110 @@ describe('the run digest now button', () => {
     await poll()
 
     expect(screen.getByText('Digest failed: Greenhouse timed out')).toBeDefined()
+    // The per-board list is added beside the run-level line, never in place of it.
+    expect(screen.getByText('acme: Connection refused')).toBeDefined()
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(POLL_MS * 10)
     })
     expect(reads).toEqual(['/runs/1'])
+  })
+
+  it('lists every failed board, in walk order, and only the failed ones', async () => {
+    useTestClock()
+    server.use(
+      http.post('/internal/tick', () => HttpResponse.json(runSummary, { status: 202 })),
+      http.get('/runs/:id', () =>
+        HttpResponse.json({
+          ...runSummary,
+          status: 'failed',
+          error: '2 of 4 companies failed',
+          company_outcomes: [
+            { company_id: 1, slug: 'acme', outcome: 'fetched', error: null },
+            { company_id: 2, slug: 'globex', outcome: 'not_modified', error: null },
+            { company_id: 3, slug: 'alpha', outcome: 'failed', error: 'Connection refused' },
+            { company_id: 4, slug: 'beta', outcome: 'failed', error: 'Greenhouse timed out' },
+          ],
+        }),
+      ),
+    )
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    expect(screen.getByText('Digest failed: 2 of 4 companies failed')).toBeDefined()
+    // Each failed board's slug and its own message, in the order the walk visited them.
+    expect(screen.getAllByRole('listitem').map((board) => board.textContent)).toEqual([
+      'alpha: Connection refused',
+      'beta: Greenhouse timed out',
+    ])
+    expect(screen.queryByText(/acme|globex/)).toBeNull()
+  })
+
+  it('shows no board group when a failed run has no failed board', async () => {
+    useTestClock()
+    server.use(
+      http.post('/internal/tick', () => HttpResponse.json(runSummary, { status: 202 })),
+      // The pipeline-raised path: a failed run with an error and no `run_company` row.
+      http.get('/runs/:id', () =>
+        HttpResponse.json({ ...runSummary, status: 'failed', error: 'tick blew up' }),
+      ),
+    )
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    expect(screen.getByText('Digest failed: tick blew up')).toBeDefined()
+    expect(screen.queryByRole('list')).toBeNull()
+    expect(screen.queryByText('Boards the run could not fetch:')).toBeNull()
+  })
+
+  it('shows a failed board whose error is null as its slug alone', async () => {
+    useTestClock()
+    server.use(
+      http.post('/internal/tick', () => HttpResponse.json(runSummary, { status: 202 })),
+      http.get('/runs/:id', () =>
+        HttpResponse.json({
+          ...runSummary,
+          status: 'failed',
+          error: '1 of 2 companies failed',
+          company_outcomes: [{ company_id: 9, slug: 'gamma', outcome: 'failed', error: null }],
+        }),
+      ),
+    )
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    expect(screen.getByRole('listitem').textContent).toBe('gamma')
+    expect(screen.queryByText(/null|undefined/)).toBeNull()
+  })
+
+  it('lists a failed board beside the running line, since the list is not a status branch', async () => {
+    useTestClock()
+    server.use(
+      http.post('/internal/tick', () => HttpResponse.json(runSummary, { status: 202 })),
+      http.get('/runs/:id', () =>
+        HttpResponse.json({
+          ...runSummary,
+          company_outcomes: [{ company_id: 9, slug: 'delta', outcome: 'failed', error: 'Timeout' }],
+        }),
+      ),
+    )
+    render(<RunDigestNow />)
+
+    // The `202`'s empty list: the running line, and no group at all.
+    await runNow()
+    expect(screen.getByText('Digest running...')).toBeDefined()
+    expect(screen.queryByRole('list')).toBeNull()
+
+    // A run the tick has not finished can already carry a board the walk gave up on.
+    await poll()
+    expect(screen.getByText('Digest running...')).toBeDefined()
+    expect(screen.getByText('delta: Timeout')).toBeDefined()
   })
 
   it('shows a refused tick as an error instead of a crash, and starts no read', async () => {

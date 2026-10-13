@@ -27,6 +27,11 @@ export default function RunDigestNow() {
     }
   }
 
+  // The boards the run could not fetch, in the order the walk visited them. A
+  // filter over the outcome rows, not a branch on `status`: a run still
+  // `running` can already carry a failed board, and it is answered as-is.
+  const failedBoards = run?.companyOutcomes.filter((board) => board.outcome === 'failed') ?? []
+
   useEffect(() => {
     if (!polling || id === undefined) return
     const timer = setInterval(() => {
@@ -54,6 +59,18 @@ export default function RunDigestNow() {
         ) : (
           <p>Digest running...</p>
         ))}
+      {failedBoards.length > 0 && (
+        <>
+          <p>Boards the run could not fetch:</p>
+          <ul>
+            {failedBoards.map((board) => (
+              <li key={board.companyId}>
+                {board.error === null ? board.slug : `${board.slug}: ${board.error}`}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </section>
   )
 }
