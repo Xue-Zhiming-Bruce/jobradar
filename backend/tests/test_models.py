@@ -74,6 +74,7 @@ _EXPECTED_COLUMNS = {
         "matches_emailed",
         "companies_not_fetched",
         "postings_not_rematched",
+        "rematch_cursor",
     },
     "run_company": {"id", "run_id", "company_id", "outcome", "error"},
 }

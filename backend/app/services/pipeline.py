@@ -84,7 +84,9 @@ Six things are deliberately not done here:
   Re-deciding a stored posting deliberately is the other half of #64, and it is
   `rematch_stored_postings` below: a path of its own, entered by its own endpoint,
   which decides *which* rows may be offered again -- the open ones the owner has not
-  resolved and no digest has emailed -- rather than widening this walk.
+  resolved and no digest has emailed -- and carries the position its own cap stopped
+  at on the run's row, so successive presses sweep the whole set rather than
+  re-deciding the same head. It is not this walk widened.
 - the resume is read once, before the first board is called, and a run with no
   active resume fails without a single request: its text and the parsed skills the
   must-have rule reads (`active_resume_text` and `active_resume_skills`, the second
@@ -295,7 +297,10 @@ def rematch_stored_postings(run_id: int, *, scorer: MatchScorer) -> None:
     The candidates are every open posting whose `match` row is missing or the owner
     has neither acted on nor been told about (`state = 'new'` and
     `notified_at IS NULL`), oldest `posting.id` first, read in one statement by
-    `_postings_to_rematch`. Each is offered to the prefilter first -- a rejection is
+    `_postings_to_rematch`. The read starts at the position the newest re-match left
+    on the run's row (`_rematch_cursor`), so successive presses resume where the last
+    one stopped instead of re-deciding the same head; `None` means the oldest eligible
+    posting. Each candidate is offered to the prefilter first -- a rejection is
     written through `record_rejection`, a passer through `record_score` -- the
     tick's own writers in the tick's own order, so a stored rejection can flip to a
     score and a stale score can be rewritten. The active resume's text and parsed
@@ -307,16 +312,22 @@ def rematch_stored_postings(run_id: int, *, scorer: MatchScorer) -> None:
     decision, and the candidates past the cap keep the verdicts they have. That is
     the one thing this path does that the tick does not, and the reason it must:
     handing a capped scorer a passer would replace a stored score with its own
-    `NOT_SCORED_PREFIX` refusal, which is not a re-decision. What the cap left is
-    written on the run's row by `_record_not_rematched`, so a truncated pass says
-    so rather than looking complete. `matches_created` is counted the way the tick
-    counts it, one per `record_score` write.
+    `NOT_SCORED_PREFIX` refusal, which is not a re-decision. What the cap left, and
+    where the next press must start, are written together on the run's row by
+    `_record_not_rematched`, so a truncated pass says where it stopped rather than
+    looking complete. `matches_created` is counted the way the tick counts it, one
+    per `record_score` write.
 
-    Every write updates the row `match.posting_id` already keys -- both writers
-    look the row up rather than inserting -- so a second run touches the same rows,
-    and the candidate rule (which reads only `posting.closed_at`, `match.state` and
-    `match.notified_at`, none of them written here) yields the same list: the run is
-    idempotent, and no `match` or `posting` row is inserted or deleted.
+    The candidate rule reads only `posting.closed_at`, `match.state` and
+    `match.notified_at`, none of them written here, so what changes between presses
+    is where the read starts and not what it selects. Over a set the cap does not
+    truncate both presses have a NULL cursor, select the same list and leave every
+    `match` row byte-identical; over a set it does truncate the next press decides
+    the next range, which is the point. Every write updates the row
+    `match.posting_id` already keys -- both writers look the row up rather than
+    inserting -- so no `match` or `posting` row is inserted or deleted, and a row
+    that re-enters the eligible set behind the cursor is decided by the press after
+    the wrap rather than skipped for good.
     """
     resume_text = resume.active_resume_text()
     if resume_text is None or not resume_text.strip():
@@ -324,7 +335,8 @@ def rematch_stored_postings(run_id: int, *, scorer: MatchScorer) -> None:
     resume_must_haves = tuple(resume.active_resume_skills())
 
     limit = max_postings()
-    candidates = _postings_to_rematch()
+    cursor = _rematch_cursor()
+    candidates = _postings_to_rematch(cursor)
     decided = candidates[:limit] if limit > 0 else []
     for posting_id, posting in decided:
         decision = prefilter(posting, resume_must_haves=resume_must_haves)
@@ -333,26 +345,53 @@ def rematch_stored_postings(run_id: int, *, scorer: MatchScorer) -> None:
             continue
         record_score(posting_id, scorer.score(posting, resume_text))
         _add_counts(run_id, matches_created=1)
-    # The count is written on every re-match, a `0` included: a pass that decided
-    # every candidate is an answer, not a missing one (#56's `0` reading does not
-    # exist, because that walk always stops for another reason).
-    _record_not_rematched(run_id, len(candidates) - len(decided))
+    # The count and the next position are written once, after the loop, so a press
+    # that raised writes neither and the next press re-reads the last successful
+    # press's position. A `0` count and a NULL cursor always go together; a truncated
+    # pass leaves the cursor at the first candidate it did not decide.
+    _record_not_rematched(
+        run_id,
+        len(candidates) - len(decided),
+        cursor=candidates[limit][0] if len(decided) < len(candidates) else None,
+    )
 
 
-def _postings_to_rematch() -> list[tuple[int, SourcePosting]]:
-    """Every open posting the owner has not resolved, oldest `posting.id` first.
+def _rematch_cursor() -> int | None:
+    """Where the next re-match starts: the newest re-match's `posting.id`, or `None`.
+
+    The marker is `postings_not_rematched`: only a re-match writes it (a tick leaves
+    it NULL, a re-match writes `0` or a positive count), so one statement --
+    `IS NOT NULL`, ordered by `run.id` descending, limited to one row -- passes over
+    every tick row and the run in progress, which is claimed with both columns NULL.
+    No re-match has run yet, or the newest one decided every candidate it found:
+    `None`, and the press starts at the oldest eligible posting, which is also what
+    the first press after this revision's upgrade does (a pre-0012 row reads NULL).
+    """
+    with db.session_scope() as session:
+        return session.scalar(
+            select(Run.rematch_cursor)
+            .where(Run.postings_not_rematched.is_not(None))
+            .order_by(Run.id.desc())
+            .limit(1)
+        )
+
+
+def _postings_to_rematch(cursor: int | None = None) -> list[tuple[int, SourcePosting]]:
+    """Every open posting the owner has not resolved, from `cursor` on, oldest id first.
 
     One statement: the postings with no `closed_at`, left-joined to the one `match`
     row `match.posting_id` allows -- that key is unique, so the join cannot
     duplicate a posting -- and kept only when that row is missing or the owner has
     neither acted on nor been told about it. The two `match` columns this reads,
-    `state` and `notified_at`, are written by no line of this path, so the list is
-    the same on a second run. Each row is read back as a `SourcePosting` while the
+    `state` and `notified_at`, are written by no line of this path; what moves
+    between presses is where the read starts. `cursor` is a position and not a rule:
+    `None` means the oldest eligible posting, and a value keeps only
+    `Posting.id >= cursor`. Each row is read back as a `SourcePosting` while the
     session is open, because a row handed out of `db.session_scope()` is expired by
     its commit.
     """
     with db.session_scope() as session:
-        rows = session.scalars(
+        statement = (
             select(Posting)
             .outerjoin(Match, Match.posting_id == Posting.id)
             .where(
@@ -364,7 +403,9 @@ def _postings_to_rematch() -> list[tuple[int, SourcePosting]]:
             )
             .order_by(Posting.id)
         )
-        return [(row.id, _source_posting(row)) for row in rows]
+        if cursor is not None:
+            statement = statement.where(Posting.id >= cursor)
+        return [(row.id, _source_posting(row)) for row in session.scalars(statement)]
 
 
 def _active_companies() -> list[tuple[int, str, str, str | None, str | None]]:
@@ -534,22 +575,30 @@ def _record_not_fetched(run_id: int, count: int) -> None:
         run.companies_not_fetched = count
 
 
-def _record_not_rematched(run_id: int, count: int) -> None:
-    """Write how many eligible postings this re-match's model cap left for a later one.
+def _record_not_rematched(run_id: int, count: int, *, cursor: int | None) -> None:
+    """Write what this re-match's cap left, and where the next press must start.
 
     Written by `rematch_stored_postings`, the one place that knows the cap stopped
-    the offers; #9's `_end_run` keeps writing the status, the end and the error.
-    Written on every re-match, a `0` included -- a pass that decided every candidate
-    is a real answer and not a missing one -- and it is one `db.session_scope()`,
-    the way `_record_not_fetched` writes a step of its own. A row that is no longer
-    there is nothing to write and not a failure. A tick never calls this, so a run
-    that did not re-match keeps the column's NULL.
+    the offers; #9's `_end_run` keeps writing the status, the end and the error. Both
+    values go in the one `db.session_scope()`, once after the loop: a press that
+    raised writes neither, so the next press re-reads the last successful press's
+    position. A row that is no longer there is nothing to write and not a failure. A
+    tick never calls this, so a run that did not re-match keeps both columns' NULL.
+
+    `count`: `0` is a press that decided every candidate from the cursor on, and a
+    positive value is that many it left for a later press -- the eligible postings
+    from the cursor on that it did not decide.
+    `cursor`: the `posting.id` of the first candidate this press did not decide, or
+    `None` when it decided every candidate it found. NULL therefore means "no press
+    stopped here" -- a tick, a row before the revision, or a completed pass -- and a
+    positive value is the `posting.id` the next press must decide first.
     """
     with db.session_scope() as session:
         run = session.get(Run, run_id)
         if run is None:
             return
         run.postings_not_rematched = count
+        run.rematch_cursor = cursor
 
 
 def _add_counts(run_id: int, *, postings_seen: int = 0, matches_created: int = 0) -> None:
