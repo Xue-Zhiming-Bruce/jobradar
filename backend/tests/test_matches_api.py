@@ -5,13 +5,22 @@ network -- with `DATABASE_URL` and `UPLOADS_DIR` pointed at a temporary
 directory, so the suite leaves no `backend/data/jobradar.db` and no uploaded file
 behind and `git status --short` stays empty.
 
-What the read must not do is as much the point as what it says: it applies no
-filter, so a prefiltered and a not-scored row are in it exactly as they were
-stored, each carrying the row's own `outcome` -- keeping them out of an email is
-#10's rule (`digest` selects `outcome = 'scored'`), and whether #12's screen hides
-them is #12's decision, taken now on the column rather than on the reason's text
--- it decodes the `gaps` JSON text rather than serving the column, and it answers
-a row no writer in this app produces with `[]` instead of a `500`.
+What the read must not do is as much the point as what it says: with no query
+string it applies no filter, so a prefiltered and a not-scored row are in it
+exactly as they were stored, each carrying the row's own `outcome` -- keeping them
+out of an email is #10's rule (`digest` selects `outcome = 'scored'`), and whether
+#12's screen hides them is #12's decision, taken now on the column rather than on
+the reason's text -- it decodes the `gaps` JSON text rather than serving the
+column, and it answers a row no writer in this app produces with `[]` instead of a
+`500`.
+
+The four filters #44 added -- `min_score`, `state`, `company_id` and `limit` -- are
+the caller's own: each narrows that same list, they compose with AND, an empty
+result is `[]` rather than a `404`, and none of them hides a row by itself, so
+`?min_score=0` still reads the prefiltered row. Their cases take the shared
+`engine` fixture through `engine_client`, so every one of them runs on both
+engines; the expected rows are read from the three tables rather than written out
+wherever the criterion says "exactly".
 What the write must not do is move anything but `state`: the snapshot cases below
 compare `id`, `score`, `reason`, `gaps`, `outcome`, `created_at` and `notified_at`
 across a verdict, each of them carrying a distinctive non-default value first, so
@@ -25,7 +34,7 @@ import json
 import logging
 import os
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +42,7 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx2 import Response
 from sqlalchemy import func, select
+from sqlalchemy.engine import Engine
 
 from app import db
 from app.main import app
@@ -40,7 +50,7 @@ from app.matching.prefilter import REJECTION_REASON_PREFIX
 from app.matching.scorer import NOT_SCORED_PREFIX, MatchResult, record_score
 from app.models import Company, Match, Posting, Resume
 from app.routes.internal import TICK_SECRET_VARIABLE
-from app.routes.matches import MatchSummary
+from app.routes.matches import MATCHES_MAX_LIMIT, MatchSummary
 
 # The ten fields of a match, and therefore the whole body both routes may answer
 # with. A field that is not here is a field the route invented.
@@ -88,6 +98,19 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'jobradar.db'}")
     monkeypatch.setenv(UPLOADS_DIR_VARIABLE, str(tmp_path / "uploads"))
     monkeypatch.setenv(TICK_SECRET_VARIABLE, SECRET)
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def engine_client(engine: Engine) -> Iterator[TestClient]:
+    """The app over the engine the shared `engine` fixture chose, so a case runs on both.
+
+    The fixture has already created the tables on that engine and pointed
+    `DATABASE_URL` at it -- the variable the app's own `session_scope()` reads --
+    and this only drives the real app over them. Its teardown comes first, so the
+    `engine` fixture's own pool check sees nothing this client still holds.
+    """
     with TestClient(app) as test_client:
         yield test_client
 
@@ -212,9 +235,94 @@ def match_count() -> int:
         return session.scalar(select(func.count()).select_from(Match))
 
 
+def seed_the_rows_to_filter() -> dict[str, int]:
+    """One company and five matched postings, oldest first, with the matches' ids.
+
+    A row per situation these filters are asserted on: two zeros no scorer wrote
+    (a prefiltered one and a not-scored one), a genuinely scored zero, and two
+    ordinary scores, in all three states. A filter that keeps the wrong kind of
+    zero, or drops one it should keep, fails against this ladder.
+    """
+    company_id = seed_company()
+    rows = {
+        "scored_zero": dict(score=0, state="new", outcome="scored", created_at=EARLY),
+        "prefiltered_zero": dict(
+            score=0,
+            state="dismissed",
+            outcome="rejected",
+            reason=REJECTION_REASON_PREFIX + "title term 'intern'",
+            created_at=EARLY + timedelta(hours=1),
+        ),
+        "unscored_zero": dict(
+            score=0,
+            state="new",
+            outcome="not_scored",
+            reason=NOT_SCORED_PREFIX + "the model call failed",
+            created_at=EARLY + timedelta(hours=2),
+        ),
+        "forty": dict(score=40, state="saved", created_at=EARLY + timedelta(hours=3)),
+        "ninety": dict(score=90, state="new", created_at=EARLY + timedelta(hours=4)),
+    }
+    return {
+        name: seed_match(seed_posting(company_id, external_id=str(number)), **values)
+        for number, (name, values) in enumerate(rows.items(), start=1)
+    }
+
+
+def rows_read_from_the_tables() -> list[dict[str, Any]]:
+    """Every match as `GET /matches` renders it, read from the three tables it joins.
+
+    The expected rows are read here rather than written out, so a filter that
+    quietly applies by default -- or that drops a row it should keep -- fails
+    against the table's own contents. `created_at` stays the row's aware instant;
+    `served()` below reads the served text back to one before they are compared.
+    """
+    with db.session_scope() as session:
+        stored = session.execute(
+            select(Match, Posting, Company)
+            .join(Posting, Match.posting_id == Posting.id)
+            .join(Company, Posting.company_id == Company.id)
+            .order_by(Match.created_at.desc(), Match.id.desc())
+        ).all()
+        return [
+            {
+                "id": match.id,
+                "company_name": company.name,
+                "title": posting.title,
+                "url": posting.url,
+                "score": match.score,
+                "reason": match.reason,
+                "gaps": json.loads(match.gaps) if match.gaps else [],
+                "state": match.state,
+                "outcome": match.outcome,
+                "created_at": match.created_at,
+            }
+            for match, posting, company in stored
+        ]
+
+
 def read(client: TestClient) -> Response:
     """One `GET /matches`, with no header at all: the route asks for no secret."""
     return client.get("/matches")
+
+
+def read_with(client: TestClient, **parameters: Any) -> Response:
+    """One `GET /matches` carrying exactly the query parameters given here."""
+    return client.get("/matches", params=parameters)
+
+
+def served(response: Response) -> list[dict[str, Any]]:
+    """That read's body, with each `created_at` read back as the instant it rendered."""
+    assert response.status_code == 200
+    return [
+        body | {"created_at": datetime.fromisoformat(body["created_at"])}
+        for body in response.json()
+    ]
+
+
+def listed_ids(response: Response) -> list[int]:
+    """The ids that read answered with, in the order it answered them."""
+    return [body["id"] for body in served(response)]
 
 
 def matches(client: TestClient) -> list[dict[str, Any]]:
@@ -340,6 +448,246 @@ def test_a_prefiltered_and_a_not_scored_row_are_listed_exactly_as_stored(
         (88, "scored", REASON),
         (0, "rejected", rejection),
     ]
+
+
+def test_no_query_string_answers_every_row_the_tables_hold(engine_client: TestClient) -> None:
+    """The default is not quietly narrowed: the body is the three tables' own rows, in their order."""
+    first = seed_company()
+    second = seed_company("Globex Inc", "globex")
+    older = seed_match(seed_posting(first, external_id="1"), score=40, created_at=EARLY)
+    tie_lower = seed_match(seed_posting(first, external_id="2"), score=0, created_at=LATE)
+    tie_higher = seed_match(seed_posting(second, external_id="3"), score=95, created_at=LATE)
+    newest = seed_match(
+        seed_posting(second, external_id="4"),
+        score=80,
+        created_at=LATE + timedelta(hours=1),
+    )
+
+    body = served(read(engine_client))
+
+    # Count, order and every field, against the rows read straight from the table.
+    assert body == rows_read_from_the_tables()
+    assert [row["id"] for row in body] == [newest, tie_higher, tie_lower, older]
+    assert [set(row) for row in body] == [MATCH_FIELDS] * len(body)
+
+
+def test_min_score_zero_keeps_the_prefiltered_and_the_unscored_rows(
+    engine_client: TestClient,
+) -> None:
+    """A floor is the caller's filter, not a policy: `0` is every row, zeros included."""
+    ids = seed_the_rows_to_filter()
+
+    body = served(read_with(engine_client, min_score=0))
+
+    assert body == rows_read_from_the_tables()
+    assert {(row["score"], row["outcome"]) for row in body} == {
+        (0, "scored"),
+        (0, "rejected"),
+        (0, "not_scored"),
+        (40, "scored"),
+        (90, "scored"),
+    }
+    assert len(body) == len(ids)
+
+
+@pytest.mark.parametrize("floor", [1, 40, 41, 90, 100])
+def test_min_score_returns_exactly_the_rows_at_or_above_it(
+    engine_client: TestClient, floor: int
+) -> None:
+    seed_the_rows_to_filter()
+
+    expected = [row["id"] for row in rows_read_from_the_tables() if row["score"] >= floor]
+
+    assert listed_ids(read_with(engine_client, min_score=floor)) == expected
+
+
+@pytest.mark.parametrize("value", ["-1", "101", "abc", "1.5"])
+def test_a_min_score_outside_the_range_is_refused_and_changes_nothing(
+    engine_client: TestClient, value: str
+) -> None:
+    seed_the_rows_to_filter()
+    before = served(read(engine_client))
+
+    response = read_with(engine_client, min_score=value)
+
+    assert response.status_code == 422
+    assert served(read(engine_client)) == before
+
+
+@pytest.mark.parametrize("state", ["new", "saved", "dismissed"])
+def test_state_returns_exactly_the_rows_in_that_state(
+    engine_client: TestClient, state: str
+) -> None:
+    seed_the_rows_to_filter()
+
+    expected = [row["id"] for row in rows_read_from_the_tables() if row["state"] == state]
+
+    assert expected  # the ladder holds each of the three states
+    assert listed_ids(read_with(engine_client, state=state)) == expected
+
+
+@pytest.mark.parametrize("value", ["hidden", "", "NEW", "3"])
+def test_a_state_outside_the_vocabulary_is_refused_and_names_the_vocabulary(
+    engine_client: TestClient, value: str
+) -> None:
+    seed_the_rows_to_filter()
+    before = served(read(engine_client))
+
+    response = read_with(engine_client, state=value)
+
+    assert response.status_code == 422
+    assert all(permitted in response.text for permitted in ("new", "saved", "dismissed"))
+    assert served(read(engine_client)) == before
+
+
+def test_company_id_returns_that_companys_rows_and_nothing_else(
+    engine_client: TestClient,
+) -> None:
+    first = seed_company()
+    second = seed_company("Globex Inc", "globex")
+    nimbus_older = seed_match(seed_posting(first, external_id="1"), created_at=EARLY)
+    nimbus_newer = seed_match(seed_posting(first, external_id="2"), created_at=LATE)
+    globex = seed_match(seed_posting(second, external_id="3"), created_at=LATE)
+
+    assert listed_ids(read_with(engine_client, company_id=first)) == [nimbus_newer, nimbus_older]
+    assert listed_ids(read_with(engine_client, company_id=second)) == [globex]
+
+
+def test_a_company_id_with_no_rows_answers_an_empty_list(engine_client: TestClient) -> None:
+    """A filter matching nothing is a successful read of nothing: `200 []`, not a `404`."""
+    seed_the_rows_to_filter()
+
+    response = read_with(engine_client, company_id=9999)
+
+    assert response.status_code == 200
+    assert response.json() == []
+    assert response.text != "null"
+
+
+@pytest.mark.parametrize("value", ["acme", "1.5"])
+def test_a_company_id_that_is_not_an_integer_is_refused(
+    engine_client: TestClient, value: str
+) -> None:
+    seed_the_rows_to_filter()
+
+    assert read_with(engine_client, company_id=value).status_code == 422
+
+
+def test_limit_is_the_newest_n_rows(engine_client: TestClient) -> None:
+    """After the ordering: the newest two, then the single newest, out of five rows."""
+    ids = seed_the_rows_to_filter()
+
+    assert listed_ids(read_with(engine_client, limit=2)) == [ids["ninety"], ids["forty"]]
+    assert listed_ids(read_with(engine_client, limit=1)) == [ids["ninety"]]
+    assert listed_ids(read_with(engine_client, limit=5)) == [
+        ids["ninety"],
+        ids["forty"],
+        ids["unscored_zero"],
+        ids["prefiltered_zero"],
+        ids["scored_zero"],
+    ]
+
+
+def test_limit_is_bounded_by_the_module_constant_rather_than_by_configuration(
+    engine_client: TestClient,
+) -> None:
+    """The ceiling is `MATCHES_MAX_LIMIT`, so no variable chooses the read's size."""
+    seed_the_rows_to_filter()
+
+    assert MATCHES_MAX_LIMIT == 200
+    assert len(served(read_with(engine_client, limit=MATCHES_MAX_LIMIT))) == 5
+
+    refused = read_with(engine_client, limit=MATCHES_MAX_LIMIT + 1)
+
+    assert refused.status_code == 422
+
+
+@pytest.mark.parametrize("value", ["0", "-1", str(MATCHES_MAX_LIMIT + 1), "abc", "1.5"])
+def test_a_limit_outside_its_bounds_is_refused_and_changes_nothing(
+    engine_client: TestClient, value: str
+) -> None:
+    seed_the_rows_to_filter()
+    before = served(read(engine_client))
+
+    response = read_with(engine_client, limit=value)
+
+    assert response.status_code == 422
+    assert served(read(engine_client)) == before
+
+
+def test_the_four_filters_compose_with_and(engine_client: TestClient) -> None:
+    """One request carrying all four: each narrows what the others left, and the shape is the same."""
+    first = seed_company()
+    second = seed_company("Globex Inc", "globex")
+    low_saved = seed_match(
+        seed_posting(first, external_id="1"), score=40, state="saved", created_at=EARLY
+    )
+    mid_saved = seed_match(
+        seed_posting(first, external_id="2"),
+        score=95,
+        state="saved",
+        created_at=EARLY + timedelta(hours=1),
+    )
+    late_saved = seed_match(
+        seed_posting(first, external_id="3"),
+        score=90,
+        state="saved",
+        created_at=EARLY + timedelta(hours=2),
+    )
+    newest_new = seed_match(
+        seed_posting(first, external_id="4"),
+        score=95,
+        state="new",
+        created_at=EARLY + timedelta(hours=3),
+    )
+    other_company = seed_match(
+        seed_posting(second, external_id="5"),
+        score=95,
+        state="saved",
+        created_at=EARLY + timedelta(hours=4),
+    )
+
+    narrowed = served(
+        read_with(engine_client, min_score=90, state="saved", company_id=first, limit=2)
+    )
+
+    assert [row["id"] for row in narrowed] == [late_saved, mid_saved]
+    assert [set(row) for row in narrowed] == [MATCH_FIELDS] * 2
+    # Each parameter alone, over the same rows.
+    assert listed_ids(read_with(engine_client, min_score=95)) == [
+        other_company,
+        newest_new,
+        mid_saved,
+    ]
+    assert listed_ids(read_with(engine_client, state="saved")) == [
+        other_company,
+        late_saved,
+        mid_saved,
+        low_saved,
+    ]
+    assert listed_ids(read_with(engine_client, company_id=first)) == [
+        newest_new,
+        late_saved,
+        mid_saved,
+        low_saved,
+    ]
+    assert listed_ids(read_with(engine_client, limit=2)) == [other_company, newest_new]
+
+
+def test_a_combination_that_matches_nothing_answers_an_empty_list(
+    engine_client: TestClient,
+) -> None:
+    """`[]` and not a `404`: a filter that leaves no row is still a successful read."""
+    company_id = seed_company()
+    seed_match(seed_posting(company_id), score=40, state="saved")
+
+    response = read_with(
+        engine_client, min_score=90, state="dismissed", company_id=company_id + 1000
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []
+    assert response.text != "null"
 
 
 def test_a_verdict_answers_with_the_body_the_read_answers_with(client: TestClient) -> None:

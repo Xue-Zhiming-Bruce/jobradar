@@ -430,20 +430,105 @@
         "tags": [
           "matches"
         ],
-        "summary": "List every stored match",
-        "description": "Every `match` row, newest first, and `[]` when there are none.\n\nNo filter, no search and no paging: `_docs/plan.md` asks only that the UI\nbrowse matches, and one user's matches are few. The order is `created_at`\ndescending with the id descending under it, so two rows written in the same\ninstant -- which `created_at`'s default makes possible -- still have one\norder, newest row first.",
+        "summary": "List stored matches, newest first",
+        "description": "Every `match` row the query leaves, newest first, and `[]` when it leaves none.\n\nNo parameter means no filter, which is every row and what this route has\nalways answered; each parameter narrows that answer and none of them hides a\nrow on its own. `min_score` is a floor on the row's own score -- `0` includes\nthe prefiltered and the not-scored rows, because which of those to show is\n#12's decision and not this read's -- `state` is one value of the column's\nvocabulary, `company_id` is the company the posting belongs to (an id no row\nnames matches nothing and answers `[]`, not a `404`), and `limit` is the\nnewest N, at most `MATCHES_MAX_LIMIT`. Values outside a parameter's own range\nor vocabulary are refused as `422` before this function runs and write\nnothing.\n\nThe answer is one statement: the filters are `.where(...)` clauses on the read\nthat was already there, so they compose with AND and none of them is applied\nafter the rows have been read. The company filter is the posting's own column,\nwhich is what the join is for: a match has exactly one posting (`match`'s\nforeign key is `NOT NULL`), so the join drops no row. The order is `created_at`\ndescending with the id descending under it, so two rows written in the same\ninstant -- which `created_at`'s default makes possible -- still have one order,\nnewest row first; `limit` is applied after that ordering, so it is the newest\nN and never an arbitrary N.",
         "operationId": "list_matches_matches_get",
+        "parameters": [
+          {
+            "name": "min_score",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 100,
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Score"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "new",
+                    "saved",
+                    "dismissed"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
+            }
+          },
+          {
+            "name": "company_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Company Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 200,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
+                  "type": "array",
                   "items": {
                     "$ref": "#/components/schemas/MatchSummary"
                   },
-                  "type": "array",
                   "title": "Response List Matches Matches Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -580,6 +665,19 @@
         "type": "object",
         "title": "CompanyUpdate",
         "description": "Body of an edit: the label to show, the poll state, or both, and nothing else.\n\nBoth fields are optional and at least one of them has to be supplied: `{}`\nis a request that says nothing, and answering it `200` would report a write\nthat did not happen. `name` is a label stored exactly as it arrived, refused\nwhen it is blank (`CompanyCreate._not_blank`'s rule), carries a control\ncharacter, or is longer than the 255 characters `company.name` holds -- the\nlast two are the column's own refusals, and answering them here makes them\nthe `422` this route owes instead of the `500` PostgreSQL's driver answers.\nNo normaliser runs on it, because the one in `app.models` touches `slug`.\n`is_active` is a `Literal` of the two booleans, so `\"false\"` is refused\nrather than read as one: whether a board is polled is a state and not a\ntruthy string.\n\nThe board is not here, and refusing it is the point: `extra=\"forbid\"` -- the\n`ResumeActivation`/`MatchVerdict` precedent -- makes `slug` and `source` a\n`422` rather than a write this route ignores, because the postings stored\nunder the old slug would be stranded by a new one (#60). Nothing clears a\nfield either: `name` is a `NOT NULL` column and `is_active` is the whole of\n\"is it polled\"."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
       },
       "Health": {
         "properties": {
@@ -861,6 +959,46 @@
         ],
         "title": "RunSummary",
         "description": "One `run` row as this API renders it: its eight columns, and no derived field.\n\nThe same body a `202` from `POST /internal/tick` carries. `finished_at` and\n`error` are absent until the run ends, and the two counts the walk earns are\n0 from the moment the row is written: what the boards returned and how many\nmatches `record_score` wrote (#34), never a score computed here.\n`matches_emailed` is the third: how many matches this run's own digest emailed\n(#36), NULL until that digest records it -- which is the honest value for a\nrun still in flight, a row written before the column existed, and a run whose\nsend failed, and a different answer from a run that really did email none."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
       },
       "WatchedCompany": {
         "properties": {

@@ -7,10 +7,12 @@ so `git status --short` is still empty after the suite has run.
 import json
 import socket
 from pathlib import Path
+from typing import get_args
 
 from app.export_openapi import CONTRACT_PATH, render_contract
 from app.main import app
 from app.models import Company
+from app.routes.matches import MATCHES_MAX_LIMIT, MatchState
 
 
 def test_committed_contract_matches_the_app() -> None:
@@ -256,8 +258,36 @@ def test_contract_describes_the_matches_a_client_reads_and_updates() -> None:
         "$ref"
     ] == match_ref
 
-    # The only values a verdict may carry, and every status the update answers.
-    assert set(listed["responses"]) == {"200"}
+    # The four filters the read takes, these names and no others, each of them an
+    # optional query parameter whose bounds and vocabulary are the route's own --
+    # so a fifth parameter, a renamed one, a required one or a widened ceiling
+    # fails here. The 200 body above is the one both routes answer with, unchanged;
+    # the `422` is the framework's own refusal of a value these parameters cannot
+    # take, and it is in the contract because these parameters are.
+    parameters = listed["parameters"]
+    assert [parameter["name"] for parameter in parameters] == [
+        "min_score",
+        "state",
+        "company_id",
+        "limit",
+    ]
+    assert all(parameter["in"] == "query" for parameter in parameters)
+    assert all(parameter["required"] is False for parameter in parameters)
+    assert {parameter["name"]: parameter["schema"]["anyOf"] for parameter in parameters} == {
+        "min_score": [
+            {"type": "integer", "minimum": 0, "maximum": 100},
+            {"type": "null"},
+        ],
+        "state": [{"enum": list(get_args(MatchState)), "type": "string"}, {"type": "null"}],
+        "company_id": [{"type": "integer"}, {"type": "null"}],
+        "limit": [
+            {"type": "integer", "minimum": 1, "maximum": MATCHES_MAX_LIMIT},
+            {"type": "null"},
+        ],
+    }
+
+    # The only values a verdict may carry, and every status each route answers.
+    assert set(listed["responses"]) == {"200", "422"}
     assert set(updated["responses"]) == {"200", "404", "422"}
     assert updated["requestBody"]["required"] is True
     body_ref = updated["requestBody"]["content"]["application/json"]["schema"]["$ref"]

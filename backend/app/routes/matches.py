@@ -1,19 +1,23 @@
 """`/matches`: the scores the pipeline stored, and the owner's verdict on one.
 
 `GET /matches` is the read #12's matches screen and #17's "list matches" tool both
-need: every `match` row, unfiltered, newest first, rendered as the `MatchSummary`
-below -- the company's name, the posting's title and url, and the match's own
-score, outcome, reason, gaps, state and `created_at`. `PATCH /matches/{id}`
+need: every `match` row the caller asks for, newest first, rendered as the
+`MatchSummary` below -- the company's name, the posting's title and url, and the
+match's own score, outcome, reason, gaps, state and `created_at`. `PATCH /matches/{id}`
 records the owner's `saved` or `dismissed` verdict on one of them and answers with
 the body the read answers with, so the two routes cannot drift apart: one
 `MatchSummary` model and one `match_summary()` renderer, the `RunSummary` +
 `run_summary` pattern of `app.routes.runs`.
 
-Three things decide the shape of this module. The list is every row and applies
-no filter: a prefiltered posting and a not-scored one are in it exactly as they
-were stored, and each body carries the row's own `outcome` (#30's column), so
-#12 can hide or label one without parsing `reason` -- keeping a row out of an
-email is #10's rule (`digest` selects `outcome = 'scored'`) and whether the
+Three things decide the shape of this module. The list is every row unless the
+caller narrows it: `min_score`, `state`, `company_id` and `limit` are the
+caller's own filters (`#44`), the default request applies none of them and is
+exactly what this route answered before they existed, and nothing here hides a
+row on its own -- a prefiltered posting and a not-scored one are in that default
+answer exactly as they were stored, so `min_score=0` still finds them. Each body
+carries the row's own `outcome` (#30's column), so #12 can hide or label one
+without parsing `reason` -- keeping a row out of an email is #10's rule
+(`digest` selects `outcome = 'scored'`) and whether the
 screen hides them is #12's decision, taken on this body. `gaps` is stored as
 JSON text (#8's `record_score` writes `json.dumps(result.gaps)`), so it is decoded
 here and a row no writer in this app produces -- NULL, text that is not JSON,
@@ -21,10 +25,9 @@ JSON that is not a list of strings -- renders `[]` rather than the raw column or
 a `500`: a read endpoint stays up on a row it does not recognise. And the write
 is the owner's verdict alone: the request model accepts `saved` and `dismissed`
 and nothing else, so `"new"` is refused `422` -- "new again" is not in
-`_docs/plan.md` -- and
-no refused value reaches the `state` column, whose own vocabulary
-(`new`/`saved`/`dismissed`, `ck_match_state_values`) is unchanged. The write
-touches `state` and nothing else: `notified_at` and `outcome` are left alone, so
+`_docs/plan.md` -- and no refused value reaches the `state` column, whose own
+vocabulary (`new`/`saved`/`dismissed`, `ck_match_state_values`) is unchanged. The
+write touches `state` and nothing else: `notified_at` and `outcome` are left alone, so
 this endpoint cannot change which matches #10's digest alerts on.
 
 No secret is required, because browsing one's own matches is what the browser
@@ -36,7 +39,7 @@ import json
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import object_session
@@ -86,6 +89,14 @@ class MatchVerdict(BaseModel):
     state: Literal["saved", "dismissed"]
 
 
+# The vocabulary `?state=` accepts: the three values the column's own check
+# (`ck_match_state_values`, `app.models.Match`) enforces and no fourth, so
+# `hidden` and `""` are refused as `422` by the parameter's own validation.
+# `MatchVerdict` above is not this: a write takes the two verdicts and never
+# `new`, which is a value a row is written with rather than one it is given.
+MatchState = Literal["new", "saved", "dismissed"]
+
+
 # The refusals this router answers with, named in the contract the way
 # `app.routes.watchlist` names its own: a client reads the status codes it has to
 # handle without having to try them out.
@@ -94,6 +105,11 @@ UNUSABLE_REQUEST_RESPONSE = {
     422: {"description": "The body, or the path, is not something this route can use"}
 }
 UPDATE_RESPONSES = NOT_FOUND_RESPONSE | UNUSABLE_REQUEST_RESPONSE
+
+# The most rows one read answers: `?limit=` is bounded by this, so the read
+# cannot be asked for an unbounded page. A constant beside the dictionaries
+# above rather than configuration: it is not a deployment's to change.
+MATCHES_MAX_LIMIT = 200
 
 
 def match_summary(match: Match) -> MatchSummary:
@@ -144,24 +160,52 @@ def _gaps(stored: str | None) -> list[str]:
     "/matches",
     response_model=list[MatchSummary],
     tags=["matches"],
-    summary="List every stored match",
+    summary="List stored matches, newest first",
 )
-def list_matches() -> list[MatchSummary]:
-    """Every `match` row, newest first, and `[]` when there are none.
+def list_matches(
+    min_score: int | None = Query(None, ge=0, le=100),
+    state: MatchState | None = Query(None),
+    company_id: int | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=MATCHES_MAX_LIMIT),
+) -> list[MatchSummary]:
+    """Every `match` row the query leaves, newest first, and `[]` when it leaves none.
 
-    No filter, no search and no paging: `_docs/plan.md` asks only that the UI
-    browse matches, and one user's matches are few. The order is `created_at`
+    No parameter means no filter, which is every row and what this route has
+    always answered; each parameter narrows that answer and none of them hides a
+    row on its own. `min_score` is a floor on the row's own score -- `0` includes
+    the prefiltered and the not-scored rows, because which of those to show is
+    #12's decision and not this read's -- `state` is one value of the column's
+    vocabulary, `company_id` is the company the posting belongs to (an id no row
+    names matches nothing and answers `[]`, not a `404`), and `limit` is the
+    newest N, at most `MATCHES_MAX_LIMIT`. Values outside a parameter's own range
+    or vocabulary are refused as `422` before this function runs and write
+    nothing.
+
+    The answer is one statement: the filters are `.where(...)` clauses on the read
+    that was already there, so they compose with AND and none of them is applied
+    after the rows have been read. The company filter is the posting's own column,
+    which is what the join is for: a match has exactly one posting (`match`'s
+    foreign key is `NOT NULL`), so the join drops no row. The order is `created_at`
     descending with the id descending under it, so two rows written in the same
-    instant -- which `created_at`'s default makes possible -- still have one
-    order, newest row first.
+    instant -- which `created_at`'s default makes possible -- still have one order,
+    newest row first; `limit` is applied after that ordering, so it is the newest
+    N and never an arbitrary N.
     """
+    statement = (
+        select(Match)
+        .join(Posting, Match.posting_id == Posting.id)
+        .order_by(Match.created_at.desc(), Match.id.desc())
+    )
+    if min_score is not None:
+        statement = statement.where(Match.score >= min_score)
+    if state is not None:
+        statement = statement.where(Match.state == state)
+    if company_id is not None:
+        statement = statement.where(Posting.company_id == company_id)
+    if limit is not None:
+        statement = statement.limit(limit)
     with db.session_scope() as session:
-        return [
-            match_summary(match)
-            for match in session.scalars(
-                select(Match).order_by(Match.created_at.desc(), Match.id.desc())
-            )
-        ]
+        return [match_summary(match) for match in session.scalars(statement)]
 
 
 @router.patch(
