@@ -3,7 +3,8 @@
 `app.db.init_db()` creates the five tables in an empty database; the revisions in
 `migrations/versions/` bring a database that already exists to the same five
 tables -- the baseline, then the column #26 added, then the source column and
-check #28 added. Two paths to one schema
+check #28 added, then the outcome column, its check and its backfill #30 added.
+Two paths to one schema
 can drift, so nothing here assumes a revision is right: every test runs `alembic
 upgrade head` -- in-process, through `alembic.command.upgrade` -- against the
 database the shared `engine` fixture in `tests/conftest.py` supplies, and then
@@ -28,6 +29,9 @@ What is measured, in the order the guarantees build:
   second run sends no DDL at all;
 - a database at the baseline, with rows in it: the revision that adds a column
   adds it, and the rows keep their text and their active flag;
+- a database at #28, with one rejection, one not-scored result and one score in
+  it: the revision that adds `outcome` backfills all three from the reasons the
+  writers wrote, and rewrites no text;
 - the four commands of the layout, each against the fixture's database;
 - drift: the current models produce no diff at `head`, and one appended column in
   a deep copy of `Base.metadata` produces a diff naming that column.
@@ -58,6 +62,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy.schema import CreateIndex, CreateTable
 
 from app import db
+from app.matching.prefilter import REJECTION_REASON_PREFIX
+from app.matching.scorer import NOT_SCORED_PREFIX
 from app.models import Base, Company, Match, Posting, Resume
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
@@ -65,19 +71,22 @@ ALEMBIC_INI = BACKEND_ROOT / "alembic.ini"
 REVISIONS_DIR = BACKEND_ROOT / "migrations" / "versions"
 
 # The readable revision ids, in the order they apply, and the files that hold
-# them. The head is the last of the three.
+# them. The head is the last of the four.
 BASELINE_REVISION = "0001_baseline"
 BASELINE_REVISION_FILE = "0001_baseline_five_tables.py"
 PARSED_FIELDS_REVISION = "0002_parsed_fields"
 PARSED_FIELDS_REVISION_FILE = "0002_add_resume_parsed_fields.py"
 SOURCE_REVISION = "0003_company_source"
 SOURCE_REVISION_FILE = "0003_company_source.py"
+OUTCOME_REVISION = "0004_match_outcome"
+OUTCOME_REVISION_FILE = "0004_match_outcome.py"
 THE_REVISION_FILES = (
     BASELINE_REVISION_FILE,
     PARSED_FIELDS_REVISION_FILE,
     SOURCE_REVISION_FILE,
+    OUTCOME_REVISION_FILE,
 )
-HEAD_REVISION = SOURCE_REVISION
+HEAD_REVISION = OUTCOME_REVISION
 
 # Alembic's own bookkeeping table: one row per applied revision. It is not one of
 # the five the models declare, and `alembic current` reads it.
@@ -297,6 +306,61 @@ def _parsed_fields_values(engine: Engine) -> list[object]:
         ]
 
 
+def _store_a_match_row_before_the_outcome_column(
+    engine: Engine, *, external_id: str, score: int, reason: str
+) -> None:
+    """Insert one match row the way #7 and #8 stored them before this revision.
+
+    The company and the posting go in through the app's own session, because
+    neither table gains a column here, and the match row with SQL: the model
+    declares the column this case is about to add, so an INSERT naming it fails on
+    the schema that predates it. `reason` is the caller's, written from the
+    writers' own prefix constants, so a prefix that moved fails this case instead
+    of silently backfilling nothing.
+    """
+    with db.session_scope() as session:
+        company = Company(name=f"Acme {external_id}", slug=f"acme-{external_id}")
+        session.add(company)
+        session.flush()
+        posting = Posting(
+            company_id=company.id,
+            external_id=external_id,
+            title="Backend Engineer",
+            url=f"https://example.test/{external_id}",
+        )
+        session.add(posting)
+        session.flush()
+        posting_id = posting.id
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO match (posting_id, score, reason, state, created_at)"
+                " VALUES (:posting_id, :score, :reason, 'new', '2026-01-01 00:00:00')"
+            ),
+            {"posting_id": posting_id, "score": score, "reason": reason},
+        )
+
+
+def _stored_match_texts(engine: Engine) -> list[tuple[str, str, int]]:
+    """Every match row's reason, state and score, read with SQL for the reason above."""
+    with engine.connect() as connection:
+        return [
+            (row[0], row[1], row[2])
+            for row in connection.exec_driver_sql(
+                "SELECT reason, state, score FROM match ORDER BY id"
+            )
+        ]
+
+
+def _outcome_column_values(engine: Engine) -> list[object]:
+    """The `outcome` values, in id order, read with SQL for the reason above."""
+    with engine.connect() as connection:
+        return [
+            row[0]
+            for row in connection.exec_driver_sql("SELECT outcome FROM match ORDER BY id")
+        ]
+
+
 def _synthetic_resume(**overrides: object) -> Resume:
     """A resume row whose text is synthetic: the repository holds no real one."""
     fields: dict[str, object] = {
@@ -355,26 +419,29 @@ def test_every_migrated_column_matches_the_model_by_name_type_and_nullability(
     }
 
 
-def test_the_three_named_checks_survive_the_migration(database: Engine) -> None:
+def test_the_four_named_checks_survive_the_migration(database: Engine) -> None:
     _migrate(database)
 
     assert {
         table_name: {check["name"] for check in inspect(database).get_check_constraints(table_name)}
         for table_name in ("match", "run")
     } == {
-        "match": {"ck_match_score_range", "ck_match_state_values"},
+        "match": {"ck_match_score_range", "ck_match_state_values", "ck_match_outcome_values"},
         "run": {"ck_run_status_values"},
     }
 
     # And they ride on the DDL the migrated schema renders, not only on the
-    # inspector's list: the same names the models render, for both dialects.
+    # inspector's list: the same names the models render, for both dialects. The
+    # names are compared sorted, because a batch ALTER rebuilds the table on
+    # SQLite and the DDL builder places the added check where it likes: which
+    # checks are there is the fact, their order is not one either engine keeps.
     reflected = _reflected_tables(database)
     for dialect in (sqlite.dialect(), postgresql.dialect()):
         assert {
-            table_name: _check_names(reflected.tables[table_name], dialect)
+            table_name: sorted(_check_names(reflected.tables[table_name], dialect))
             for table_name in ("match", "run")
         } == {
-            table_name: _check_names(Base.metadata.tables[table_name], dialect)
+            table_name: sorted(_check_names(Base.metadata.tables[table_name], dialect))
             for table_name in ("match", "run")
         }
 
@@ -598,6 +665,40 @@ def test_the_new_column_is_added_to_a_database_that_predates_it_with_no_backfill
     assert [bool(row[5]) for row in before] == [True, False]
     assert [row[3] for row in before] == [SYNTHETIC_RESUME_TEXT] * 2
     assert _parsed_fields_values(database) == [None, None]
+
+
+def test_the_outcome_column_is_backfilled_from_the_reasons_a_database_already_holds(
+    database: Engine,
+) -> None:
+    """#30's column: three rows that predate it, each marked by the reason it carries.
+
+    The fixture's database is rebuilt at #28 -- the schema before this revision --
+    and one row of each kind goes in: a rejection, a not-scored result and a
+    genuine score, all three `score = 0` or not, with the reasons written from
+    `prefilter.REJECTION_REASON_PREFIX` and `scorer.NOT_SCORED_PREFIX` themselves.
+    `upgrade head` adds the column, its check and the backfill: one value per row,
+    and not one character of any reason rewritten.
+    """
+    Base.metadata.drop_all(database)
+    command.upgrade(_config(), SOURCE_REVISION)
+    reasons = (
+        REJECTION_REASON_PREFIX + "title term 'intern'",
+        NOT_SCORED_PREFIX + "the model call failed",
+        "Synthetic fit: Python and SQL.",
+    )
+    for number, reason in enumerate(reasons, start=1):
+        _store_a_match_row_before_the_outcome_column(
+            database, external_id=str(number), score=0 if number < len(reasons) else 87, reason=reason
+        )
+    before = _stored_match_texts(database)
+    assert "outcome" not in _reflected_columns(database, "match")
+
+    command.upgrade(_config(), "head")
+
+    assert _reflected_columns(database, "match")["outcome"] == ("VARCHAR(20)", False)
+    assert _outcome_column_values(database) == ["rejected", "not_scored", "scored"]
+    assert _stored_match_texts(database) == before
+    assert [reason for reason, _, _ in before] == list(reasons)
 
 
 def test_the_four_documented_commands_do_what_they_say(database: Engine, tmp_path: Path) -> None:

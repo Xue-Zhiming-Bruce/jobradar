@@ -9,10 +9,10 @@ That gap is real and is owned by #21 (schema migrations); nothing here migrates.
 
 The rules that keep the rows honest ride on these declarations and are enforced
 by the database on both engines rather than by a check in application code: the
-dedupe keys, at most one active resume, the score range, the two vocabularies
-the state and status columns accept, and the foreign keys, which cascade. A rule
-that is not declared here is not enforced, so a change to one of them is the
-migration gap #21 owns as well.
+dedupe keys, at most one active resume, the score range, the three vocabularies
+the state, status and outcome columns accept, and the foreign keys, which
+cascade. A rule that is not declared here is not enforced, so a change to one of
+them is the migration gap #21 owns as well.
 
 The column names below are the contract later tasks read. They may gain columns,
 but none of them may be renamed or dropped without the migration path #21 owns.
@@ -171,15 +171,20 @@ class Posting(Base):
 
 
 class Match(Base):
-    """The score a posting received, why it fits and what is missing."""
+    """The score a posting received, why it fits, what is missing and how it got there."""
 
     __tablename__ = "match"
-    # The vocabulary `state` accepts, and the score range, as named checks the
-    # database enforces -- the same statement on both engines, no dialect enum.
+    # The vocabularies `state` and `outcome` accept, and the score range, as named
+    # checks the database enforces -- the same statement on both engines, no
+    # dialect enum.
     __table_args__ = (
         CheckConstraint("score >= 0 AND score <= 100", name="ck_match_score_range"),
         CheckConstraint(
             "state IN ('new', 'saved', 'dismissed')", name="ck_match_state_values"
+        ),
+        CheckConstraint(
+            "outcome IN ('scored', 'rejected', 'not_scored')",
+            name="ck_match_outcome_values",
         ),
     )
 
@@ -193,6 +198,15 @@ class Match(Base):
     reason: Mapped[str] = mapped_column(Text)
     gaps: Mapped[str | None] = mapped_column(Text)
     state: Mapped[str] = mapped_column(String(20), default="new")
+    # How this row got its score, in one vocabulary rather than in the free text
+    # `reason` carries: `'scored'` is a score the scorer answered (a genuine 0
+    # included), `'rejected'` is a posting the prefilter refused and
+    # `'not_scored'` is a model failure stored instead of a score. `NOT NULL`, so
+    # no row is in none of the three, and server-defaulted so a row inserted by
+    # neither writer -- a test's, say -- is the ordinary case rather than a NULL.
+    # One writer per state: `prefilter.record_rejection` and
+    # `scorer.record_score`, the two modules that also decide the reason's prefix.
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False, server_default="scored")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow)
     notified_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 

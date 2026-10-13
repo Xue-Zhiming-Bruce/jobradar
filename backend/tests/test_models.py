@@ -56,6 +56,7 @@ _EXPECTED_COLUMNS = {
         "reason",
         "gaps",
         "state",
+        "outcome",
         "created_at",
         "notified_at",
     },
@@ -90,6 +91,7 @@ _STRING_LENGTHS = {
     ("match", "reason"): None,
     ("match", "gaps"): None,
     ("match", "state"): 20,
+    ("match", "outcome"): 20,
     ("run", "status"): 20,
     ("run", "error"): None,
 }
@@ -118,7 +120,8 @@ _TIMESTAMP_COLUMNS = {
     ("run", "finished_at"),
 }
 
-# The columns whose default is a Python callable or literal, with no server_default.
+# The columns whose default is a Python callable or literal. `outcome` is not
+# one of them: its default is the database's own.
 _DEFAULTED_COLUMNS = {
     ("resume", "uploaded_at"),
     ("resume", "is_active"),
@@ -237,8 +240,14 @@ def test_a_timestamp_without_a_utc_offset_is_rejected() -> None:
     assert UTCDateTime().process_bind_param(aware, postgresql.dialect()) == aware
 
 
-def test_defaults_live_on_the_python_side_and_nowhere_else() -> None:
-    """No server_default, so no dialect's DDL holds a literal DEFAULT to diverge on."""
+def test_defaults_are_python_side_except_the_outcome_the_database_fills() -> None:
+    """Every default but one is the Python side's; `outcome` is the engine's.
+
+    `outcome` is `NOT NULL` with a `server_default` and no Python default, so a
+    row inserted without it -- a test's own seed, or one written before the
+    column existed -- reads `scored` rather than NULL. Every other default is
+    Python-side, so no other column's DDL holds a literal DEFAULT.
+    """
     python_defaulted = {
         (table.name, column.name)
         for table in Base.metadata.sorted_tables
@@ -246,14 +255,14 @@ def test_defaults_live_on_the_python_side_and_nowhere_else() -> None:
         if column.default is not None or column.onupdate is not None
     }
     server_defaulted = {
-        (table.name, column.name)
+        (table.name, column.name): str(column.server_default.arg)
         for table in Base.metadata.sorted_tables
         for column in table.columns
         if column.server_default is not None
     }
 
     assert python_defaulted == _DEFAULTED_COLUMNS
-    assert server_defaulted == set()
+    assert server_defaulted == {("match", "outcome"): "scored"}
 
 
 @pytest.mark.parametrize("dialect_name", sorted(_MATCH_TABLE_DDL))
@@ -276,7 +285,8 @@ def test_the_two_rendered_dialects_derive_their_types_from_one_metadata() -> Non
     postgres_ddl = _ddl(postgresql.dialect())
 
     # What each dialect derives for the same declaration: an integer primary key,
-    # a timestamp, a bounded string -- and no DEFAULT clause from the metadata.
+    # a timestamp, a bounded string -- and no DEFAULT clause from the metadata
+    # except the one `outcome` declares as its server default.
     assert "id INTEGER NOT NULL" in sqlite_ddl
     assert "id SERIAL NOT NULL" in postgres_ddl
     assert "uploaded_at DATETIME NOT NULL" in sqlite_ddl
@@ -285,8 +295,10 @@ def test_the_two_rendered_dialects_derive_their_types_from_one_metadata() -> Non
     assert "title TEXT NOT NULL" in postgres_ddl
     assert "filename VARCHAR(255) NOT NULL" in sqlite_ddl
     assert "filename VARCHAR(255) NOT NULL" in postgres_ddl
-    assert "DEFAULT" not in sqlite_ddl
-    assert "DEFAULT" not in postgres_ddl
+    # One DEFAULT in the whole schema, and it is `outcome`'s server default.
+    for ddl in (sqlite_ddl, postgres_ddl):
+        assert ddl.count("DEFAULT") == 1
+        assert "outcome VARCHAR(20) DEFAULT 'scored' NOT NULL" in ddl
 
 
 def test_the_docstring_says_tables_only_are_created_and_names_21() -> None:
@@ -352,6 +364,9 @@ def test_the_checks_are_named_and_carry_plain_string_columns() -> None:
         ("company", "ck_company_source_values"): "source IN ('greenhouse', 'lever')",
         ("match", "ck_match_score_range"): "score >= 0 AND score <= 100",
         ("match", "ck_match_state_values"): "state IN ('new', 'saved', 'dismissed')",
+        ("match", "ck_match_outcome_values"): (
+            "outcome IN ('scored', 'rejected', 'not_scored')"
+        ),
         ("run", "ck_run_status_values"): "status IN ('running', 'succeeded', 'failed')",
     }
     for dialect_name, ddl in _both_ddl().items():
@@ -362,6 +377,9 @@ def test_the_checks_are_named_and_carry_plain_string_columns() -> None:
         # and no dialect import, which `test_no_app_module_names_a_dialect` holds.
         assert "source VARCHAR(20) NOT NULL" in ddl, dialect_name
         assert "state VARCHAR(20) NOT NULL" in ddl, dialect_name
+        # The one vocabulary that is also server-defaulted renders its DEFAULT
+        # between the type and NOT NULL, on both engines.
+        assert "outcome VARCHAR(20) DEFAULT 'scored' NOT NULL" in ddl, dialect_name
         assert "status VARCHAR(20) NOT NULL" in ddl, dialect_name
 
 
@@ -396,6 +414,7 @@ def test_every_column_a_constraint_rides_on_is_not_nullable() -> None:
         Match.__table__.c.posting_id,
         Match.__table__.c.score,
         Match.__table__.c.state,
+        Match.__table__.c.outcome,
         Run.__table__.c.status,
     ]
 
