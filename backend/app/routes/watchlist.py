@@ -34,11 +34,12 @@ This module knows nothing about a source's payload: no key name and no URL of on
 appears here, and the family of failures it distinguishes is the shared one.
 """
 
+import unicodedata
 from collections.abc import Mapping
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -78,13 +79,17 @@ class CompanyCreate(BaseModel):
 class CompanyUpdate(BaseModel):
     """Body of an edit: the label to show, the poll state, or both, and nothing else.
 
-    Both fields are optional and at least one of them has to be supplied: `{}` is
-    a request that says nothing, and answering it `200` would report a write that
-    did not happen. `name` is a label stored exactly as it arrived, with only a
-    blank value refused -- `CompanyCreate._not_blank`'s rule, and no normaliser,
-    because the one in `app.models` touches `slug`. `is_active` is a `Literal` of
-    the two booleans, so `"false"` is refused rather than read as one: whether a
-    board is polled is a state and not a truthy string.
+    Both fields are optional and at least one of them has to be supplied: `{}`
+    is a request that says nothing, and answering it `200` would report a write
+    that did not happen. `name` is a label stored exactly as it arrived, refused
+    when it is blank (`CompanyCreate._not_blank`'s rule), carries a control
+    character, or is longer than the 255 characters `company.name` holds -- the
+    last two are the column's own refusals, and answering them here makes them
+    the `422` this route owes instead of the `500` PostgreSQL's driver answers.
+    No normaliser runs on it, because the one in `app.models` touches `slug`.
+    `is_active` is a `Literal` of the two booleans, so `"false"` is refused
+    rather than read as one: whether a board is polled is a state and not a
+    truthy string.
 
     The board is not here, and refusing it is the point: `extra="forbid"` -- the
     `ResumeActivation`/`MatchVerdict` precedent -- makes `slug` and `source` a
@@ -96,7 +101,10 @@ class CompanyUpdate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str | None = None
+    # 255 is `company.name`'s own `String(255)`, and the bound belongs here: the
+    # column's refusal is a driver error, which on PostgreSQL is a `500` and not
+    # the `422` this route owes. `test_openapi_contract.py` holds the two together.
+    name: str | None = Field(default=None, max_length=255)
     is_active: Literal[True, False] | None = None
 
     @field_validator("name")
@@ -105,6 +113,20 @@ class CompanyUpdate(BaseModel):
         """Refuse a blank label as a body this route cannot use: a name is what a person reads."""
         if value is not None and not value.strip():
             raise ValueError("must not be blank")
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def _no_control_characters(cls, value: str | None) -> str | None:
+        """Refuse a label carrying a control character, a NUL included.
+
+        PostgreSQL stores no NUL in a text column: it answers that write with a
+        driver error, which is a `500` and not the `422` this route owes. No
+        other control character belongs in a label a person reads either, and
+        refusing them here keeps both engines answering a body the same way.
+        """
+        if value is not None and any(unicodedata.category(char) == "Cc" for char in value):
+            raise ValueError("must not carry a control character")
         return value
 
     @model_validator(mode="after")

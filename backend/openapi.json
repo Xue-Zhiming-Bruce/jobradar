@@ -551,7 +551,8 @@
           "name": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "maxLength": 255
               },
               {
                 "type": "null"
@@ -578,7 +579,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "CompanyUpdate",
-        "description": "Body of an edit: the label to show, the poll state, or both, and nothing else.\n\nBoth fields are optional and at least one of them has to be supplied: `{}` is\na request that says nothing, and answering it `200` would report a write that\ndid not happen. `name` is a label stored exactly as it arrived, with only a\nblank value refused -- `CompanyCreate._not_blank`'s rule, and no normaliser,\nbecause the one in `app.models` touches `slug`. `is_active` is a `Literal` of\nthe two booleans, so `\"false\"` is refused rather than read as one: whether a\nboard is polled is a state and not a truthy string.\n\nThe board is not here, and refusing it is the point: `extra=\"forbid\"` -- the\n`ResumeActivation`/`MatchVerdict` precedent -- makes `slug` and `source` a\n`422` rather than a write this route ignores, because the postings stored\nunder the old slug would be stranded by a new one (#60). Nothing clears a\nfield either: `name` is a `NOT NULL` column and `is_active` is the whole of\n\"is it polled\"."
+        "description": "Body of an edit: the label to show, the poll state, or both, and nothing else.\n\nBoth fields are optional and at least one of them has to be supplied: `{}`\nis a request that says nothing, and answering it `200` would report a write\nthat did not happen. `name` is a label stored exactly as it arrived, refused\nwhen it is blank (`CompanyCreate._not_blank`'s rule), carries a control\ncharacter, or is longer than the 255 characters `company.name` holds -- the\nlast two are the column's own refusals, and answering them here makes them\nthe `422` this route owes instead of the `500` PostgreSQL's driver answers.\nNo normaliser runs on it, because the one in `app.models` touches `slug`.\n`is_active` is a `Literal` of the two booleans, so `\"false\"` is refused\nrather than read as one: whether a board is polled is a state and not a\ntruthy string.\n\nThe board is not here, and refusing it is the point: `extra=\"forbid\"` -- the\n`ResumeActivation`/`MatchVerdict` precedent -- makes `slug` and `source` a\n`422` rather than a write this route ignores, because the postings stored\nunder the old slug would be stranded by a new one (#60). Nothing clears a\nfield either: `name` is a `NOT NULL` column and `is_active` is the whole of\n\"is it polled\"."
       },
       "Health": {
         "properties": {

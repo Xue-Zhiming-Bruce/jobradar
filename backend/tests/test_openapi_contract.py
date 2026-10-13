@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app.export_openapi import CONTRACT_PATH, render_contract
 from app.main import app
+from app.models import Company
 
 
 def test_committed_contract_matches_the_app() -> None:
@@ -164,6 +165,11 @@ def test_contract_describes_the_watchlist_routes() -> None:
     assert set(edit["properties"]) == {"name", "is_active"}
     assert edit["additionalProperties"] is False
     assert not edit.get("required")
+    # The label is bounded by the column it lands in -- 255, the length of
+    # `company.name` -- so a longer one is the `422` here and not the `500` the
+    # driver answers on PostgreSQL.
+    name_max_length = Company.__table__.c.name.type.length
+    assert edit["properties"]["name"]["anyOf"][0]["maxLength"] == name_max_length
 
     # The id is a path parameter and an integer, and the delete answers with no body.
     assert set(removed["responses"]) == {"204", "404", "422"}

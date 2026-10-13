@@ -937,6 +937,15 @@ _UNUSABLE_EDITS = [
     pytest.param({"name": ""}, id="an empty name"),
     pytest.param({"name": "   "}, id="a whitespace name"),
     pytest.param({"name": 5}, id="a name that is not a string"),
+    # The length the `company.name` column holds is 255: one over it is refused
+    # here, because PostgreSQL would refuse the write with a driver error -- a
+    # `500` -- and the route owes `422`.
+    pytest.param({"name": "A" * 256}, id="a name one over the column"),
+    pytest.param({"name": "A" * 300}, id="a name far over the column"),
+    # A NUL is the one character a PostgreSQL text column cannot store, and a
+    # control character is no part of a label either.
+    pytest.param({"name": "Ac\x00me"}, id="a name carrying a NUL"),
+    pytest.param({"name": "Ac\x01me"}, id="a name carrying a control character"),
     pytest.param({"is_active": "false"}, id="the string 'false'"),
     pytest.param({"is_active": "yes"}, id="the string 'yes'"),
     pytest.param([{"name": "Acme Corporation"}], id="a body that is a list"),
@@ -966,6 +975,30 @@ def test_an_edit_body_the_route_cannot_use_is_422_and_writes_nothing(
         rows(Match, MATCH_COLUMNS),
     ) == before
     assert source.slugs == []
+
+
+def test_a_name_at_the_column_s_length_is_accepted_and_stored_as_sent(
+    engine_client: TestClient,
+) -> None:
+    """255 characters is what `company.name` holds: PostgreSQL stores it, 256 does not."""
+    company_id = watch("Acme Inc", "acme")
+    seed_posting(company_id)
+    before = (
+        rows(Company, COMPANY_COLUMNS),
+        rows(Posting, POSTING_COLUMNS),
+        rows(Match, MATCH_COLUMNS),
+    )
+    name = "A" * 255
+
+    response = engine_client.patch(f"/watchlist/{company_id}", json={"name": name})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["name"] == name
+    renamed = rows(Company, COMPANY_COLUMNS)
+    assert renamed == [
+        {**row, "name": name} if row["id"] == company_id else row for row in before[0]
+    ]
+    assert (rows(Posting, POSTING_COLUMNS), rows(Match, MATCH_COLUMNS)) == before[1:]
 
 
 def test_an_edit_request_carrying_no_body_at_all_is_422(
