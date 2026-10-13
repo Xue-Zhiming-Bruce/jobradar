@@ -187,6 +187,8 @@ and the kind without ever printing the matched text.
 | `TICK_SECRET` | every `POST /internal/tick` is `401`: there is no default secret |
 | `LLM_API_KEY` | scoring stops at the first posting; the run's row reads `failed` and names this variable |
 | `LLM_MODEL` | `gpt-4o-mini` |
+| `LLM_BASE_URL` | `https://api.openai.com/v1`; every model call posts to `<base>/chat/completions` |
+| `LLM_FALLBACK_MODEL` | no fallback: only `LLM_MODEL` is tried |
 | `SCORER_MAX_POSTINGS` | 50 postings scored per run |
 | `PREFILTER_TITLE_TERMS`, `PREFILTER_SENIORITY_TERMS`, `PREFILTER_LOCATION_TERMS`, `PREFILTER_MUST_HAVE_KEYWORDS` | that rule rejects nothing, so a posting goes to the scorer |
 | `DIGEST_MIN_SCORE` | 70 |
@@ -569,6 +571,7 @@ are all this file carries:
 
     DATABASE_URL   UPLOADS_DIR   STATIC_DIR   MAX_UPLOAD_BYTES
     TICK_SECRET    LLM_API_KEY   LLM_MODEL    SCORER_MAX_POSTINGS
+    LLM_BASE_URL   LLM_FALLBACK_MODEL
     PREFILTER_TITLE_TERMS    PREFILTER_SENIORITY_TERMS
     PREFILTER_LOCATION_TERMS PREFILTER_MUST_HAVE_KEYWORDS
     DIGEST_MIN_SCORE
