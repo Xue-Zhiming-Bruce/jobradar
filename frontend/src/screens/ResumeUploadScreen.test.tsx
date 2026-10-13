@@ -31,9 +31,13 @@ const expectSilence = (spies: ReturnType<typeof silenceConsole>) => {
   spies.forEach((spy) => spy.mockRestore())
 }
 
-/** Chooses a file by name in the input: the placeholder stands in for a resume. */
-function choose(name: string) {
-  const file = new File(['placeholder bytes, not resume text'], name, { type: 'text/plain' })
+/**
+ * Chooses a file by name and declared media type: the placeholder stands in for a
+ * resume. A case that picks a scan names its own type, since the server's gate
+ * reads the declared type and the bytes, never the extension.
+ */
+function choose(name: string, type = 'text/plain') {
+  const file = new File(['placeholder bytes, not resume text'], name, { type })
   fireEvent.change(screen.getByLabelText('Resume file'), { target: { files: [file] } })
 }
 
@@ -48,18 +52,23 @@ const submit = () => fireEvent.click(screen.getByRole('button', { name: 'Upload 
  * from the API module (multipart with a boundary, never JSON) and the count
  * proves how many uploads the screen sent.
  */
-function recordRequests(seen: { method: string; contentType: string | null }[]) {
+function recordRequests(
+  seen: { method: string; contentType: string | null }[],
+  filename = 'resume.txt',
+) {
   return http.post('/resume', ({ request }) => {
     seen.push({ method: request.method, contentType: request.headers.get('content-type') })
-    return uploaded('resume.txt')
+    return uploaded(filename)
   })
 }
 
 describe('the resume upload screen', () => {
-  it('offers .pdf, .docx and .txt in the file input', () => {
+  it('offers .pdf, .docx, .txt, .png, .jpg, .jpeg, .tif, .tiff, .heic and .webp in the file input', () => {
     render(<ResumeUploadScreen />)
 
-    expect(screen.getByLabelText('Resume file').getAttribute('accept')).toBe('.pdf,.docx,.txt')
+    expect(screen.getByLabelText('Resume file').getAttribute('accept')).toBe(
+      '.pdf,.docx,.txt,.png,.jpg,.jpeg,.tif,.tiff,.heic,.webp',
+    )
   })
 
   it('uploads the chosen file and renders the answered filename as the active resume', async () => {
@@ -122,6 +131,31 @@ describe('the resume upload screen', () => {
     expect(screen.queryByText(EMPTY)).toBeNull()
     // Both uploads were sent: a refusal is the answer's, not the screen withholding the file.
     expect(uploads).toBe(2)
+    expectSilence(spies)
+  })
+
+  // The scan kinds the three-extension hint hid: each one reaches the server and
+  // its answer renders, because `accept` is a hint and not a gate.
+  it.each([
+    ['scan.heic', 'image/heic'],
+    ['scan.tiff', 'image/tiff'],
+    ['resume.jpeg', 'image/jpeg'],
+    ['scan.webp', 'image/webp'],
+    ['scan.png', 'image/png'],
+  ])('uploads a chosen %s as a scan rather than refusing it in the screen', async (name, type) => {
+    const spies = silenceConsole()
+    const seen: { method: string; contentType: string | null }[] = []
+    server.use(recordRequests(seen, name))
+    render(<ResumeUploadScreen />)
+
+    choose(name, type)
+    submit()
+
+    expect(await screen.findByText(`Active resume: ${name}`)).toBeDefined()
+    expect(seen.map((request) => request.method)).toEqual(['POST'])
+    expect(seen).toHaveLength(1)
+    expect(seen[0].contentType?.startsWith('multipart/form-data; boundary=')).toBe(true)
+    expect(screen.queryByRole('alert')).toBeNull()
     expectSilence(spies)
   })
 })
