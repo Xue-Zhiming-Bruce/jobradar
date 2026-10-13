@@ -18,12 +18,13 @@ ascending `company.id` order:
   returned, so every `posting` row -- the insert, the update in place, the close
   and the reopen -- is #6's, and this module writes no `posting` column;
 - for each id `IngestResult.created_ids` reported, in that order: the row read
-  back as a `SourcePosting` and offered to `prefilter`. A posting the prefilter
-  rejects is stored through `record_rejection` and is never offered to the
-  scorer; one that passes is scored exactly once, through
-  `scorer.score(posting, resume_text)`, and the result it returns is stored
-  through `record_score` -- a model outage's `NOT_SCORED_PREFIX` result included,
-  because a result the scorer returned is a result to record and not a failure.
+  back as a `SourcePosting` and offered to `prefilter` with the active resume's
+  parsed skills. A posting the prefilter rejects is stored through
+  `record_rejection` and is never offered to the scorer; one that passes is scored
+  exactly once, through `scorer.score(posting, resume_text)`, and the result it
+  returns is stored through `record_score` -- a model outage's `NOT_SCORED_PREFIX`
+  result included, because a result the scorer returned is a result to record and
+  not a failure.
 
 `run.postings_seen` is every posting the boards returned, added as each fetch
 answers, and `run.matches_created` is one per `record_score` write, added as each
@@ -40,11 +41,13 @@ Three things are deliberately not done here:
   `match` row `match.posting_id` allows -- possibly a `state` the owner saved, and
   a `notified_at` a digest already set -- so re-offering it would rewrite a row
   the owner acted on. The round trip through `closed_at` stays #6's business.
-- the resume's text is read once, before the first board is called, and a run
-  with no active resume fails without a single request: `LlmScorer.score` raises
-  for an empty resume, so fetching first would store postings that can never be
-  scored. The text is user data: it goes to the scorer and into no log line, no
-  row and no message.
+- the resume is read once, before the first board is called, and a run with no
+  active resume fails without a single request: its text and the parsed skills the
+  must-have rule reads (`active_resume_text` and `active_resume_skills`, the second
+  passed to every `prefilter` call) are one read each per run, never one per
+  posting. `LlmScorer.score` raises for an empty resume, so fetching first would
+  store postings that can never be scored. Both values are user data: they go to
+  the prefilter and the scorer and into no log line, no row and no message.
 - a board that fails fails the run. The first `SourceError` escaping a company's
   fetch aborts the walk, naming that company's slug -- and never the board's
   response body, which the adapters already keep out of their own messages. The
@@ -89,13 +92,14 @@ def run_pipeline(
     resume_text = resume.active_resume_text()
     if resume_text is None or not resume_text.strip():
         raise RuntimeError(NO_ACTIVE_RESUME)
+    resume_must_haves = tuple(resume.active_resume_skills())
 
     for company_id, slug, source in _active_companies():
         postings = _fetched(sources[source], slug)
         _add_counts(run_id, postings_seen=len(postings))
         created_ids = ingest_postings(company_id, postings).created_ids
         for posting_id, posting in _stored_postings(created_ids):
-            decision = prefilter(posting)
+            decision = prefilter(posting, resume_must_haves=resume_must_haves)
             if not decision.passed:
                 record_rejection(posting_id, decision)
                 continue

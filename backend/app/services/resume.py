@@ -33,10 +33,12 @@ file's media type, never its contents -- `active_resume_text` hands the text to
 its caller and to nobody else, and `resume_rows` hands out rows for the routes to
 render without ever naming the text column. The fields `POST /resume/parse`
 stores are that same kind of value: `active_resume` is a reader for the route
-that parses them, and `record_parsed_fields` is the one writer of the column they
-land in.
+that parses them, `active_resume_skills` is the same column read by the run that
+matches postings against them, and `record_parsed_fields` is the one writer of the
+column they land in.
 """
 
+import json
 import os
 import uuid
 import zipfile
@@ -318,6 +320,27 @@ def active_resume_text() -> str | None:
         return session.scalars(
             select(Resume.text).where(Resume.is_active.is_(True))
         ).one_or_none()
+
+
+def active_resume_skills() -> list[str]:
+    """The `skills` list of the active resume's parsed fields, `[]` when there is none to read.
+
+    One `session_scope()` per call -- one unit of work, committed and closed before
+    this returns -- and one column of the one row the partial index
+    `uq_resume_one_active` allows to be active: the JSON text `POST /resume/parse`
+    stored as `{"name": ..., "skills": [...]}`. A resume that is not active and a
+    row whose `parsed_fields` is still NULL are the same answer, no skills, so what
+    the caller builds from it rejects nothing. The caller is `run_pipeline`, which
+    reads this once per run, beside the text.
+
+    The list is user data, like the text beside it: nothing here logs it, puts it
+    in an error message or returns it to a client -- it goes to its caller.
+    """
+    with db.session_scope() as session:
+        parsed = session.scalars(
+            select(Resume.parsed_fields).where(Resume.is_active.is_(True))
+        ).one_or_none()
+    return json.loads(parsed)["skills"] if parsed else []
 
 
 def active_resume() -> Resume | None:

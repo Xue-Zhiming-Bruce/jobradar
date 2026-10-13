@@ -3,7 +3,7 @@
 Every case here runs with `socket.socket.connect` patched to raise the way
 `tests/test_greenhouse_source.py` does, so a run that reached for a board fails
 instead of quietly passing, and with the model's three variables and the
-prefilter's four deleted, so a key or a term in the developer's shell cannot
+prefilter's five deleted, so a key or a term in the developer's shell cannot
 decide a case. The source and the scorer are this module's own fakes: the source
 records every slug it was asked for and answers from a script, and the scorer
 records every `(posting, resume_text)` pair it was given.
@@ -42,6 +42,7 @@ from app import db
 from app.main import app
 from app.matching.prefilter import (
     PREFILTER_LOCATION_TERMS,
+    PREFILTER_MUST_HAVE_FROM_RESUME,
     PREFILTER_MUST_HAVE_KEYWORDS,
     PREFILTER_SENIORITY_TERMS,
     PREFILTER_TITLE_TERMS,
@@ -86,6 +87,7 @@ CONFIGURATION_VARIABLES = (
     PREFILTER_SENIORITY_TERMS,
     PREFILTER_LOCATION_TERMS,
     PREFILTER_MUST_HAVE_KEYWORDS,
+    PREFILTER_MUST_HAVE_FROM_RESUME,
 )
 NETWORK_MODULES = {"http", "httpx", "httpx2", "requests", "socket", "urllib", "aiohttp"}
 
@@ -93,6 +95,11 @@ NETWORK_MODULES = {"http", "httpx", "httpx2", "requests", "socket", "urllib", "a
 # a log line, a column or a response by accident.
 TICK_SECRET = "tick-secret-sentinel-7f4c1d9ab38e"
 RESUME_TEXT = "QA-RESUME-SENTINEL-TEXT: synthetic resume, Python and PostgreSQL."
+
+# The skill one resume's parsed fields carry, and a value no case could reach by
+# accident. It is lower-cased, because a term is trimmed and lower-cased before it
+# is matched and the clause it names carries that form.
+SKILL_SENTINEL = "qa-skill-sentinel-3a8e51"
 
 # Every column of a run row: the two counts the pipeline writes, and the three the
 # lifecycle owns and the pipeline must leave alone.
@@ -248,10 +255,18 @@ def _company(
         return company.id
 
 
-def _active_resume(text: str = RESUME_TEXT) -> None:
-    """The one active resume, written through #3's own writer and no file at all."""
-    resume.record_active_resume(
+def _active_resume(text: str = RESUME_TEXT) -> int:
+    """The one active resume, written through #3's own writer and no file at all: its row id."""
+    return resume.record_active_resume(
         "synthetic-resume.txt", resume.TEXT_PLAIN, text, Path("/tmp/synthetic-resume.txt")
+    )
+
+
+def _active_resume_with_skills(skills: list[str]) -> None:
+    """The active resume, with the parsed fields #26's parse stored for it: one writer each."""
+    row_id = _active_resume()
+    resume.record_parsed_fields(
+        row_id, json.dumps({"name": "Synthetic Candidate", "skills": skills})
     )
 
 
@@ -651,6 +666,85 @@ def test_the_active_resume_is_read_once_and_before_the_first_board(
     assert {text for _, text in scorer.calls} == {RESUME_TEXT}
 
 
+def test_the_parsed_skills_gate_one_posting_and_let_the_other_through(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#50: with the rule on, the sentinel skill rejects exactly the posting that lacks it.
+
+    No key and no socket: `FakeScorer` answers, and this module's autouse fixtures
+    leave `LLM_API_KEY` unset and `socket.socket.connect` raising.
+    """
+    monkeypatch.setenv(PREFILTER_MUST_HAVE_FROM_RESUME, "1")
+    company = _company("acme")
+    payload = [
+        _posting("1", title="Backend Engineer", description="We use Python daily."),
+        _posting("2", title="Backend Engineer", description=f"We use {SKILL_SENTINEL} daily."),
+    ]
+    _active_resume_with_skills([SKILL_SENTINEL])
+    run = _run()
+
+    run_pipeline(
+        run, sources={"greenhouse": FakeSource({"acme": payload})}, scorer=FakeScorer(_result())
+    )
+
+    stored = _postings_of(company)
+    rows = {row["posting_id"]: row for row in _matches()}
+    rejected = rows[stored["1"]["id"]]
+    assert rejected["score"] == 0
+    assert rejected["reason"] == REJECTION_REASON_PREFIX + f"missing must-have '{SKILL_SENTINEL}'"
+    assert rejected["gaps"] is None
+    scored = rows[stored["2"]["id"]]
+    assert (scored["score"], scored["reason"]) == (87, "Synthetic fit.")
+    assert _run_row(run)["matches_created"] == 1  # a rejection is not a match
+
+
+def test_the_same_run_with_the_rule_unset_scores_both_postings(engine: Engine) -> None:
+    """Off by default: with the variable unset the parsed skills decide nothing."""
+    company = _company("acme")
+    payload = [
+        _posting("1", title="Backend Engineer", description="We use Python daily."),
+        _posting("2", title="Backend Engineer", description=f"We use {SKILL_SENTINEL} daily."),
+    ]
+    _active_resume_with_skills([SKILL_SENTINEL])
+    run = _run()
+
+    run_pipeline(
+        run, sources={"greenhouse": FakeSource({"acme": payload})}, scorer=FakeScorer(_result())
+    )
+
+    stored = _postings_of(company)
+    rows = {row["posting_id"]: row for row in _matches()}
+    assert [rows[stored[external_id]["id"]]["score"] for external_id in ("1", "2")] == [87, 87]
+    assert _run_row(run)["matches_created"] == 2
+
+
+def test_the_parsed_skills_are_read_once_per_run_and_never_per_posting(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two companies and five postings, and the one-column read happens once, before the walk."""
+    _company("beta")
+    _company("acme")
+    source = FakeSource(
+        {
+            "beta": [_posting("1"), _posting("2")],
+            "acme": [_posting("3"), _posting("4"), _posting("5")],
+        }
+    )
+    reads: list[int] = []
+    real_reader = resume.active_resume_skills
+
+    def counted_reader() -> list[str]:
+        reads.append(len(source.calls))  # how many boards were called before this read
+        return real_reader()
+
+    monkeypatch.setattr(pipeline_module.resume, "active_resume_skills", counted_reader)
+    _active_resume()
+
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert reads == [0]  # once, and before the first fetch
+
+
 def test_a_run_with_no_active_resume_raises_naming_it_and_calls_no_board(engine: Engine) -> None:
     company = _company("acme")
     source = FakeSource({"acme": [_posting("1")]})
@@ -907,6 +1001,55 @@ def test_the_resume_text_reaches_no_log_line_no_row_and_no_response(
     held = [_run_row(run_id), *_matches(), *_postings_of(company).values()]
     assert [name for row in held for name, value in row.items() if RESUME_TEXT in str(value)] == []
     assert RESUME_TEXT not in body
+
+
+def test_a_parsed_skill_reaches_the_stored_reason_and_no_log_line(
+    engine: Engine,
+    client: TestClient,
+    inline_starter: None,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#50: the derived term explains its own rejection and reaches no record anywhere."""
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setenv(PREFILTER_MUST_HAVE_FROM_RESUME, "1")
+    company = _company("acme")
+    source = FakeSource(
+        {
+            "acme": [
+                _posting("1", title="Backend Engineer", description="We use Python daily."),
+                _posting(
+                    "2", title="Backend Engineer", description=f"We use {SKILL_SENTINEL} daily."
+                ),
+            ]
+        }
+    )
+    scorer = FakeScorer(_result())
+    _active_resume_with_skills([SKILL_SENTINEL])
+    app.dependency_overrides[get_pipeline] = lambda: partial(
+        run_pipeline, sources={"greenhouse": source}, scorer=scorer
+    )
+    try:
+        response = client.post("/internal/tick", headers={TICK_SECRET_HEADER: TICK_SECRET})
+        run_id = response.json()["id"]
+    finally:
+        app.dependency_overrides.pop(get_pipeline, None)
+
+    # The one place the term appears is the reason of the posting it rejected.
+    stored = _postings_of(company)
+    rows = {row["posting_id"]: row for row in _matches()}
+    assert rows[stored["1"]["id"]]["reason"] == (
+        REJECTION_REASON_PREFIX + f"missing must-have '{SKILL_SENTINEL}'"
+    )
+    assert rows[stored["2"]["id"]]["score"] == 87  # the run really read the parsed skills
+
+    assert caplog.records, "the capture must be non-vacuous"
+    assert [
+        record.getMessage() for record in caplog.records if SKILL_SENTINEL in record.getMessage()
+    ] == []
+    assert [record for record in caplog.records if SKILL_SENTINEL in str(record.args)] == []
+    assert [record for record in caplog.records if SKILL_SENTINEL in str(record.exc_info)] == []
+    assert SKILL_SENTINEL not in client.get(f"/runs/{run_id}").text
 
 
 def test_the_pipeline_writes_no_row_of_its_own_but_the_runs_counts() -> None:

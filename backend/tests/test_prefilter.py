@@ -35,12 +35,14 @@ from app.matching import prefilter as prefilter_module
 from app.matching.prefilter import (
     DEFAULT_TERMS,
     PREFILTER_LOCATION_TERMS,
+    PREFILTER_MUST_HAVE_FROM_RESUME,
     PREFILTER_MUST_HAVE_KEYWORDS,
     PREFILTER_SENIORITY_TERMS,
     PREFILTER_TITLE_TERMS,
     REJECTION_REASON_PREFIX,
     PrefilterDecision,
     location_terms,
+    must_have_from_resume,
     must_have_keywords,
     prefilter,
     record_rejection,
@@ -56,8 +58,10 @@ BACKEND_ROOT = Path(__file__).resolve().parent.parent
 PREFILTER_MODULE = BACKEND_ROOT / "app" / "matching" / "prefilter.py"
 PREFILTER_SOURCE = PREFILTER_MODULE.read_text(encoding="utf-8")
 
-# The four variables, in the order the rules read them, with the reader beside
-# each, so one case can drive the configuration without naming it twice.
+# The five variables, in the order the rules read them, with the reader beside
+# each, so one case can drive the configuration without naming it twice. The last
+# is a boolean rather than a list: it reads no terms of its own, and the terms it
+# turns on are the caller's.
 THE_FOUR = (
     (PREFILTER_TITLE_TERMS, title_terms),
     (PREFILTER_SENIORITY_TERMS, seniority_terms),
@@ -65,7 +69,7 @@ THE_FOUR = (
     (PREFILTER_MUST_HAVE_KEYWORDS, must_have_keywords),
 )
 TermsReader = Callable[[], tuple[str, ...]]
-VARIABLE_NAMES = tuple(name for name, _ in THE_FOUR)
+VARIABLE_NAMES = tuple(name for name, _ in THE_FOUR) + (PREFILTER_MUST_HAVE_FROM_RESUME,)
 
 # The modules a network client would come from, and the terms that would name a
 # model or its credential: this module imports neither and reads no key.
@@ -111,7 +115,7 @@ def no_outbound_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def no_terms_configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each case starts with all four variables unset, whatever its shell holds."""
+    """Each case starts with all five variables unset, whatever its shell holds."""
     for name in VARIABLE_NAMES:
         monkeypatch.delenv(name, raising=False)
 
@@ -209,6 +213,7 @@ def _imported_roots(source: str) -> set[str]:
 
 def test_the_four_variables_are_read_in_one_module_only() -> None:
     """The one-place rule #4 proved for the payload, proved here for the rules."""
+    # #50 adds the fifth name to VARIABLE_NAMES: the rule is the same one, over all five.
     readers = sorted(
         path.relative_to(BACKEND_ROOT).as_posix()
         for path in (BACKEND_ROOT / "app").rglob("*.py")
@@ -396,6 +401,110 @@ def test_the_must_have_rule_fires_once_for_every_keyword_that_is_absent(
     assert prefilter(
         _posting(title="Backend Engineer", description="We use Python and PostgreSQL daily.")
     ) == PrefilterDecision(reasons=("missing must-have 'rust'", "missing must-have 'kubernetes'"))
+
+
+# The fifth variable: the resume's own terms, opt-in and off by default.
+
+
+def test_the_resume_rule_is_on_for_the_accepted_spellings_and_off_for_everything_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(PREFILTER_MUST_HAVE_FROM_RESUME, raising=False)
+    assert must_have_from_resume() is False
+
+    for value in ("", "   ", "0", "no", "off", "false", "trueish", "2"):
+        monkeypatch.setenv(PREFILTER_MUST_HAVE_FROM_RESUME, value)
+        assert must_have_from_resume() is False, value
+
+    for value in ("1", "true", "TRUE", " yes ", "On"):
+        monkeypatch.setenv(PREFILTER_MUST_HAVE_FROM_RESUME, value)
+        assert must_have_from_resume() is True, value
+
+
+def test_a_resume_term_is_no_term_while_the_rule_is_off() -> None:
+    """The default decision is today's: a term the variable does not turn on is inert."""
+    posting = _posting_that_trips_every_rule()
+
+    assert prefilter(posting, resume_must_haves=("rust",)).passed is True
+
+
+def test_a_resume_term_absent_from_both_fields_rejects_the_posting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(PREFILTER_MUST_HAVE_FROM_RESUME, "1")
+
+    assert prefilter(
+        _posting(title="Backend Engineer", description="We use Python and PostgreSQL daily."),
+        resume_must_haves=("rust",),
+    ) == PrefilterDecision(reasons=("missing must-have 'rust'",))
+
+
+def test_a_resume_term_in_either_field_is_not_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same fields #7's rule reads, and the same one-field-at-a-time rule."""
+    monkeypatch.setenv(PREFILTER_MUST_HAVE_FROM_RESUME, "1")
+
+    in_the_title = prefilter(_posting(title="Rust Engineer"), resume_must_haves=("rust",))
+    in_the_description = prefilter(
+        _posting(title="Backend Engineer", description="We use Rust daily."),
+        resume_must_haves=("rust",),
+    )
+
+    assert (in_the_title.passed, in_the_description.passed) == (True, True)
+
+
+def test_a_resume_term_is_trimmed_and_lower_cased(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read the way a configured term is: case-insensitively, and lower-cased in the clause."""
+    monkeypatch.setenv(PREFILTER_MUST_HAVE_FROM_RESUME, "yes")
+
+    assert prefilter(
+        _posting(title="KUBERNETES Engineer"), resume_must_haves=("  kubernetes  ",)
+    ).passed is True
+    assert prefilter(
+        _posting(title="Python Engineer", description=None), resume_must_haves=("  Rust  ",)
+    ).reasons == ("missing must-have 'rust'",)
+
+
+def test_the_resume_terms_come_after_the_configured_keywords(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One rule, and the fixed reason order: the configured clauses first, then the resume's."""
+    monkeypatch.setenv(PREFILTER_MUST_HAVE_FROM_RESUME, "1")
+    monkeypatch.setenv(PREFILTER_MUST_HAVE_KEYWORDS, "rust, go")
+
+    assert prefilter(
+        _posting(title="Backend Engineer", description="We use Python and PostgreSQL daily."),
+        resume_must_haves=("kubernetes", "terraform"),
+    ).reasons == (
+        "missing must-have 'rust'",
+        "missing must-have 'go'",
+        "missing must-have 'kubernetes'",
+        "missing must-have 'terraform'",
+    )
+
+
+def test_an_empty_sequence_of_resume_terms_changes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(PREFILTER_MUST_HAVE_FROM_RESUME, "1")
+    posting = _posting()
+
+    assert prefilter(posting, resume_must_haves=()) == prefilter(posting)
+    assert prefilter(posting, resume_must_haves=()).passed is True
+
+
+def test_a_resume_term_containing_a_comma_matches_whole(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The comma is a limit of a variable's own list format, not of a sequence the caller passes."""
+    monkeypatch.setenv(PREFILTER_MUST_HAVE_FROM_RESUME, "1")
+    term = "ci/cd, end to end"
+
+    assert prefilter(
+        _posting(title="Backend Engineer", description="We build CI/CD, end to end."),
+        resume_must_haves=(term,),
+    ).passed is True
+    assert prefilter(
+        _posting(title="Backend Engineer", description="We build CI/CD alone."),
+        resume_must_haves=(term,),
+    ).reasons == (f"missing must-have '{term}'",)
 
 
 # The order, and the one string a rejection is recorded as.
@@ -767,7 +876,14 @@ def test_the_round_trip_score_rejection_score_leaves_the_one_row(
 
 def test_the_seam_is_one_posting_and_one_decision() -> None:
     """The shape #9 calls, named here so a change to it fails loudly."""
-    assert list(inspect.signature(prefilter).parameters) == ["posting"]
+    # #50: the resume terms arrive as a keyword-only sequence with an empty default,
+    # so #9's one positional call is unchanged and an omitted argument is no term.
+    parameters = inspect.signature(prefilter).parameters
+
+    assert list(parameters) == ["posting", "resume_must_haves"]
+    assert parameters["posting"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert parameters["resume_must_haves"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameters["resume_must_haves"].default == ()
     assert list(inspect.signature(record_rejection).parameters) == ["posting_id", "decision"]
     assert PrefilterDecision.__dataclass_fields__.keys() == {"reasons"}
     assert PrefilterDecision.__dataclass_params__.frozen
@@ -805,11 +921,13 @@ def test_the_module_holds_the_readers_the_pure_function_and_the_recorder() -> No
         if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
     ]
 
+    # #50: `must_have_from_resume` reads the fifth variable, beside its four list readers.
     assert names == [
         "title_terms",
         "seniority_terms",
         "location_terms",
         "must_have_keywords",
+        "must_have_from_resume",
         "prefilter",
         "record_rejection",
     ]

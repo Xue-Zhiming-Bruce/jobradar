@@ -24,10 +24,11 @@ Four rules, and this file is the single place each of them lives:
   fails instead of passing -- and fails before it could drop anything.
 - nothing reaches the network and no key or credential is needed. Every variable
   the run reads -- the model's key, name and cap, the six mail variables, the
-  cutoff and the four prefilter terms -- is deleted from the environment, so a
-  developer's shell cannot decide a case, and `socket.socket.connect` is patched
-  to raise in every case the way `tests/test_pipeline.py` does. The board, the
-  model and the mail are faked at their own seams and nowhere else.
+  cutoff, the four prefilter terms and the resume-skills flag -- is deleted from
+  the environment, so a developer's shell cannot decide a case, and
+  `socket.socket.connect` is patched to raise in every case the way
+  `tests/test_pipeline.py` does. The board, the model and the mail are faked at
+  their own seams and nowhere else.
 """
 
 import os
@@ -42,6 +43,7 @@ from sqlalchemy.engine import Engine
 from app import db
 from app.matching.prefilter import (
     PREFILTER_LOCATION_TERMS,
+    PREFILTER_MUST_HAVE_FROM_RESUME,
     PREFILTER_MUST_HAVE_KEYWORDS,
     PREFILTER_SENIORITY_TERMS,
     PREFILTER_TITLE_TERMS,
@@ -86,9 +88,10 @@ THROWAWAY_TEST_DATABASE_URL = (
 )
 
 # Every variable a run reads for itself, deleted in every case: the model's key,
-# name and cap, the six mail variables and the cutoff, and the four prefilter
-# terms. A case that wants one of them sets it, so what a case drives is what the
-# case wrote and never what the developer's shell happened to hold.
+# name and cap, the six mail variables, the cutoff, the four prefilter terms and
+# the resume-skills flag. A case that wants one of them sets it, so what a case
+# drives is what the case wrote and never what the developer's shell happened to
+# hold.
 UNSET_VARIABLES = (
     LLM_API_KEY,
     LLM_MODEL,
@@ -104,6 +107,7 @@ UNSET_VARIABLES = (
     PREFILTER_SENIORITY_TERMS,
     PREFILTER_LOCATION_TERMS,
     PREFILTER_MUST_HAVE_KEYWORDS,
+    PREFILTER_MUST_HAVE_FROM_RESUME,
 )
 
 

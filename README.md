@@ -216,6 +216,7 @@ gitignored -- is where the real values go.
 | `LLM_FALLBACK_MODEL` | no fallback: only `LLM_MODEL` is tried |
 | `SCORER_MAX_POSTINGS` | 50 postings scored per run |
 | `PREFILTER_TITLE_TERMS`, `PREFILTER_SENIORITY_TERMS`, `PREFILTER_LOCATION_TERMS`, `PREFILTER_MUST_HAVE_KEYWORDS` | that rule rejects nothing, so a posting goes to the scorer |
+| `PREFILTER_MUST_HAVE_FROM_RESUME` | off: the resume's parsed skills gate no posting, so the must-have rule reads `PREFILTER_MUST_HAVE_KEYWORDS` alone |
 | `DIGEST_MIN_SCORE` | 70 |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `DIGEST_FROM`, `DIGEST_TO` | the digest sends nothing; a digest with a match to send fails, naming the first required variable that is unset |
 | `STATIC_DIR` | `backend/app/static`, beside `app/main.py`, where the image copies the frontend's build |
@@ -657,6 +658,7 @@ are all this file carries:
     LLM_BASE_URL   LLM_FALLBACK_MODEL
     PREFILTER_TITLE_TERMS    PREFILTER_SENIORITY_TERMS
     PREFILTER_LOCATION_TERMS PREFILTER_MUST_HAVE_KEYWORDS
+    PREFILTER_MUST_HAVE_FROM_RESUME
     DIGEST_MIN_SCORE
     SMTP_HOST  SMTP_PORT  SMTP_USERNAME  SMTP_PASSWORD  DIGEST_FROM  DIGEST_TO
 

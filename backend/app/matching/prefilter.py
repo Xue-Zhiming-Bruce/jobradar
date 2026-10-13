@@ -1,13 +1,14 @@
 """The deterministic gate a posting passes before anything is scored, and its config.
 
-`prefilter(posting)` answers one question and has no side effect: the posting
-trips one of four configured rule lists, or it does not. `prefilter` opens no
-session, writes no row, makes no request and reads no file -- it is a pure
-function of the posting and the four variables below, so the same posting always
-yields the same decision. `record_rejection(posting_id, decision)` is this
-module's only writer: it opens one `db.session_scope()` and records the rejection
-on the `match` row keyed by `posting_id`. Which posting is offered to either, and
-when a rejection is recorded, is #9's tick.
+`prefilter(posting, *, resume_must_haves=())` answers one question and has no side
+effect: the posting trips one of four configured rule lists, or it does not.
+`prefilter` opens no session, writes no row, makes no request and reads no file --
+it is a pure function of the posting, of the variables below and of the resume
+terms its caller passes, so the same posting and the same terms always yield the
+same decision. `record_rejection(posting_id, decision)` is this module's only
+writer: it opens one `db.session_scope()` and records the rejection on the `match`
+row keyed by `posting_id`. Which posting is offered to either, and when a
+rejection is recorded, is #9's tick.
 
 The rules, in the fixed order the recorded reason keeps:
 
@@ -15,7 +16,8 @@ The rules, in the fixed order the recorded reason keeps:
 - seniority -- on `posting.title` too, because a seniority word is what a title
   carries;
 - location -- on `posting.location`;
-- must-have -- on the title and the description together.
+- must-have -- on the title and the description together, for the configured
+  keywords and then for the caller's resume terms.
 
 Matching is a case-insensitive substring, never a word boundary, a token split or
 a regex, and `None` reads as the empty string: a posting without a location can
@@ -28,12 +30,18 @@ column is the reader's marker (#30 gave the row one, in place of the prefix #10
 used to string-match); the prefix stays, because other modules and #31 read it,
 and because it is what a reader of the reason sees.
 
-Each of the four variables is a comma-separated list whose entries are trimmed,
-lower-cased and stripped of empties. The format has one limit: a term cannot
-contain a comma. An unset or empty variable is the declared default -- no terms
--- so a JobRadar with none of them set rejects nothing and raises nothing. The
-value is read per call and never at import, so a deployment changes the rules by
-setting the variable and a test sees the next call change.
+Each of the four list variables is a comma-separated list whose entries are
+trimmed, lower-cased and stripped of empties. The format has one limit: a term
+cannot contain a comma -- a limit of the variable's own format, which a term the
+caller passes does not share, because the resume's skills arrive as a sequence
+and one containing a comma matches whole. The fifth variable,
+`PREFILTER_MUST_HAVE_FROM_RESUME`, is a boolean, off unless it reads `1`,
+`true`, `yes` or `on`; while it is on, the resume terms join the must-have rule
+after the configured keywords, trimmed and lower-cased like them. An unset or
+empty variable is the declared default -- no terms, and the rule off -- so a
+JobRadar with none of them set rejects nothing and raises nothing. Every value is
+read per call and never at import, so a deployment changes the rules by setting
+the variable and a test sees the next call change.
 """
 
 import os
@@ -45,12 +53,17 @@ from app import db
 from app.models import Match
 from app.sources.base import SourcePosting
 
-# The four variables, named here and read in no other module, the way the resume
+# The five variables, named here and read in no other module, the way the resume
 # service reads its own settings in one place.
 PREFILTER_TITLE_TERMS = "PREFILTER_TITLE_TERMS"
 PREFILTER_SENIORITY_TERMS = "PREFILTER_SENIORITY_TERMS"
 PREFILTER_LOCATION_TERMS = "PREFILTER_LOCATION_TERMS"
 PREFILTER_MUST_HAVE_KEYWORDS = "PREFILTER_MUST_HAVE_KEYWORDS"
+PREFILTER_MUST_HAVE_FROM_RESUME = "PREFILTER_MUST_HAVE_FROM_RESUME"
+
+# The spellings that turn the boolean on; trimmed and lower-cased, so ` TRUE ` is
+# one of them and everything else -- unset, empty, `0`, `no` -- is off.
+_TRUE_SPELLINGS = ("1", "true", "yes", "on")
 
 # What an unset or empty variable means: no terms, so its rule rejects nothing.
 DEFAULT_TERMS: tuple[str, ...] = ()
@@ -98,11 +111,26 @@ def must_have_keywords() -> tuple[str, ...]:
     return _terms(os.environ.get(PREFILTER_MUST_HAVE_KEYWORDS, ""))
 
 
-def prefilter(posting: SourcePosting) -> PrefilterDecision:
+def must_have_from_resume() -> bool:
+    """`PREFILTER_MUST_HAVE_FROM_RESUME`, true only for `1`, `true`, `yes` or `on`.
+
+    Read per call, like the four lists, and off for unset, empty, whitespace and
+    every other value: the resume-derived must-haves are opt-in, so a JobRadar
+    that does not ask for them decides as it did before this variable existed.
+    """
+    value = os.environ.get(PREFILTER_MUST_HAVE_FROM_RESUME, "")
+    return value.strip().lower() in _TRUE_SPELLINGS
+
+
+def prefilter(
+    posting: SourcePosting, *, resume_must_haves: tuple[str, ...] = ()
+) -> PrefilterDecision:
     """Every rule `posting` trips, in the fixed order, and nothing else.
 
-    Reads the posting and the four variables and writes nothing anywhere: no
-    session, no row, no request, no file.
+    Reads the posting, the five variables and the terms it was handed, and writes
+    nothing anywhere: no session, no row, no request, no file. A resume term is
+    applied only while `must_have_from_resume()` is on, after the configured
+    keywords and with the same substring rule, and an empty sequence is no term.
     """
     title = posting.title.lower()
     reasons: list[str] = []
@@ -117,7 +145,10 @@ def prefilter(posting: SourcePosting) -> PrefilterDecision:
         if term in location:
             reasons.append(_LOCATION_CLAUSE.format(term))
     description = (posting.description or "").lower()
-    for term in must_have_keywords():
+    must_haves = must_have_keywords()
+    if must_have_from_resume():
+        must_haves += tuple(entry.strip().lower() for entry in resume_must_haves)
+    for term in must_haves:
         if term not in title and term not in description:
             reasons.append(_MUST_HAVE_CLAUSE.format(term))
     return PrefilterDecision(reasons=tuple(reasons))
