@@ -71,12 +71,19 @@ _EXCLUDED_PATHS = [
 ]
 
 # Everything the build reads must survive the ignore file: the backend's source
-# and lock file, the frontend's source plus the two files `npm ci` installs
-# from, and the files the build itself is described by.
+# and lock file, the migration path the runtime stage copies beside `app/`
+# (`alembic.ini`, `migrations/` and the entrypoint script, #47), the frontend's
+# source plus the two files `npm ci` installs from, and the files the build
+# itself is described by.
 _KEPT_PATHS = [
     "Dockerfile",
     "compose.yaml",
     "backend/Dockerfile",
+    "backend/docker-entrypoint.sh",
+    "backend/alembic.ini",
+    "backend/migrations/env.py",
+    "backend/migrations/script.py.mako",
+    "backend/migrations/versions/0001_baseline_five_tables.py",
     "backend/pyproject.toml",
     "backend/uv.lock",
     "backend/openapi.json",
