@@ -131,8 +131,11 @@ def three_faked_collaborators(
     """The only three things this suite fakes, each at the seam the real code reads it from.
 
     The board is installed twice because the app reaches it twice and at two
-    different names: `POST /watchlist` takes its probe from `get_source`, while
-    the tick's real `get_pipeline` provider reads `fetch` out of its own module,
+    different names: `POST /watchlist` takes its probe from `get_source` -- which
+    since #28 returns the mapping from a stored source name to that board's
+    adapter, so the override is a mapping too -- while
+    the tick's real `get_pipeline` provider reads `SOURCES` out of its own module
+    (the mapping #28 introduced, not the `fetch` name it replaced),
     so that name is what `monkeypatch` replaces. The scorer is the same shape:
     the provider constructs `LlmScorer()` itself, so the class is what is
     replaced, and it answers with this case's one `FakeScorer` instance -- built
@@ -142,9 +145,14 @@ def three_faked_collaborators(
     Nothing else is faked, and both overrides are removed at the end of the case,
     so `app.dependency_overrides` is empty again for whatever runs next.
     """
-    app.dependency_overrides[get_source] = lambda: scripted_source
+    app.dependency_overrides[get_source] = lambda: {
+        "greenhouse": scripted_source,
+        "lever": scripted_source,
+    }
     app.dependency_overrides[get_mailer] = lambda: mailer
-    monkeypatch.setattr(internal, "fetch", scripted_source)
+    monkeypatch.setattr(
+        internal, "SOURCES", {"greenhouse": scripted_source, "lever": scripted_source}
+    )
     monkeypatch.setattr(internal, "LlmScorer", lambda: scorer)
     try:
         yield
