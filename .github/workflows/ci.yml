@@ -6,9 +6,19 @@
 #
 # What each job runs, and the local command that stands in for it:
 #
-#   backend      cd backend && uv sync && uv run pytest
-#                the integration suite is collected and deselected here; the
-#                summary reads `N deselected`
+#   backend      cd backend && uv sync && uv run pytest, against the throwaway
+#                server the `integration` block below starts, named by the
+#                variable the `engine` matrix reads:
+#
+#                  cd backend && TEST_DATABASE_URL=postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:5433/jobradar uv run pytest
+#
+#                one pass over both parameters of the `engine` matrix: the
+#                SQLite-only run this job used to be is now the both-engines
+#                run, not a second copy of it standing beside. The marked
+#                integration suite is still collected and deselected here (`2
+#                deselected`), and the run fails on a summary that skipped
+#                anything -- an unset variable makes every `[postgres]` case
+#                skip, which is the half-run this job exists to catch.
 #   frontend     cd frontend && npm ci && npm run build && npm test
 #                `npm ci` installs the committed `frontend/package-lock.json`
 #   integration  the marked suite against the throwaway server, on port 5433
@@ -61,6 +71,23 @@ permissions:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: jobradar
+          POSTGRES_PASSWORD: jobradar-throwaway
+          POSTGRES_DB: jobradar
+        ports:
+          - "5432:5432"
+        # The health check in `compose.yaml`'s `db` service, with a start period:
+        # the suite must not reach a server that is still starting up.
+        options: >-
+          --health-cmd "pg_isready -U jobradar -d jobradar"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+          --health-start-period 5s
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.0
@@ -71,8 +98,28 @@ jobs:
       - name: Fail on a committed secret, resume or database file
         run: uv run pytest tests/test_committed_data_guard.py
         working-directory: backend
-      - run: uv run pytest
+      # `backend/tests/conftest.py` skips the whole `[postgres]` parameter when
+      # this variable is unset or empty, and pytest core has no fail-on-skip
+      # option, so the guard sits on the step that carries the variable: drop
+      # the `env:` below and the job is red before the suite starts, rather than
+      # green with 369 skipped.
+      - name: Run the whole suite against the throwaway PostgreSQL
         working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:5432/jobradar
+        run: |
+          set -o pipefail
+          test -n "$TEST_DATABASE_URL"
+          uv run pytest | tee /tmp/pytest-summary.txt
+      # AC2, structural: one complete pass, nothing skipped, a non-zero passed
+      # count -- never a pinned total, which another lane's new tests would move.
+      - name: Fail when the run skipped anything
+        run: |
+          grep -qE '[1-9][0-9]* passed' /tmp/pytest-summary.txt
+          if grep -qE '[0-9]+ skipped' /tmp/pytest-summary.txt; then
+            echo "the suite skipped cases: TEST_DATABASE_URL did not reach it"
+            exit 1
+          fi
 
   frontend:
     runs-on: ubuntu-latest
