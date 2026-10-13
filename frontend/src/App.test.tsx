@@ -7,9 +7,10 @@ import { server } from './mocks/server'
 afterEach(cleanup)
 
 describe('the app', () => {
-  it('renders the watchlist, the matches and the run button from the mock backend', async () => {
+  it('renders the resume upload, the watchlist, the matches and the run button', async () => {
     render(<App />)
 
+    expect(screen.getByLabelText('Resume file')).toBeDefined()
     expect(await screen.findByText('Acme (acme)')).toBeDefined()
     expect(await screen.findByText('Globex: Data engineer')).toBeDefined()
     expect(screen.getByRole('button', { name: 'Run digest now' })).toBeDefined()
