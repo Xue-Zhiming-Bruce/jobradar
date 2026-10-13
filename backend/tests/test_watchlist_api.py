@@ -36,9 +36,11 @@ from sqlalchemy.exc import IntegrityError
 from app import db
 from app.main import app
 from app.matching.scorer import FakeScorer, MatchResult
-from app.models import Company, Match, Posting, Run
+from app.models import Company, Match, Posting, Run, RunCompany
 from app.routes.watchlist import SOURCE_IS_FIXED, get_source, update_company
+from app.services import pipeline as pipeline_module
 from app.services import resume
+from app.services.ingest import IngestResult
 from app.services.pipeline import run_pipeline
 from app.sources import SOURCES
 from app.sources.base import (
@@ -76,7 +78,16 @@ CLOSED_AT = datetime(2024, 5, 6, 7, 8, 9, tzinfo=UTC)
 
 # Every column of the three tables an edit must leave alone, so a write nobody
 # asked for -- a `created_at` that moved, a `closed_at` that was set -- is visible.
-COMPANY_COLUMNS = ("id", "name", "slug", "source", "is_active", "created_at")
+COMPANY_COLUMNS = (
+    "id",
+    "name",
+    "slug",
+    "source",
+    "is_active",
+    "created_at",
+    "etag",
+    "last_modified",
+)
 POSTING_COLUMNS = (
     "id",
     "company_id",
@@ -258,7 +269,12 @@ def rows(model: type, columns: tuple[str, ...]) -> list[dict[str, Any]]:
         ]
 
 
-def seed_posting(company_id: int, *, closed_at: datetime | None = None) -> None:
+def seed_posting(
+    company_id: int,
+    *,
+    closed_at: datetime | None = None,
+    external_id: str = POSTINGS[0].external_id,
+) -> None:
     """One stored posting of that company -- open or closed -- and the one match row it earned.
 
     The match is written the way #10 leaves a row the owner acted on, so a route
@@ -267,7 +283,7 @@ def seed_posting(company_id: int, *, closed_at: datetime | None = None) -> None:
     with db.session_scope() as session:
         posting = Posting(
             company_id=company_id,
-            external_id=POSTINGS[0].external_id,
+            external_id=external_id,
             title="Backend Engineer",
             location=None,
             url="https://example.test/board/1",
@@ -286,6 +302,20 @@ def seed_posting(company_id: int, *, closed_at: datetime | None = None) -> None:
                 notified_at=CLOSED_AT,
             )
         )
+
+
+def a_board(*external_ids: str) -> list[SourcePosting]:
+    """The postings a fake board answers with, one per id, in this module's own shape."""
+    return [
+        SourcePosting(
+            external_id=external_id,
+            title=f"Backend Engineer {external_id}",
+            location=None,
+            url=f"https://example.test/board/{external_id}",
+            description="Synthetic text written for this test.",
+        )
+        for external_id in external_ids
+    ]
 
 
 def new_run() -> int:
@@ -770,9 +800,9 @@ def test_a_body_naming_both_fields_writes_both_in_one_answer(client: TestClient)
     assert len(companies()) == 1  # one write, and no second row
 
 
-def test_the_route_takes_the_id_and_the_body_and_asks_no_board() -> None:
-    """No `Depends`, so no adapter and no probe: the `get_source()` seam stays #5's own."""
-    assert list(inspect.signature(update_company).parameters) == ["id", "body"]
+def test_the_route_takes_the_id_the_body_and_the_source_seam() -> None:
+    """`Depends(get_source)`, reached the way `POST` reaches it: the seam stays #5's own."""
+    assert list(inspect.signature(update_company).parameters) == ["id", "body", "sources"]
 
 
 # A rename: the name, and every other column of every row left exactly as it was.
@@ -839,27 +869,389 @@ def test_the_same_rename_twice_answers_the_same_body_and_leaves_one_row(
     assert len(companies()) == 1
 
 
-# The board is not editable here, and this route asks no board. `source` has its
-# own case below: the route answers that rule in words, `extra="forbid"` this one.
-
-_UNEDITABLE_BODIES = [
-    pytest.param({"slug": "other"}, id="a slug on its own"),
-    pytest.param({"name": "Acme Corporation", "slug": "other"}, id="a rename with a slug"),
-]
+# The board slug: a move probes the row's own source, closes the old board's
+# open postings once, and clears the validator the old board left. `source` has
+# its own case below, and `extra="forbid"` refuses a field nobody names.
 
 
-@pytest.mark.parametrize("body", _UNEDITABLE_BODIES)
-def test_the_board_slug_is_not_editable_here_and_no_board_is_asked(
+def test_the_move_probes_the_row_s_own_source_and_only_when_the_slug_moves(
+    client: TestClient, sources: dict[str, FakeSource]
+) -> None:
+    """A lever row is probed on lever and a greenhouse row on greenhouse, each once."""
+    on_lever = watch("Acme on Lever", "acme", source="lever")
+    on_greenhouse = watch("Globex", "globex")
+
+    assert client.patch(f"/watchlist/{on_lever}", json={"slug": "newslug"}).status_code == 200
+    assert sources["lever"].slugs == ["newslug"]
+    assert sources["greenhouse"].slugs == []
+
+    assert client.patch(f"/watchlist/{on_greenhouse}", json={"slug": "other"}).status_code == 200
+    assert sources["greenhouse"].slugs == ["other"]
+    assert sources["lever"].slugs == ["newslug"]  # the first row's board was not asked again
+
+
+def test_a_corrected_slug_lands_closes_the_old_board_once_and_leaves_the_matches_alone(
+    engine_client: TestClient, sources: dict[str, FakeSource]
+) -> None:
+    """The whole handover: the new slug, one shared close, the validator cleared, matches byte-identical."""
+    company_id = watch("Acme Inc", "acme")
+    other = watch("Globex", "globex", source="lever")
+    with db.session_scope() as session:
+        company = session.get(Company, company_id)
+        company.etag = "the-old-board-s-etag"
+        company.last_modified = "the-old-board-s-last"
+        neighbour = session.get(Company, other)
+        neighbour.etag = "the-neighbour-s-etag"
+        neighbour.last_modified = "the-neighbour-s-last"
+    seed_posting(company_id, external_id="old-open-1")
+    seed_posting(company_id, external_id="old-open-2")
+    seed_posting(company_id, external_id="old-closed", closed_at=CLOSED_AT)
+    before_postings = {row["external_id"]: row for row in rows(Posting, POSTING_COLUMNS)}
+    before_matches = rows(Match, MATCH_COLUMNS)
+    untouched = ("id", "company_id", "external_id", "title", "location", "url", "description", "first_seen_at")
+
+    response = engine_client.patch(f"/watchlist/{company_id}", json={"slug": "  NEWBOARD  "})
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "id": company_id,
+        "name": "Acme Inc",
+        "slug": "newboard",  # normalised the way `POST` normalises one
+        "is_active": True,
+        "source": "greenhouse",
+    }
+    assert response.json() == engine_client.get("/watchlist").json()[0]
+    with db.session_scope() as session:
+        assert session.get(Company, company_id).slug == "newboard"
+    assert sources["greenhouse"].slugs == ["newboard"]  # the row's own source, once
+    assert sources["lever"].slugs == []
+
+    after_postings = {row["external_id"]: row for row in rows(Posting, POSTING_COLUMNS)}
+    # Every posting of the company is closed, and nothing is left open.
+    assert {row["closed_at"] is not None for row in after_postings.values()} == {True}
+    # The two the move closed share one timestamp; the one already closed keeps its own.
+    assert after_postings["old-open-1"]["closed_at"] == after_postings["old-open-2"]["closed_at"]
+    assert after_postings["old-closed"]["closed_at"] == CLOSED_AT
+    for external_id in ("old-open-1", "old-open-2", "old-closed"):
+        assert tuple(after_postings[external_id][column] for column in untouched) == tuple(
+            before_postings[external_id][column] for column in untouched
+        )
+    # `updated_at` is re-stamped on the rows this closes, and only those.
+    assert after_postings["old-open-1"]["updated_at"] > before_postings["old-open-1"]["updated_at"]
+    assert after_postings["old-open-2"]["updated_at"] > before_postings["old-open-2"]["updated_at"]
+    assert after_postings["old-closed"]["updated_at"] == before_postings["old-closed"]["updated_at"]
+    # Nothing deleted or inserted, and every match row is what it was (`state`/`notified_at` included).
+    assert len(after_postings) == len(before_postings) == 3
+    assert rows(Match, MATCH_COLUMNS) == before_matches
+    # The validator the old board left is cleared in the same write, and no other
+    # `company` row's validator is touched.
+    with db.session_scope() as session:
+        company = session.get(Company, company_id)
+        assert (company.etag, company.last_modified) == (None, None)
+        neighbour = session.get(Company, other)
+        assert (neighbour.etag, neighbour.last_modified) == (
+            "the-neighbour-s-etag",
+            "the-neighbour-s-last",
+        )
+
+
+def test_the_next_run_reads_the_new_slug_and_is_not_refused_by_the_shrink_guard(
+    engine_client: TestClient, sources: dict[str, FakeSource]
+) -> None:
+    """Ten rows closed by the move, a new board listing three: stored and counted, no `BoardShrunk`."""
+    company_id = watch("Acme Inc", "acme")
+    for index in range(10):
+        seed_posting(company_id, external_id=f"old-{index}")
+    resume.record_active_resume(
+        "synthetic-resume.txt", resume.TEXT_PLAIN, RESUME_TEXT, Path("/tmp/synthetic-resume.txt")
+    )
+
+    assert engine_client.patch(f"/watchlist/{company_id}", json={"slug": "newboard"}).status_code == 200
+    source = BoardSource({"newboard": a_board("new-1", "new-2", "new-3")})
+    run = new_run()
+
+    run_pipeline(run, sources={"greenhouse": source}, scorer=FakeScorer(a_result()))
+
+    assert source.calls == ["newboard"]  # the new slug, and never the old one
+    with db.session_scope() as session:
+        outcomes = [
+            (row.outcome, row.error)
+            for row in session.scalars(select(RunCompany).order_by(RunCompany.id))
+        ]
+        assert outcomes == [("fetched", None)]  # the shrink guard let the new board through
+        stored = [row.external_id for row in session.scalars(select(Posting).order_by(Posting.id))]
+    assert stored == [f"old-{index}" for index in range(10)] + ["new-1", "new-2", "new-3"]
+    with db.session_scope() as session:
+        run_row = session.get(Run, run)
+        assert (run_row.postings_seen, run_row.matches_created) == (3, 3)
+
+
+def test_the_collision_case_reopens_the_old_row_and_never_creates_a_second(
+    engine_client: TestClient, sources: dict[str, FakeSource], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An id both boards use is the same posting: reopened on its own row, not re-scored, not re-alerted."""
+    company_id = watch("Acme Inc", "acme")
+    seed_posting(company_id, external_id="X")
+    seed_posting(company_id, external_id="ONLY-OLD")
+    assert engine_client.patch(f"/watchlist/{company_id}", json={"slug": "newboard"}).status_code == 200
+    before = {row["external_id"]: row for row in rows(Posting, POSTING_COLUMNS)}
+    before_matches = rows(Match, MATCH_COLUMNS)
+    resume.record_active_resume(
+        "synthetic-resume.txt", resume.TEXT_PLAIN, RESUME_TEXT, Path("/tmp/synthetic-resume.txt")
+    )
+    results: list[IngestResult] = []
+    real_ingest = pipeline_module.ingest_postings
+
+    def recording_ingest(company: int, postings: list[SourcePosting]) -> IngestResult:
+        result = real_ingest(company, postings)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(pipeline_module, "ingest_postings", recording_ingest)
+    source = BoardSource({"newboard": a_board("X")})
+
+    run_pipeline(new_run(), sources={"greenhouse": source}, scorer=FakeScorer(a_result()))
+
+    assert source.calls == ["newboard"]
+    (result,) = results
+    assert result.reopened_ids == [before["X"]["id"]]  # the row that was there, reopened
+    assert result.created_ids == []  # not new, so not re-scored and not alerted on twice
+    after = {row["external_id"]: row for row in rows(Posting, POSTING_COLUMNS)}
+    assert after["X"]["id"] == before["X"]["id"]
+    assert after["X"]["first_seen_at"] == before["X"]["first_seen_at"]
+    assert after["X"]["closed_at"] is None  # #6 reopened it on the new board's payload
+    assert after["X"]["title"] == "Backend Engineer X"  # the new payload's own text
+    assert after["ONLY-OLD"]["closed_at"] is not None  # only the old board had it, so it stays closed
+    assert len(after) == len(before) == 2  # no second row for X
+    assert rows(Match, MATCH_COLUMNS) == before_matches  # byte-identical, and not re-scored
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"slug": "nope"}, id="a move alone"),
+        pytest.param({"name": "Renamed", "slug": "nope"}, id="a rename with a move"),
+    ],
+)
+def test_a_move_to_a_slug_no_board_answers_to_is_404_and_writes_nothing(
     engine_client: TestClient, source: FakeSource, body: object
 ) -> None:
+    """A body that renames and moves in one request writes neither field when the board is unknown."""
     company_id = watch("Acme Inc", "acme")
-    before = rows(Company, COMPANY_COLUMNS)
+    seed_posting(company_id)
+    before = (
+        rows(Company, COMPANY_COLUMNS),
+        rows(Posting, POSTING_COLUMNS),
+        rows(Match, MATCH_COLUMNS),
+    )
+    source.error = UnknownSlug(f"There is no board named 'nope': {UPSTREAM_TEXT}")
 
-    response = engine_client.patch(f"/watchlist/{company_id}", json=body)
+    message = refusal(engine_client.patch(f"/watchlist/{company_id}", json=body), 404)
 
-    refusal(response, 422)
-    assert rows(Company, COMPANY_COLUMNS) == before
-    assert source.slugs == []  # no re-probe, so no 409 and no 502 either
+    assert "nope" in message
+    assert UPSTREAM_TEXT not in message
+    assert source.slugs == ["nope"]
+    assert (
+        rows(Company, COMPANY_COLUMNS),
+        rows(Posting, POSTING_COLUMNS),
+        rows(Match, MATCH_COLUMNS),
+    ) == before
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        BoardUnavailable(f"HTTP 503: {UPSTREAM_TEXT}"),
+        SourceTimeout(f"the board did not answer: {UPSTREAM_TEXT}"),
+        MalformedPayload(f"the answer was not a board: {UPSTREAM_TEXT}"),
+    ],
+    ids=["a board that refuses", "a board that is slow", "a malformed payload"],
+)
+def test_a_move_to_an_unreadable_board_is_502_and_writes_nothing(
+    engine_client: TestClient, source: FakeSource, error: SourceError
+) -> None:
+    """A board that is down is never a board that does not exist, and nothing moves."""
+    company_id = watch("Acme Inc", "acme")
+    seed_posting(company_id)
+    before = (
+        rows(Company, COMPANY_COLUMNS),
+        rows(Posting, POSTING_COLUMNS),
+        rows(Match, MATCH_COLUMNS),
+    )
+    source.error = error
+
+    response = engine_client.patch(f"/watchlist/{company_id}", json={"slug": "newboard"})
+
+    message = refusal(response, 502)
+    assert "newboard" in message
+    assert "could not be read" in message
+    assert UPSTREAM_TEXT not in response.text
+    assert source.slugs == ["newboard"]
+    assert (
+        rows(Company, COMPANY_COLUMNS),
+        rows(Posting, POSTING_COLUMNS),
+        rows(Match, MATCH_COLUMNS),
+    ) == before
+
+
+def test_a_move_onto_a_pair_another_company_holds_is_409_naming_the_pair_and_closes_nothing(
+    engine_client: TestClient, sources: dict[str, FakeSource]
+) -> None:
+    """The unique key's verdict under the flush: the pair is named, the row is untouched, nothing closed."""
+    watch("Acme Inc", "acme")
+    globex = watch("Globex", "globex")
+    seed_posting(globex)
+    before = (
+        rows(Company, COMPANY_COLUMNS),
+        rows(Posting, POSTING_COLUMNS),
+        rows(Match, MATCH_COLUMNS),
+    )
+
+    message = refusal(engine_client.patch(f"/watchlist/{globex}", json={"slug": "  ACME  "}), 409)
+
+    assert "acme" in message  # the normalised candidate the key refused
+    assert "greenhouse" in message
+    assert sources["greenhouse"].slugs == ["acme"]
+    assert sources["lever"].slugs == []
+    assert (
+        rows(Company, COMPANY_COLUMNS),
+        rows(Posting, POSTING_COLUMNS),
+        rows(Match, MATCH_COLUMNS),
+    ) == before
+    assert len(companies()) == 2  # no row was created
+    assert all(row["closed_at"] is None for row in rows(Posting, POSTING_COLUMNS))
+
+
+def test_a_move_onto_a_slug_held_on_another_source_is_200(
+    engine_client: TestClient, sources: dict[str, FakeSource]
+) -> None:
+    """The key is `(source, slug)`: a greenhouse row may take a slug a lever row holds."""
+    watch("Acme on Lever", "acme", source="lever")
+    on_greenhouse = watch("Globex", "globex")
+
+    response = engine_client.patch(f"/watchlist/{on_greenhouse}", json={"slug": "acme"})
+
+    assert response.status_code == 200, response.text
+    assert sources["greenhouse"].slugs == ["acme"]
+    assert sources["lever"].slugs == []
+    assert [(row["slug"], row["source"]) for row in companies()] == [
+        ("acme", "lever"),
+        ("acme", "greenhouse"),
+    ]
+
+
+@pytest.mark.parametrize("slug", ["newboard", "  NEWBOARD  "])
+def test_the_next_tick_calls_the_new_slug_through_the_row_s_own_source(
+    engine_client: TestClient, sources: dict[str, FakeSource], slug: str
+) -> None:
+    """The row holds the new slug and the walk asks for it, never for the board it left."""
+    company_id = watch("Acme Inc", "acme", source="lever")
+    resume.record_active_resume(
+        "synthetic-resume.txt", resume.TEXT_PLAIN, RESUME_TEXT, Path("/tmp/synthetic-resume.txt")
+    )
+    assert engine_client.patch(f"/watchlist/{company_id}", json={"slug": slug}).status_code == 200
+    lever = BoardSource({"newboard": a_board("lever-1")})
+
+    run_pipeline(new_run(), sources={"lever": lever}, scorer=FakeScorer(a_result()))
+
+    assert lever.calls == ["newboard"]
+    with db.session_scope() as session:
+        assert [row.external_id for row in session.scalars(select(Posting))] == ["lever-1"]
+
+
+@pytest.mark.parametrize("slug", ["acme", "  ACME  "])
+def test_a_body_naming_the_row_s_own_slug_is_a_no_op_and_asks_no_board(
+    engine_client: TestClient, sources: dict[str, FakeSource], slug: str
+) -> None:
+    """The guard that makes the close a transition: a repeat body closes nothing and clears nothing."""
+    company_id = watch("Acme Inc", "acme")
+    with db.session_scope() as session:
+        company = session.get(Company, company_id)
+        company.etag = "the-old-board-s-etag"
+        company.last_modified = "the-old-board-s-last"
+    seed_posting(company_id)
+    before = (
+        rows(Company, COMPANY_COLUMNS),
+        rows(Posting, POSTING_COLUMNS),
+        rows(Match, MATCH_COLUMNS),
+    )
+
+    response = engine_client.patch(f"/watchlist/{company_id}", json={"slug": slug})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["slug"] == "acme"
+    assert sources["greenhouse"].slugs == []  # no board is asked
+    assert sources["lever"].slugs == []
+    assert (
+        rows(Company, COMPANY_COLUMNS),
+        rows(Posting, POSTING_COLUMNS),
+        rows(Match, MATCH_COLUMNS),
+    ) == before  # no `closed_at` moved, and the validator is exactly what it was
+    with db.session_scope() as session:
+        company = session.get(Company, company_id)
+        assert (company.etag, company.last_modified) == (
+            "the-old-board-s-etag",
+            "the-old-board-s-last",
+        )
+
+
+def test_a_repeated_move_closes_nothing_a_second_time(
+    engine_client: TestClient, sources: dict[str, FakeSource]
+) -> None:
+    """The close belongs to the move: replaying the body does not re-close what a tick reopened."""
+    company_id = watch("Acme Inc", "acme")
+    seed_posting(company_id, external_id="stays")
+    seed_posting(company_id, external_id="reopened")
+    assert engine_client.patch(f"/watchlist/{company_id}", json={"slug": "newboard"}).status_code == 200
+    with db.session_scope() as session:  # a tick reopened one row against the new slug
+        reopened = session.scalars(select(Posting).where(Posting.external_id == "reopened")).one()
+        reopened.closed_at = None
+    before = {row["external_id"]: row for row in rows(Posting, POSTING_COLUMNS)}
+    assert before["reopened"]["closed_at"] is None  # the case is not vacuous
+    assert before["stays"]["closed_at"] is not None
+
+    response = engine_client.patch(f"/watchlist/{company_id}", json={"slug": "newboard"})
+
+    assert response.status_code == 200, response.text
+    # The reopened row keeps `closed_at IS NULL`, and the one the change closed stays closed.
+    assert {row["external_id"]: row for row in rows(Posting, POSTING_COLUMNS)} == before
+
+
+def test_a_body_carrying_a_name_a_slug_and_a_state_applies_all_three_in_one_write(
+    engine_client: TestClient, sources: dict[str, FakeSource]
+) -> None:
+    company_id = watch("Acme Inc", "acme")
+
+    response = engine_client.patch(
+        f"/watchlist/{company_id}",
+        json={"name": "Acme Corporation", "slug": "newboard", "is_active": False},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "id": company_id,
+        "name": "Acme Corporation",
+        "slug": "newboard",
+        "is_active": False,
+        "source": "greenhouse",
+    }
+    assert len(companies()) == 1  # one write of three fields, and no second row
+    assert sources["greenhouse"].slugs == ["newboard"]
+
+
+def test_a_move_on_a_deactivated_company_is_200_and_closes_its_postings_all_the_same(
+    engine_client: TestClient, sources: dict[str, FakeSource]
+) -> None:
+    """`is_active` gates nothing: a mistyped slug on a stopped company is fixable without reactivating it."""
+    company_id = watch("Acme Inc", "acme", is_active=False)
+    seed_posting(company_id)
+
+    response = engine_client.patch(f"/watchlist/{company_id}", json={"slug": "newboard"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["is_active"] is False
+    assert sources["greenhouse"].slugs == ["newboard"]
+    assert all(row["closed_at"] is not None for row in rows(Posting, POSTING_COLUMNS))
 
 
 # The source is fixed once written: the route, not pydantic, states the rule.
@@ -868,6 +1260,8 @@ _SOURCE_CHANGE_BODIES = [
     pytest.param({"name": "Acme Corporation", "source": "lever"}, id="a rename with a source"),
     pytest.param({"source": "lever"}, id="a source on its own"),
     pytest.param({"is_active": False, "source": "greenhouse"}, id="a poll switch with a source"),
+    pytest.param({"source": "lever", "slug": "newboard"}, id="a source with a slug"),
+    pytest.param({"slug": "newboard", "source": "greenhouse"}, id="a slug with a source"),
 ]
 
 
@@ -906,6 +1300,17 @@ def test_a_null_source_is_not_a_source_change_and_the_rename_stands(
     assert response.status_code == 200, response.text
     assert (response.json()["name"], response.json()["source"]) == ("Acme", "greenhouse")
     assert response.json() == companies()[0]
+
+
+def test_the_source_refusal_comes_first_so_an_unknown_id_is_still_422(
+    client: TestClient, sources: dict[str, FakeSource]
+) -> None:
+    """#57's order: the rule is answered before `session.get`, so the id's own 404 never wins."""
+    response = client.patch("/watchlist/999999", json={"source": "lever"})
+
+    assert refusal(response, 422) == SOURCE_IS_FIXED
+    assert sources["greenhouse"].slugs == []
+    assert sources["lever"].slugs == []
 
 
 # The poll switch: the same route for both values, and the list keeps showing the row.
@@ -1100,6 +1505,13 @@ _UNUSABLE_EDITS = [
     pytest.param({"name": ""}, id="an empty name"),
     pytest.param({"name": "   "}, id="a whitespace name"),
     pytest.param({"name": 5}, id="a name that is not a string"),
+    # `slug` is a board the route probes: `null` names nothing, a blank one could
+    # never name a board, and a value that is not a string is no slug at all.
+    pytest.param({"slug": None}, id="a null slug"),
+    pytest.param({"slug": ""}, id="an empty slug"),
+    pytest.param({"slug": "   "}, id="a whitespace slug"),
+    pytest.param({"slug": 7}, id="a slug that is not a string"),
+    pytest.param({"slug": ["newboard"]}, id="a slug that is a list"),
     # The length the `company.name` column holds is 255: one over it is refused
     # here, because PostgreSQL would refuse the write with a driver error -- a
     # `500` -- and the route owes `422`.
@@ -1114,12 +1526,13 @@ _UNUSABLE_EDITS = [
     pytest.param([{"name": "Acme Corporation"}], id="a body that is a list"),
     pytest.param("Acme Corporation", id="a body that is a string"),
     pytest.param(None, id="a body that is null"),
+    pytest.param({"unexpected": "field"}, id="a field the route does not have"),
 ]
 
 
 @pytest.mark.parametrize("body", _UNUSABLE_EDITS)
 def test_an_edit_body_the_route_cannot_use_is_422_and_writes_nothing(
-    engine_client: TestClient, source: FakeSource, body: object
+    engine_client: TestClient, sources: dict[str, FakeSource], body: object
 ) -> None:
     company_id = watch("Acme Inc", "acme")
     seed_posting(company_id)
@@ -1137,7 +1550,8 @@ def test_an_edit_body_the_route_cannot_use_is_422_and_writes_nothing(
         rows(Posting, POSTING_COLUMNS),
         rows(Match, MATCH_COLUMNS),
     ) == before
-    assert source.slugs == []
+    assert sources["greenhouse"].slugs == []
+    assert sources["lever"].slugs == []
 
 
 def test_a_name_at_the_column_s_length_is_accepted_and_stored_as_sent(

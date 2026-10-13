@@ -193,25 +193,37 @@ def test_contract_describes_the_watchlist_routes() -> None:
     # The update joins the existing path -- no eleventh path -- and answers with
     # the same company body the list and the addition do.
     assert set(contract["paths"]["/watchlist/{id}"]) == {"delete", "patch"}
-    assert set(updated["responses"]) == {"200", "404", "422"}
+    assert set(updated["responses"]) == {"200", "404", "409", "422", "502"}
+    assert updated["responses"]["409"]["description"]  # the pair is declared, not omitted
     assert updated["responses"]["200"]["content"]["application/json"]["schema"][
         "$ref"
     ] == company_ref
-    # The three fields it may carry, all optional, and nothing else: `slug` is
-    # refused as an unknown field, and a body naming `source` reaches the route,
-    # which answers the rule in words. The rendered schema carries no `required`
+    # The four fields it may carry, all optional, and nothing else: a body naming
+    # `source` reaches the route, which answers the rule in words, and `slug` is
+    # the board to point the company at. The rendered schema carries no `required`
     # key at all.
     assert updated["requestBody"]["required"] is True
     update_ref = updated["requestBody"]["content"]["application/json"]["schema"]["$ref"]
     edit = schemas[update_ref.rsplit("/", 1)[-1]]
-    assert set(edit["properties"]) == {"name", "is_active", "source"}
+    assert set(edit["properties"]) == {"name", "is_active", "source", "slug"}
     assert edit["additionalProperties"] is False
     assert not edit.get("required")
+    # The board slug bounds nothing, mirroring `CompanyCreate.slug`: the over-long
+    # value that #62 owns shows on both routes, and the unique key refuses a
+    # duplicate.
+    assert edit["properties"]["slug"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
     # The label is bounded by the column it lands in -- 255, the length of
     # `company.name` -- so a longer one is the `422` here and not the `500` the
     # driver answers on PostgreSQL.
     name_max_length = Company.__table__.c.name.type.length
     assert edit["properties"]["name"]["anyOf"][0]["maxLength"] == name_max_length
+
+    # The id is a path parameter and an integer on the update as on the delete, so
+    # `abc` is refused by the path's own validation and never reaches the route.
+    (parameter,) = updated["parameters"]
+    assert parameter["name"] == "id"
+    assert parameter["in"] == "path"
+    assert parameter["schema"]["type"] == "integer"
 
     # The id is a path parameter and an integer, and the delete answers with no body.
     assert set(removed["responses"]) == {"204", "404", "422"}

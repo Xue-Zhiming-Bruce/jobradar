@@ -5,34 +5,42 @@ source the slug names -- Greenhouse when the body does not say -- and only after
 that source has answered for that slug: a slug no board goes by is `404`, a board
 that is down, slow or malformed is `502`, and a slug that is already watched is
 `409`. `GET /watchlist` lists every company with its slug, its source and its
-active state, `PATCH /watchlist/{id}` renames one and switches whether its board
-is polled, and `DELETE /watchlist/{id}` removes one.
+active state, `PATCH /watchlist/{id}` renames one, points it at a corrected board
+and switches whether its board is polled, and `DELETE /watchlist/{id}` removes
+one.
 
-`PATCH` is the one route here that asks no board, and it writes nothing but a
-label and a boolean. A company's `source` is fixed once written: a body naming it
-answers `422` with the rule spelled out below and writes nothing, because a
-posting is identified by `(company_id, external_id)` (#6), `posting` carries no
-source, so one board's payload would decide the other board's rows -- the way to
-move a company is to add the same slug on the other source (which this route's
-`POST` accepts) and then deactivate or delete this one. The board `slug` is not
-editable on this path either, refused as an unknown field, and that rule is #60's
-to state. `is_active: false` is the poll's switch and not a deletion: it takes the
-company out of `app.services.pipeline`'s walk and leaves the row, its postings and
-their matches exactly as they were.
+`PATCH` is where a company is renamed, pointed at another board or taken out of
+the poll. A company's `source` is fixed once written: a body naming it answers
+`422` with the rule spelled out below and writes nothing, because a posting is
+identified by `(company_id, external_id)` (#6), `posting` carries no source, so
+one board's payload would decide the other board's rows -- the way to move a
+company to another source is to add the same slug on that source (which this
+route's `POST` accepts) and then deactivate or delete this one. A moved `slug` is
+the one edit here that asks a board: it is probed through the row's own stored
+`source`, and only when the normalised candidate differs from the spelling the row
+holds. The old board's open postings are closed exactly once, in the same
+transaction as the new slug, and the validator the old board left is cleared --
+left open they are what the shrink guard measures the new board against, and
+deleting them would destroy the `match` rows through the cascade. A repeated body
+closes nothing, because the close belongs to the move. `is_active: false` is the
+poll's switch and not a deletion: it takes the company out of
+`app.services.pipeline`'s walk and leaves the row, its postings and their matches
+exactly as they were.
 
 The probe is a validity check and nothing more. #6 is where a board's postings
 are stored and deduped, and #9 is where the tick calls the source for real; this
 route drops what the probe returns and writes no `posting` row.
 
 Two things decide the shape of this module. The source is reached through
-`get_source()`, one zero-argument provider the `POST` route takes with `Depends`,
-returning the mapping from a stored source name to its adapter: the suite replaces
-it with `app.dependency_overrides[get_source]` and no test in this module opens a
-socket. And every write goes through the `Company(...)` constructor rather than
-the table, because that is what runs the model's slug normaliser -- `"  ACME  "`
-is probed and stored as `"acme"`, so it collides with the row already holding it,
-and the unique index refuses the duplicate under the write. The `IntegrityError`
-that comes back is the `409`; no check in Python is what keeps one row per slug.
+`get_source()`, one zero-argument provider the `POST` and `PATCH` routes take with
+`Depends`, returning the mapping from a stored source name to its adapter: the
+suite replaces it with `app.dependency_overrides[get_source]` and no test in this
+module opens a socket. And a slug goes through the model's one normaliser -- `POST`
+through the `Company(...)` constructor, `PATCH` by assigning the candidate to the
+loaded row and reading it back -- so `"  ACME  "` is probed and stored as
+`"acme"`, colliding with the row already holding it, and the unique index refuses
+the duplicate under the write. The `IntegrityError` that comes back is the `409`;
+no check in Python is what keeps one row per slug.
 
 This module knows nothing about a source's payload: no key name and no URL of one
 appears here, and the family of failures it distinguishes is the shared one.
@@ -40,15 +48,17 @@ appears here, and the family of failures it distinguishes is the shared one.
 
 import unicodedata
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app import db
-from app.models import Company
+from app.models import Company, Posting
 from app.sources import SOURCES
 from app.sources.base import Source, SourceError, UnknownSlug
 
@@ -81,9 +91,9 @@ class CompanyCreate(BaseModel):
 
 
 class CompanyUpdate(BaseModel):
-    """Body of an edit: the label to show, the poll state, or both, and nothing else.
+    """Body of an edit: the label to show, the poll state, the board slug, or a combination.
 
-    Both fields are optional and at least one of them has to be supplied: `{}`
+    Every field is optional and at least one of them has to be supplied: `{}`
     is a request that says nothing, and answering it `200` would report a write
     that did not happen. `name` is a label stored exactly as it arrived, refused
     when it is blank (`CompanyCreate._not_blank`'s rule), carries a control
@@ -98,9 +108,12 @@ class CompanyUpdate(BaseModel):
     `source` is declared here and `null` means "not supplied", the way `name`
     does -- a body naming only `source` is a body that names a field, so the
     validator below lets it through and the *route* answers the rule it breaks,
-    in words an `extra="forbid"` refusal cannot carry. `slug` stays refused as
-    an unknown field (#60 owns the slug rule), and nothing clears a field:
-    `name` is a `NOT NULL` column and `is_active` is the whole of "is it polled".
+    in words an `extra="forbid"` refusal cannot carry. `slug` is the board to
+    point the company at (#60): normalised by `app.models.Company` and probed
+    through the row's own source by the route. A blank one is refused here, and
+    the value carries no length bound, mirroring `CompanyCreate.slug`. Nothing
+    clears a field: `name` is a `NOT NULL` column and `is_active` is the whole of
+    "is it polled".
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -111,11 +124,16 @@ class CompanyUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=255)
     is_active: Literal[True, False] | None = None
     source: Literal["greenhouse", "lever"] | None = None
+    slug: str | None = None
 
-    @field_validator("name")
+    @field_validator("name", "slug")
     @classmethod
     def _not_blank(cls, value: str | None) -> str | None:
-        """Refuse a blank label as a body this route cannot use: a name is what a person reads."""
+        """Refuse a blank label or slug as a body this route cannot use.
+
+        A value that could never name a board is a `422` and not a `404`: no
+        source is asked about a slug that is only whitespace.
+        """
         if value is not None and not value.strip():
             raise ValueError("must not be blank")
         return value
@@ -142,8 +160,15 @@ class CompanyUpdate(BaseModel):
         it: the refusal is the route's to state, with the rule attached, and this
         validator would otherwise answer a pydantic message instead.
         """
-        if self.name is None and self.is_active is None and self.source is None:
-            raise ValueError("must carry a name, an is_active, a source, or a combination")
+        if (
+            self.name is None
+            and self.is_active is None
+            and self.source is None
+            and self.slug is None
+        ):
+            raise ValueError(
+                "must carry a name, an is_active, a source, a slug, or a combination"
+            )
         return self
 
 
@@ -191,7 +216,12 @@ CREATE_RESPONSES = (
     | UNUSABLE_REQUEST_RESPONSE
     | UNREADABLE_BOARD_RESPONSE
 )
-UPDATE_RESPONSES = NOT_FOUND_RESPONSE | UNUSABLE_REQUEST_RESPONSE
+UPDATE_RESPONSES = (
+    NOT_FOUND_RESPONSE
+    | DUPLICATE_RESPONSE
+    | UNUSABLE_REQUEST_RESPONSE
+    | UNREADABLE_BOARD_RESPONSE
+)
 DELETE_RESPONSES = NOT_FOUND_RESPONSE | UNUSABLE_REQUEST_RESPONSE
 
 
@@ -239,6 +269,24 @@ def _probe(source: Source, slug: str) -> None:
         raise HTTPException(
             status_code=502, detail=f"The board '{slug}' could not be read"
         ) from unreadable
+
+
+def _close_postings(session: Session, company_id: int) -> None:
+    """Close every open posting of that company at one instant, in this transaction.
+
+    The old board's rows are the state this route moves the company away from:
+    left open they are what `_refuse_shrunk_board` measures the new board against,
+    and deleted they would take their `match` rows with them through the cascade.
+    So they are closed -- one shared timestamp, written only where `closed_at IS
+    NULL`, so a row the board had already closed keeps its own -- and nothing is
+    deleted and no `match` row moves. The ORM's `onupdate` re-stamps `updated_at`
+    on the rows this closes, the way any close already does today.
+    """
+    closed_at = datetime.now(UTC)
+    for posting in session.scalars(
+        select(Posting).where(Posting.company_id == company_id, Posting.closed_at.is_(None))
+    ):
+        posting.closed_at = closed_at
 
 
 @router.get(
@@ -301,20 +349,37 @@ def add_company(
     summary="Rename a watched company, or take it out of the poll",
     responses=UPDATE_RESPONSES,
 )
-def update_company(id: int, body: CompanyUpdate) -> WatchedCompany:
+def update_company(
+    id: int,
+    body: CompanyUpdate,
+    sources: Annotated[Mapping[str, Source], Depends(get_source)],
+) -> WatchedCompany:
     """Write the fields the body names on that company, and answer as `GET /watchlist` renders it.
 
     The id is a path parameter and an `int`: a value that is not one never reaches
     this function and is refused by the path's own validation as `422`, and an id
     that finds no row is a `404` that writes nothing. A body naming `source` is
     refused first and in full: `SOURCE_IS_FIXED` says what is wrong and what to do
-    instead, and neither the row nor any other table is touched. No board is asked
-    on this path, so this route answers no `409` and no `502` either.
+    instead, and neither the row nor any other table is touched, whether or not the
+    body also names a `slug`.
+
+    A `slug` points the company at a corrected board. The candidate goes through
+    the model's normaliser, and a spelling equal to the row's own is no move at
+    all: no board is asked, nothing is closed and the answer is the ordinary
+    write. A move is probed through the row's own stored `source` -- `404` when no
+    board goes by that name, `502` when it cannot be read -- and a pair another
+    company holds on that source is the `409` the unique key raises under the
+    flush. Every refusal precedes the close, so a refused request writes no field
+    and closes nothing. The move clears the validator the old board left and closes
+    every open posting of that company exactly once, in the same transaction as
+    the slug, so nothing is left open against a board this app no longer watches.
 
     `is_active: false` takes the company out of the tick's walk and is not a
     deletion: the row, its postings and their matches stay untouched, and
-    `GET /watchlist` keeps listing the company as inactive. Sending the same body
-    again is the same answer twice, and no request here creates a row.
+    `GET /watchlist` keeps listing the company as inactive. `is_active` gates
+    nothing here, so a slug change on a deactivated company is an ordinary write.
+    Sending the same body again is the same answer twice, and no request here
+    creates a row.
     """
     if body.source is not None:
         raise HTTPException(status_code=422, detail=SOURCE_IS_FIXED)
@@ -328,6 +393,31 @@ def update_company(id: int, body: CompanyUpdate) -> WatchedCompany:
             company.name = body.name
         if body.is_active is not None:
             company.is_active = body.is_active
+        if body.slug is not None:
+            stored_slug = company.slug
+            # The model's one normaliser runs on the assignment, so the probe asks
+            # about exactly the spelling that would be stored.
+            company.slug = body.slug
+            candidate = company.slug
+            if candidate != stored_slug:
+                source_name = company.source
+                _probe(sources[source_name], candidate)
+                try:
+                    session.flush()  # the unique key's verdict on the new pair
+                except IntegrityError as duplicate:
+                    # Read the locals, not the row: a failed flush expires the instance.
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"The slug '{candidate}' is already watched on"
+                            f" {source_name}"
+                        ),
+                    ) from duplicate
+                # The old board's validator is the old board's answer: sent to the
+                # new board it asks a conditional question that board never answered.
+                company.etag = None
+                company.last_modified = None
+                _close_postings(session, company.id)
         session.flush()
         return _watched(company)  # read before the commit expires it
 

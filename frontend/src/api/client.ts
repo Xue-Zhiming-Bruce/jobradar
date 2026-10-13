@@ -24,6 +24,18 @@ export type CompanyCreate = {
   source?: CompanySource
 }
 
+/**
+ * Body of an edit: `CompanyUpdate` in `backend/openapi.json`, all four optional
+ * and `source` still refused by the route. Nothing sends it yet: the screen that
+ * renames or moves a company is `#61`.
+ */
+export type CompanyUpdate = {
+  name?: string
+  is_active?: boolean
+  source?: CompanySource
+  slug?: string
+}
+
 /** Which resume is now the active one, as the UI reads it. */
 export type ResumeUploaded = {
   id: number

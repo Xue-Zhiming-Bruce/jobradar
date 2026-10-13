@@ -322,7 +322,7 @@
           "watchlist"
         ],
         "summary": "Rename a watched company, or take it out of the poll",
-        "description": "Write the fields the body names on that company, and answer as `GET /watchlist` renders it.\n\nThe id is a path parameter and an `int`: a value that is not one never reaches\nthis function and is refused by the path's own validation as `422`, and an id\nthat finds no row is a `404` that writes nothing. A body naming `source` is\nrefused first and in full: `SOURCE_IS_FIXED` says what is wrong and what to do\ninstead, and neither the row nor any other table is touched. No board is asked\non this path, so this route answers no `409` and no `502` either.\n\n`is_active: false` takes the company out of the tick's walk and is not a\ndeletion: the row, its postings and their matches stay untouched, and\n`GET /watchlist` keeps listing the company as inactive. Sending the same body\nagain is the same answer twice, and no request here creates a row.",
+        "description": "Write the fields the body names on that company, and answer as `GET /watchlist` renders it.\n\nThe id is a path parameter and an `int`: a value that is not one never reaches\nthis function and is refused by the path's own validation as `422`, and an id\nthat finds no row is a `404` that writes nothing. A body naming `source` is\nrefused first and in full: `SOURCE_IS_FIXED` says what is wrong and what to do\ninstead, and neither the row nor any other table is touched, whether or not the\nbody also names a `slug`.\n\nA `slug` points the company at a corrected board. The candidate goes through\nthe model's normaliser, and a spelling equal to the row's own is no move at\nall: no board is asked, nothing is closed and the answer is the ordinary\nwrite. A move is probed through the row's own stored `source` -- `404` when no\nboard goes by that name, `502` when it cannot be read -- and a pair another\ncompany holds on that source is the `409` the unique key raises under the\nflush. Every refusal precedes the close, so a refused request writes no field\nand closes nothing. The move clears the validator the old board left and closes\nevery open posting of that company exactly once, in the same transaction as\nthe slug, so nothing is left open against a board this app no longer watches.\n\n`is_active: false` takes the company out of the tick's walk and is not a\ndeletion: the row, its postings and their matches stay untouched, and\n`GET /watchlist` keeps listing the company as inactive. `is_active` gates\nnothing here, so a slug change on a deactivated company is an ordinary write.\nSending the same body again is the same answer twice, and no request here\ncreates a row.",
         "operationId": "update_company_watchlist__id__patch",
         "parameters": [
           {
@@ -359,8 +359,14 @@
           "404": {
             "description": "No board goes by that slug, or no company has that id"
           },
+          "409": {
+            "description": "That slug is already watched on that source"
+          },
           "422": {
             "description": "The body, or the path, is not something this route can use"
+          },
+          "502": {
+            "description": "The board could not be read: it is down, slow or malformed"
           }
         }
       },
@@ -714,12 +720,23 @@
               }
             ],
             "title": "Source"
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slug"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "title": "CompanyUpdate",
-        "description": "Body of an edit: the label to show, the poll state, or both, and nothing else.\n\nBoth fields are optional and at least one of them has to be supplied: `{}`\nis a request that says nothing, and answering it `200` would report a write\nthat did not happen. `name` is a label stored exactly as it arrived, refused\nwhen it is blank (`CompanyCreate._not_blank`'s rule), carries a control\ncharacter, or is longer than the 255 characters `company.name` holds -- the\nlast two are the column's own refusals, and answering them here makes them\nthe `422` this route owes instead of the `500` PostgreSQL's driver answers.\nNo normaliser runs on it, because the one in `app.models` touches `slug`.\n`is_active` is a `Literal` of the two booleans, so `\"false\"` is refused\nrather than read as one: whether a board is polled is a state and not a\ntruthy string.\n\n`source` is declared here and `null` means \"not supplied\", the way `name`\ndoes -- a body naming only `source` is a body that names a field, so the\nvalidator below lets it through and the *route* answers the rule it breaks,\nin words an `extra=\"forbid\"` refusal cannot carry. `slug` stays refused as\nan unknown field (#60 owns the slug rule), and nothing clears a field:\n`name` is a `NOT NULL` column and `is_active` is the whole of \"is it polled\"."
+        "description": "Body of an edit: the label to show, the poll state, the board slug, or a combination.\n\nEvery field is optional and at least one of them has to be supplied: `{}`\nis a request that says nothing, and answering it `200` would report a write\nthat did not happen. `name` is a label stored exactly as it arrived, refused\nwhen it is blank (`CompanyCreate._not_blank`'s rule), carries a control\ncharacter, or is longer than the 255 characters `company.name` holds -- the\nlast two are the column's own refusals, and answering them here makes them\nthe `422` this route owes instead of the `500` PostgreSQL's driver answers.\nNo normaliser runs on it, because the one in `app.models` touches `slug`.\n`is_active` is a `Literal` of the two booleans, so `\"false\"` is refused\nrather than read as one: whether a board is polled is a state and not a\ntruthy string.\n\n`source` is declared here and `null` means \"not supplied\", the way `name`\ndoes -- a body naming only `source` is a body that names a field, so the\nvalidator below lets it through and the *route* answers the rule it breaks,\nin words an `extra=\"forbid\"` refusal cannot carry. `slug` is the board to\npoint the company at (#60): normalised by `app.models.Company` and probed\nthrough the row's own source by the route. A blank one is refused here, and\nthe value carries no length bound, mirroring `CompanyCreate.slug`. Nothing\nclears a field: `name` is a `NOT NULL` column and `is_active` is the whole of\n\"is it polled\"."
       },
       "HTTPValidationError": {
         "properties": {
