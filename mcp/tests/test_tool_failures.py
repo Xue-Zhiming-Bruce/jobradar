@@ -2,8 +2,10 @@
 
 Nothing here starts a server: each refusal is a body the fake transport serves, so
 what these cases cover is the app's own statuses -- `404`, `409`, `422`, `502`,
-`401` -- plus one nothing in the app answers, one body that is not JSON, and an
-app that is not listening. Every one of them is asserted to be an anticipated
+`401`, `500` -- plus one nothing in the app answers, one body that is not JSON, an
+app that is not listening, and the two writes' refusals: an id that finds no row,
+an unexpected status, and the one verdict the tool's own schema keeps from the app
+(`new`) with no request made at all. Every one of them is asserted to be an anticipated
 `ToolError` -- `isError` on the wire -- rather than the `UnexpectedToolError` the
 SDK wraps an unhandled exception in.
 """
@@ -31,6 +33,17 @@ BOARD_UNREADABLE = {"detail": "The board 'acme' could not be read"}
 WRONG_SECRET = {"detail": "The X-Tick-Secret header is missing, empty or wrong"}
 RUN_IN_PROGRESS = {"detail": "A run is already in progress in this process"}
 NO_SUCH_RUN = {"detail": "There is no run with id 9"}
+NO_SUCH_COMPANY = {"detail": "There is no watched company with id 9"}
+NO_SUCH_MATCH = {"detail": "There is no match with id 9"}
+UNUSABLE_VERDICT = {
+    "detail": [
+        {
+            "type": "literal_error",
+            "loc": ["body", "state"],
+            "msg": "Input should be 'saved' or 'dismissed'",
+        }
+    ]
+}
 
 
 @pytest.mark.parametrize(
@@ -95,6 +108,64 @@ def test_an_unexpected_status_is_an_error_naming_the_status(server: MCPServer, f
     error = tool_error(server, "list_matches", {})
 
     assert "503" in str(error)
+
+
+def test_remove_company_names_the_id_that_found_no_row(server: MCPServer, fake_app: FakeApp) -> None:
+    """The app's own `404` detail reaches the caller, and no confirmation is invented on a refusal."""
+    fake_app.answers("DELETE", "/watchlist/9", status=404, body=NO_SUCH_COMPANY)
+
+    error = tool_error(server, "remove_company", {"company_id": 9})
+
+    assert NO_SUCH_COMPANY["detail"] in str(error)
+    assert "9" in str(error)
+    assert "removed" not in str(error)  # nothing the route did not say
+    assert fake_app.sent == [("DELETE", "/watchlist/9")]
+
+
+def test_remove_company_answers_an_unexpected_status_as_an_error_naming_it(
+    server: MCPServer, fake_app: FakeApp
+) -> None:
+    """A `500` is a tool error naming the status, never a raw `httpx2` exception and never a success."""
+    fake_app.answers("DELETE", "/watchlist/9", status=500, text="<html>500 Internal Server Error</html>")
+
+    error = tool_error(server, "remove_company", {"company_id": 9})
+
+    assert "500" in str(error)
+    assert fake_app.sent == [("DELETE", "/watchlist/9")]
+
+
+def test_set_match_state_names_the_id_that_found_no_row(server: MCPServer, fake_app: FakeApp) -> None:
+    """An id nobody holds is the app's `404`, and the id is what the caller reads."""
+    fake_app.answers("PATCH", "/matches/9", status=404, body=NO_SUCH_MATCH)
+
+    error = tool_error(server, "set_match_state", {"match_id": 9, "state": "saved"})
+
+    assert NO_SUCH_MATCH["detail"] in str(error)
+    assert fake_app.sent == [("PATCH", "/matches/9")]
+
+
+def test_new_is_refused_by_the_tool_schema_and_never_reaches_the_app(
+    server: MCPServer, fake_app: FakeApp
+) -> None:
+    """The schema takes the two verdicts and no third: `new` is an error with no request behind it."""
+    error = tool_error(server, "set_match_state", {"match_id": 1, "state": "new"})
+
+    assert "saved" in str(error) and "dismissed" in str(error)
+    assert fake_app.requests == []
+
+
+def test_a_verdict_the_app_refuses_for_another_reason_is_the_apps_own_detail(
+    server: MCPServer, fake_app: FakeApp
+) -> None:
+    """The app's own `422` is a tool error carrying its `detail`, not a silent write."""
+    fake_app.answers("PATCH", "/matches/9", status=422, body=UNUSABLE_VERDICT)
+
+    error = tool_error(server, "set_match_state", {"match_id": 9, "state": "dismissed"})
+
+    assert "state" in str(error)
+    assert "Input should be 'saved' or 'dismissed'" in str(error)
+    assert "422" in str(error)
+    assert fake_app.sent == [("PATCH", "/matches/9")]
 
 
 def test_a_body_that_is_not_json_is_an_error_naming_the_status(

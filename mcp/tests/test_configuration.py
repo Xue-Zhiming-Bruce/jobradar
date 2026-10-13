@@ -148,6 +148,22 @@ def test_the_reads_still_answer_with_only_the_secret_unset(
     assert rows(call(server, "list_matches", {})) == []
 
 
+def test_the_writes_still_answer_with_only_the_secret_unset(
+    server: MCPServer, fake_app: FakeApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The secret is the tick's alone: neither write needs it, and neither sends it."""
+    monkeypatch.delenv(TICK_SECRET_VARIABLE)
+    fake_app.answers("DELETE", "/watchlist/2", status=204)
+    fake_app.answers("PATCH", "/matches/11", body={"id": 11, "state": "saved"})
+
+    assert answered(call(server, "remove_company", {"company_id": 2})) == {"id": 2, "removed": True}
+    assert answered(call(server, "set_match_state", {"match_id": 11, "state": "saved"})) == {
+        "id": 11,
+        "state": "saved",
+    }
+    assert all(TICK_SECRET not in request.headers for request in fake_app.requests)
+
+
 def test_the_secret_never_reaches_a_result_or_an_error(
     server: MCPServer, fake_app: FakeApp
 ) -> None:

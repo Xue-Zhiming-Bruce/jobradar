@@ -13,11 +13,20 @@ import re
 from itertools import takewhile
 from pathlib import Path
 
+import pytest
 from mcp.server.mcpserver import MCPServer
 
 from tests.support import TOOL_NAMES, TICK_SECRET, FakeApp, answered, call, listed_tools, rows
 
 README = Path(__file__).resolve().parents[2] / "README.md"
+CONTRACT = Path(__file__).resolve().parents[2] / "backend" / "openapi.json"
+
+# The app's own `MatchSummary` shape, its field names read from the committed
+# contract rather than spelled here: the write tool hands back a body the app
+# sent, so the shape under test is the app's, not this file's opinion of it.
+MATCH_FIELDS = tuple(
+    json.loads(CONTRACT.read_text())["components"]["schemas"]["MatchSummary"]["properties"]
+)
 
 # The seven tools, and the input schema the SDK builds from each function: the
 # argument names, their JSON types and which of them are required. A renamed,
@@ -125,6 +134,19 @@ STARTED_RUN = {
     "error": None,
     "postings_seen": 0,
     "matches_created": 0,
+}
+# The row `PATCH /matches/{id}` answers: the app's own shape, in its own order.
+SAVED_ROW = {
+    "id": 11,
+    "company_name": "Acme",
+    "title": "Backend Engineer",
+    "url": "https://boards.greenhouse.io/acme/jobs/1",
+    "score": 88,
+    "reason": "Python and PostgreSQL throughout",
+    "gaps": ["Kubernetes"],
+    "state": "saved",
+    "outcome": "scored",
+    "created_at": "2026-10-13T09:00:00Z",
 }
 ENDED_RUNS = [
     STARTED_RUN,
@@ -255,3 +277,32 @@ def test_get_run_answers_that_row_however_it_ended(server: MCPServer, fake_app: 
 
         assert answered(result) == row
     assert fake_app.sent == [("GET", "/runs/3")] * len(ENDED_RUNS)
+
+
+def test_remove_company_sends_the_delete_the_app_serves_and_confirms_the_id_it_was_given(
+    server: MCPServer, fake_app: FakeApp
+) -> None:
+    """One `DELETE`, the id in the path, and the confirmation built here: the route answers no body."""
+    fake_app.answers("DELETE", "/watchlist/9", status=204)
+
+    result = call(server, "remove_company", {"company_id": 9})
+
+    assert answered(result) == {"id": 9, "removed": True}
+    assert result.is_error is False
+    assert fake_app.sent == [("DELETE", "/watchlist/9")]
+    assert fake_app.requests[0].content == b""  # nothing to send: the id is the whole request
+
+
+@pytest.mark.parametrize("state", ["saved", "dismissed"])
+def test_set_match_state_sends_only_the_verdict_and_answers_the_apps_own_row(
+    server: MCPServer, fake_app: FakeApp, state: str
+) -> None:
+    """The body is `state` alone, and the answer is the app's row: the contract's fields, unchanged."""
+    fake_app.answers("PATCH", "/matches/11", body=SAVED_ROW)
+
+    result = call(server, "set_match_state", {"match_id": 11, "state": state})
+
+    assert tuple(answered(result)) == MATCH_FIELDS  # the committed contract's own field list
+    assert answered(result) == SAVED_ROW
+    assert fake_app.sent == [("PATCH", "/matches/11")]
+    assert json.loads(fake_app.requests[0].content) == {"state": state}
