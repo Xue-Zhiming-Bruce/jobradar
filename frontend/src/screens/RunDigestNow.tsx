@@ -32,6 +32,11 @@ export default function RunDigestNow() {
   // `running` can already carry a failed board, and it is answered as-is.
   const failedBoards = run?.companyOutcomes.filter((board) => board.outcome === 'failed') ?? []
 
+  // The companies the board-call budget left for a later run. The walk writes it
+  // during a run, so a still-`running` row can carry it: no branch on `status`.
+  // 0 is contract-legal but never written -- the walk only records a stop.
+  const notFetched = run?.companiesNotFetched ?? 0
+
   useEffect(() => {
     if (!polling || id === undefined) return
     const timer = setInterval(() => {
@@ -59,6 +64,12 @@ export default function RunDigestNow() {
         ) : (
           <p>Digest running...</p>
         ))}
+      {notFetched > 0 && (
+        <p>
+          {notFetched} {notFetched === 1 ? 'company was' : 'companies were'} not fetched: the
+          run's request budget was reached.
+        </p>
+      )}
       {failedBoards.length > 0 && (
         <>
           <p>Boards the run could not fetch:</p>

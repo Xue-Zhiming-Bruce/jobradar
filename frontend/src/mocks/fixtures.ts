@@ -48,6 +48,38 @@ export const runSucceeded = {
   ],
 }
 
+/** A run the board-call budget stopped before it reached every active company (#56). */
+export const runBudgetStopped = {
+  ...runSucceeded,
+  companies_not_fetched: 3,
+}
+
+/** One company short, so the sentence's singular is exercised. */
+export const runBudgetStoppedOne = {
+  ...runSucceeded,
+  companies_not_fetched: 1,
+}
+
+/** Still running: `_record_not_fetched` wrote the count before scoring and the digest. */
+export const runBudgetStoppedRunning = {
+  ...runSummary,
+  companies_not_fetched: 3,
+}
+
+/** A run that failed after the budget stopped it: both facts are on the wire. */
+export const runBudgetStoppedFailed = {
+  ...runSummary,
+  status: 'failed',
+  error: 'Greenhouse timed out',
+  companies_not_fetched: 3,
+}
+
+/** 0 is contract-legal but never written, so the guard must not print it (#72 AC7). */
+export const runBudgetStoppedZero = {
+  ...runSucceeded,
+  companies_not_fetched: 0,
+}
+
 // One row per state, newest first, so a test can tell all three treatments apart:
 // a `new` row is worth a verdict, a `saved` or `dismissed` one already has it.
 // The score-0 row is a real row the screen shows like any other -- `#12` filters

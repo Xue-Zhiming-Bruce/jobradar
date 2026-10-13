@@ -1,8 +1,8 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse, type JsonBodyType } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { server } from '../mocks/server'
-import { runSummary, runSucceeded } from '../mocks/fixtures'
+import { runSummary, runSucceeded, runBudgetStopped, runBudgetStoppedOne, runBudgetStoppedRunning, runBudgetStoppedFailed, runBudgetStoppedZero } from '../mocks/fixtures'
 import RunDigestNow from './RunDigestNow'
 
 afterEach(() => {
@@ -222,5 +222,102 @@ describe('the run digest now button', () => {
     expect(reads).toEqual([])
     expect(spies.flatMap((spy) => spy.mock.calls)).toEqual([])
     spies.forEach((spy) => spy.mockRestore())
+  })
+})
+
+/** One test per case in #72's AC1-AC7: the run row is always read from a fixture. */
+describe('the budget-stopped line', () => {
+  /** Test helper: installs the fake clock, then answers the tick with the fresh row and the read with `row`. */
+  function useRunReads(row: JsonBodyType) {
+    useTestClock()
+    server.use(
+      http.post('/internal/tick', () => HttpResponse.json(runSummary, { status: 202 })),
+      http.get('/runs/:id', () => HttpResponse.json(row)),
+    )
+  }
+
+  it('names the companies the budget stopped the walk from fetching (AC1)', async () => {
+    useRunReads(runBudgetStopped)
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    expect(
+      screen.getByText("3 companies were not fetched: the run's request budget was reached."),
+    ).toBeDefined()
+  })
+
+  it('says "1 company was", never "1 companies" (AC2)', async () => {
+    useRunReads(runBudgetStoppedOne)
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    expect(
+      screen.getByText("1 company was not fetched: the run's request budget was reached."),
+    ).toBeDefined()
+  })
+
+  it('adds the sentence beside "Digest finished", replacing neither (AC3)', async () => {
+    useRunReads(runBudgetStopped)
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    expect(screen.getByText('Digest finished: 4 matches created.')).toBeDefined()
+    expect(
+      screen.getByText("3 companies were not fetched: the run's request budget was reached."),
+    ).toBeDefined()
+  })
+
+  it('renders the sentence while the row is still running (AC4)', async () => {
+    useRunReads(runBudgetStoppedRunning)
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    expect(screen.getByText('Digest running...')).toBeDefined()
+    expect(
+      screen.getByText("3 companies were not fetched: the run's request budget was reached."),
+    ).toBeDefined()
+  })
+
+  it('renders the sentence next to a failed run\'s error (AC5)', async () => {
+    useRunReads(runBudgetStoppedFailed)
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    expect(screen.getByText('Digest failed: Greenhouse timed out')).toBeDefined()
+    expect(
+      screen.getByText("3 companies were not fetched: the run's request budget was reached."),
+    ).toBeDefined()
+  })
+
+  it('renders no sentence for a null count (AC6)', async () => {
+    useRunReads(runSucceeded)
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    expect(screen.getByText('Digest finished: 4 matches created.')).toBeDefined()
+    expect(screen.queryByText(/not fetched/)).toBeNull()
+  })
+
+  it('renders no sentence for a count of 0 (AC7)', async () => {
+    useRunReads(runBudgetStoppedZero)
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    expect(screen.getByText('Digest finished: 4 matches created.')).toBeDefined()
+    expect(screen.queryByText(/not fetched/)).toBeNull()
   })
 })
