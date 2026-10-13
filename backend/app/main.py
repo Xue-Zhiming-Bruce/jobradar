@@ -31,7 +31,7 @@ from app.db import init_db
 from app.routes.internal import router as internal_router
 from app.routes.matches import router as matches_router
 from app.routes.resume import router as resume_router
-from app.routes.runs import router as runs_router
+from app.routes.runs import reap_stale_runs, router as runs_router
 from app.routes.watchlist import router as watchlist_router
 
 API_TITLE = "JobRadar API"
@@ -58,8 +58,16 @@ class Health(BaseModel):
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Create the missing tables when the app starts, and do nothing else."""
+    """Create the missing tables, finish the runs a dead process left behind, and serve.
+
+    The reap comes after `init_db()`, because the table it writes has to exist,
+    and before the yield, because it is what makes "no `run` row reads `running`"
+    true of every request this process will answer: a tick's guard is the
+    process's own, so a `running` row found here is a row no process is running.
+    One reap per process start, and no other startup work.
+    """
     init_db()
+    reap_stale_runs()
     yield
 
 
