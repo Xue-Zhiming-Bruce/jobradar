@@ -144,7 +144,9 @@ def _rejection(rejected: resume_service.ResumeRejected) -> HTTPException:
 # the scan's own: the model key that is missing, and the call or the answer that
 # failed.
 REFUSAL_RESPONSES = {
-    413: {"description": "The upload is larger than the configured limit"},
+    413: {
+        "description": "The upload is larger than the configured limit, in bytes or in page images"
+    },
     415: {"description": "The declared type, or the bytes, are not a readable resume"},
     422: {"description": "The upload is corrupt, carries no text, or is not a named file part"},
     502: {
