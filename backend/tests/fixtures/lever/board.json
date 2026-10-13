@@ -1,32 +1,31 @@
 [
   {
-    "id": "b4d1f0a2-6c34-4e77-9a10-3f2c5e8d9b01",
-    "text": "Senior Backend Engineer",
-    "hostedUrl": "https://jobs.lever.co/leverdemo/b4d1f0a2-6c34-4e77-9a10-3f2c5e8d9b01",
+    "id": "5243ea1b-f2c0-4f43-8f02-a5dbb97e24cb",
+    "text": "Staff Accountant",
+    "hostedUrl": "https://jobs.lever.co/leverdemo/5243ea1b-f2c0-4f43-8f02-a5dbb97e24cb",
     "categories": {
-      "location": "Remote, EU",
-      "team": "Engineering",
-      "commitment": "Full-time"
+      "location": "New York, New York"
     },
-    "descriptionPlain": "We are looking for a backend engineer to own the services behind our product end to end.",
+    "descriptionPlain": "Welcome to the Demo Job Listing for Lever! This is a fictional job created solely for demonstration purposes and is not an actual open position. We’ve crafted this listing to showcase the functionality of our ATS platform, including job descriptions, application processes, and more.\n\nWhile you can explore the application process and features here, please note that applications submitted to this job will not be reviewed or responded to as it’s for demonstration only. \n\n\nThe Staff Accountant position requires candidates capable of fulfilling a broad range of duties and responsibilities, such as helping small businesses maintain accounting best practices. \n",
     "lists": [
       {
-        "text": "What you will do",
-        "content": "<div><p>Design, build and operate backend services.</p><p>Review designs and mentor other engineers.</p></div>"
+        "text": "Duties and Responsibilities include:",
+        "content": "<li>Planning, implementing and supervising the company’s financial strategy</li><li>Managing the company’s financial accounts, payroll, budget, cash receipts and financial assets</li><li>Handling the company’s transactions and debts and doing cash flow forecasting</li><li>Performing the company’s&nbsp;<a rel=\"noopener noreferrer\" class=\"postings-link\" href=\"https://www.indeed.com/hire/how-to-hire/internal-auditor?co=US\">financial audits</a></li><li>Following proper accounting procedures to reach financial objectives</li><li>Monitoring and analyzing financial accounting data</li><li>Creating financial reports based on data analysis</li><li>Making recommendations to business stakeholdersThis is an accounting role... </li>"
       },
       {
-        "text": "What we look for",
-        "content": "<div><p>Several years building production systems.</p><p>Strong Python and SQL.</p></div>"
+        "text": "Skills",
+        "content": "<li>Great interpersonal and verbal communication skills</li><li>Sound knowledge of accounting principles, standards and regulations</li><li>Experience with accounting software and databases</li><li>Superior data management and data analysis skills</li><li>Strong&nbsp;<a rel=\"noopener noreferrer\" class=\"postings-link\" href=\"https://www.indeed.com/hire/c/info/pomodoro-technique-time-management-for-managers-and-their-employees?co=US\">time management</a>&nbsp;and organizational skills</li><li>Detail-oriented with a passion for accuracy</li><li>Work experience as an Accounting Manager or Finance Manager,&nbsp;preferably 2 or more years</li>"
       }
     ]
   },
   {
-    "id": "c7e2a9b3-4d56-4f88-8b21-6a3d9c0e5f42",
-    "text": "Platform Engineer",
-    "hostedUrl": "https://jobs.lever.co/leverdemo/c7e2a9b3-4d56-4f88-8b21-6a3d9c0e5f42",
+    "id": "93db84be-2f79-4264-b521-510409fd0225",
+    "text": "Stephanie Test Posting A",
+    "hostedUrl": "https://jobs.lever.co/leverdemo/93db84be-2f79-4264-b521-510409fd0225",
     "categories": {
-      "team": "Infrastructure"
+      "location": "Baltimore, MD"
     },
-    "descriptionPlain": "Build and run the infrastructure our product depends on, on and off call."
+    "descriptionPlain": "Welcome to the Demo Job Listing for Lever! This is a fictional job created solely for demonstration purposes and is not an actual open position. We’ve crafted this listing to showcase the functionality of our ATS platform, including job descriptions, application processes, and more.\n\nWhile you can explore the application process and features here, please note that applications submitted to this job will not be reviewed or responded to as it’s for demonstration only. \n",
+    "lists": []
   }
 ]

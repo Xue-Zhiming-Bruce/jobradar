@@ -2,12 +2,15 @@
 
 The endpoint under test is
 `GET https://api.lever.co/v0/postings/{slug}?mode=json`, recorded from the public
-API without a key on 2026-10-12. `board.json` is two postings of a live board
-trimmed to the fields the adapter reads -- id, text, hostedUrl, categories,
-descriptionPlain and lists, one posting with a `lists` block and one without --
-and the postings are public board content: no key, no secret and no personal
-data. The fixture's `hostedUrl` links to `jobs.lever.co` rather than to the API
-host, so a URL synthesised from the slug fails here.
+API without a key on 2026-10-13, from the demo board `leverdemo`. `board.json` is
+two postings of that live board -- `Staff Accountant`, which carries a `lists`
+block, and `Stephanie Test Posting A`, which carries none -- trimmed to the
+fields the adapter reads: id, text, hostedUrl, categories, descriptionPlain and
+lists. Every value in it is copied unedited from the recorded response. The
+postings are public board content: no key, no secret, no e-mail address and no
+phone number (the one digit run a naive scan finds is a slice of a posting's own
+UUID id). The fixture's `hostedUrl` links to `jobs.lever.co` rather than to the
+API host, so a URL synthesised from the slug fails here.
 
 Every test drives `fetch` through an injected `httpx2.MockTransport` whose
 handler serves the board URL -- and only that URL -- and every test runs with
@@ -39,9 +42,10 @@ BACKEND_ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "lever"
 BOARD_BODY = (FIXTURES / "board.json").read_bytes()
 
-# The slug and the URL every test but the slug gate uses, spelled out rather than
-# built from the module's own constant, so a moved endpoint fails here.
-SLUG = "acme"
+# The board the fixture was recorded from, and the URL every test but the slug
+# gate uses: spelled out rather than built from the module's own constant, so a
+# moved endpoint fails here.
+SLUG = "leverdemo"
 BOARD_URL = "https://api.lever.co/v0/postings/{slug}"
 
 # The key names the payload is known by, and the only files allowed to name them:
@@ -49,17 +53,54 @@ BOARD_URL = "https://api.lever.co/v0/postings/{slug}"
 # name neither source's payload.
 PAYLOAD_TERMS = ("api.lever.co", "hostedUrl", "descriptionPlain", "categories")
 
-# The description of the fixture's first posting, whole: its own plain text, then
-# each `lists` entry's heading and its `content` with the tags stripped, joined in
-# the order Lever sent them. Written out so a "read the wrong field" answer fails.
+# The description of each posting as the adapter owes it, whole: the posting's own
+# plain text, then each `lists` entry's heading and its `content` with the tags
+# stripped, joined in the order Lever sent them. Written out so a "read the wrong
+# field" answer fails.
 FIRST_DESCRIPTION = (
-    "We are looking for a backend engineer to own the services behind our product end to end."
-    "\n\nWhat you will do"
-    "\n\nDesign, build and operate backend services.Review designs and mentor other engineers."
-    "\n\nWhat we look for"
-    "\n\nSeveral years building production systems.Strong Python and SQL."
+    'Welcome to the Demo Job Listing for Lever! This is a fictional job created solely for'
+    ' demonstration purposes and is not an actual open position. We’ve crafted this listing to'
+    ' showcase the functionality of our ATS platform, including job descriptions, application'
+    ' processes, and more.\n'
+    '\n'
+    'While you can explore the application process and features here, please note that'
+    ' applications submitted to this job will not be reviewed or responded to as it’s for'
+    ' demonstration only. \n'
+    '\n'
+    '\n'
+    'The Staff Accountant position requires candidates capable of fulfilling a broad range of'
+    ' duties and responsibilities, such as helping small businesses\xa0maintain accounting best'
+    ' practices.\xa0\n'
+    '\n'
+    '\n'
+    'Duties and Responsibilities include:\n'
+    '\n'
+    'Planning, implementing and supervising the company’s financial strategyManaging the'
+    ' company’s financial accounts, payroll, budget, cash receipts and financial assetsHandling'
+    ' the company’s transactions and debts and doing cash flow forecastingPerforming the'
+    ' company’s\xa0financial auditsFollowing proper accounting procedures to reach financial'
+    ' objectivesMonitoring and analyzing financial accounting dataCreating financial reports'
+    ' based on data analysisMaking recommendations to business stakeholdersThis is an accounting'
+    ' role... \n'
+    '\n'
+    'Skills\n'
+    '\n'
+    'Great interpersonal and verbal communication skillsSound knowledge of accounting principles,'
+    ' standards and regulationsExperience with accounting software and databasesSuperior data'
+    ' management and data analysis skillsStrong\xa0time management\xa0and organizational'
+    ' skillsDetail-oriented with a passion for accuracyWork experience as an Accounting Manager'
+    ' or Finance Manager,\xa0preferably 2 or more years'
 )
-SECOND_DESCRIPTION = "Build and run the infrastructure our product depends on, on and off call."
+SECOND_DESCRIPTION = (
+    'Welcome to the Demo Job Listing for Lever! This is a fictional job created solely for'
+    ' demonstration purposes and is not an actual open position. We’ve crafted this listing to'
+    ' showcase the functionality of our ATS platform, including job descriptions, application'
+    ' processes, and more.\n'
+    '\n'
+    'While you can explore the application process and features here, please note that'
+    ' applications submitted to this job will not be reviewed or responded to as it’s for'
+    ' demonstration only. \n'
+)
 
 
 @pytest.fixture(autouse=True)
@@ -127,16 +168,16 @@ def test_every_field_of_each_posting_comes_from_the_payload() -> None:
         for posting in postings
     ] == [
         (
-            "b4d1f0a2-6c34-4e77-9a10-3f2c5e8d9b01",
-            "Senior Backend Engineer",
-            "Remote, EU",
-            "https://jobs.lever.co/leverdemo/b4d1f0a2-6c34-4e77-9a10-3f2c5e8d9b01",
+            "5243ea1b-f2c0-4f43-8f02-a5dbb97e24cb",
+            "Staff Accountant",
+            "New York, New York",
+            "https://jobs.lever.co/leverdemo/5243ea1b-f2c0-4f43-8f02-a5dbb97e24cb",
         ),
         (
-            "c7e2a9b3-4d56-4f88-8b21-6a3d9c0e5f42",
-            "Platform Engineer",
-            None,
-            "https://jobs.lever.co/leverdemo/c7e2a9b3-4d56-4f88-8b21-6a3d9c0e5f42",
+            "93db84be-2f79-4264-b521-510409fd0225",
+            "Stephanie Test Posting A",
+            "Baltimore, MD",
+            "https://jobs.lever.co/leverdemo/93db84be-2f79-4264-b521-510409fd0225",
         ),
     ]
 
@@ -173,9 +214,9 @@ def test_a_posting_without_a_location_or_a_description_is_a_posting() -> None:
     first, second = fetch(SLUG, client=_client_serving(_body_of(payload), []))
 
     assert first.location is None
-    assert first.title == "Senior Backend Engineer"
+    assert first.title == "Staff Accountant"
     assert second.description is None
-    assert second.title == "Platform Engineer"
+    assert second.title == "Stephanie Test Posting A"
 
 
 def test_an_empty_board_is_an_empty_list_and_still_one_request() -> None:
