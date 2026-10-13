@@ -15,14 +15,26 @@ one, so the four choices below are recorded together, as issue #43 requires.
 
 ## What was decided
 
-**One container, one origin.** The MCP endpoint is mounted into the existing
-FastAPI app at `/mcp` (`backend/app/main.py` mounts `backend/app/mcp.py`, which
+**One container, one origin.** The MCP endpoint is served by the existing
+FastAPI app at `/mcp`, with or without the trailing slash (`backend/app/main.py`
+registers `backend/app/mcp.py`'s endpoint as routes for both spellings, which
 wraps `jobradar_mcp.hosted.build_http_app`), so the one process and one port that
-serve the API and the UI also serve MCP. No second service, no second exposed
-port, no reverse proxy and no CORS is added; `docker compose config --services`
-still lists only `api` and `db`. The transport is `MCPServer.streamable_http_app()`
-from the pinned `mcp>=2.3,<3.0` — the same SDK `mcp/` uses, not a second MCP
-implementation.
+serve the API and the UI also serve MCP. Serving it as an explicit route rather
+than a `Mount` is deliberate: a `Mount` matches only `/mcp/...`, and the UI's
+catch-all mount at `/` is registered last, so in the image it swallowed the
+bare `/mcp` and answered 404/405 instead of letting Starlette redirect it. No
+second service, no second exposed port, no reverse proxy and no CORS is added;
+`docker compose config --services` still lists only `api` and `db`. The transport
+is `MCPServer.streamable_http_app()` from the pinned `mcp>=2.3,<3.0` — the same
+SDK `mcp/` uses, not a second MCP implementation.
+
+**The endpoint's tools reach the app itself.** The hosted tools drive this app
+over HTTP, like the stdio server, so the process also needs the two variables
+`mcp/jobradar_mcp` reads: `JOBRADAR_URL` (the container's own
+`http://127.0.0.1:8000`) and `JOBRADAR_TICK_SECRET` (the value the app reads as
+its tick secret). `compose.yaml` sets both next to `MCP_AUTH_TOKEN`, so a hosted
+client's `trigger_run` reaches the app's own tick guard; a deployment sets the
+same two where it starts the app.
 
 **A bearer token, read per request.** Every request must carry
 `Authorization: Bearer <MCP_AUTH_TOKEN>`. The value is read from the environment

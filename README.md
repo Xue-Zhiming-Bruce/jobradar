@@ -553,10 +553,10 @@ running — it does not wait for it and does not poll it; `get_run` is the read.
 
 The same seven tools are also served over MCP **streamable HTTP** from the app's
 own container and origin — one process, one port, no second service and no CORS
-— so a hosted MCP client reaches them at the app's base URL. `app/mcp.py` mounts
-them at `/mcp` in `app/main.py`, and they are the same tool functions `mcp/`
-serves over stdio, not a copy. The mount adds no route to the API contract, so
-`backend/openapi.json` is unchanged by it.
+— so a hosted MCP client reaches them at the app's base URL. `app/mcp.py` serves
+them at `/mcp` (with or without the trailing slash) in `app/main.py`, and they
+are the same tool functions `mcp/` serves over stdio, not a copy. The endpoint
+adds no route to the API contract, so `backend/openapi.json` is unchanged by it.
 
 The endpoint is guarded by a bearer token and is **off by default**. The operator
 sets one variable on the instance — `MCP_AUTH_TOKEN` (the Configuration table
@@ -576,6 +576,15 @@ module does not call this path.
 A client is configured with the app's base URL and the path `/mcp`:
 
     https://<the app's host>/mcp
+
+The endpoint's own tools drive this app over HTTP, so the process also needs the
+two variables the stdio server reads: `JOBRADAR_URL` — the app's own base URL,
+which inside the container is `http://127.0.0.1:8000` — and
+`JOBRADAR_TICK_SECRET`, the value the app reads as its tick secret.
+`compose.yaml` sets both, so a hosted client's `trigger_run` reaches the app's own
+tick guard; a deployment sets the same two where it starts the app. With either
+unset a listed tool still lists but fails naming the missing variable instead of
+acting.
 
 The transport streams its answers (SSE), so it needs a streamable-HTTP MCP
 client — the SDK's own, or any other — rather than a plain `curl`.
