@@ -6,17 +6,18 @@ Create Date: 2026-10-16 09:00:00.000000
 
 `run.postings_not_rematched` (`Integer`) records how many passers a re-match's
 own `SCORER_MAX_POSTINGS` cap (`pipeline.rematch_stored_postings`) left for a
-later run, written by `services.pipeline._record_not_rematched` when, and only
-when, the cap really left at least one. It is nullable and defaulted by nothing,
-so it carries three readings rather than two: NULL means the cap left no passer
--- the ordinary re-match, and every row written by a tick or before this column
-existed -- and a positive value means that many passers, in candidate order, were
-left for a later re-match. `0` is never written, because a re-match that offered
-every passer has nothing to report.
+later run, written by `services.pipeline._record_not_rematched` on every
+re-match, a `0` included, because a press that decided every candidate is an
+answer and not a missing one. It is nullable and defaulted by nothing, so it
+carries three readings: NULL means the row did not re-match -- a tick's own, or
+one written before this column existed -- `0` means the re-match decided every
+candidate it found, and a positive value means that many passers, in candidate
+order, were left for a later re-match.
 
 Nothing is backfilled. A row written before this revision ran with no cap of this
-kind, so the honest reading is a NULL, and a `NOT NULL` default of `0` would make
-every one of them claim a cap left nothing.
+kind, so the honest reading is a NULL -- "this run did not re-match", and not "it
+left nothing" -- and a `NOT NULL` default of `0` would make every one of them
+claim a cap left nothing.
 
 `upgrade()` adds the column only when it is missing, the way the baseline creates
 a table only when it is missing and 0002, 0003, 0005, 0006, 0007, 0008 and 0010

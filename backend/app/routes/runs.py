@@ -71,9 +71,9 @@ class RunSummary(BaseModel):
     `companies_not_fetched` is NULL for a run the board-call budget did not stop,
     which includes a run still in flight, and holds the count of active companies
     the walk left for a later run when it did (#56). `postings_not_rematched` is
-    the same shape for a re-match: NULL for every tick, and every re-match whose
-    model cap left nothing, and a positive count of the passers a re-match's cap
-    left for a later run (#64).
+    the same shape for a re-match: NULL for every tick and every row written
+    before the column existed, `0` for a re-match that decided every candidate it
+    found, and a positive count of the passers its cap left for a later run (#64).
     `company_outcomes` is one entry per company the run attempted and is empty for
     a run that has not attempted one yet -- the `202`'s fresh row -- so a client
     reads the same shape from both routes at every point in a run's life.
