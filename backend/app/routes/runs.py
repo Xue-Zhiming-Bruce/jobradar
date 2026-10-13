@@ -4,7 +4,7 @@ A tick answers `202` with a run row while the work is still ahead of it, so this
 route is how a client -- the owner's browser, and #12's UI -- reads the rest:
 `running` while the run is in flight, then `succeeded` or `failed` with the
 counts the run earned and the failure's message when there was one. Nothing here
-is computed or invented: the body is the row's own seven columns, because the row
+is computed or invented: the body is the row's own eight columns, because the row
 is the whole progress record this app keeps, and `app.models.Run` is where their
 meaning is declared.
 
@@ -39,12 +39,16 @@ router = APIRouter()
 
 
 class RunSummary(BaseModel):
-    """One `run` row as this API renders it: its seven columns, and no derived field.
+    """One `run` row as this API renders it: its eight columns, and no derived field.
 
     The same body a `202` from `POST /internal/tick` carries. `finished_at` and
-    `error` are absent until the run ends, and both counts are 0 from the moment
-    the row is written: what the boards returned and how many matches
-    `record_score` wrote (#34), never a score computed here.
+    `error` are absent until the run ends, and the two counts the walk earns are
+    0 from the moment the row is written: what the boards returned and how many
+    matches `record_score` wrote (#34), never a score computed here.
+    `matches_emailed` is the third: how many matches this run's own digest emailed
+    (#36), NULL until that digest records it -- which is the honest value for a
+    run still in flight, a row written before the column existed, and a run whose
+    send failed, and a different answer from a run that really did email none.
     """
 
     id: int
@@ -54,6 +58,7 @@ class RunSummary(BaseModel):
     error: str | None
     postings_seen: int
     matches_created: int
+    matches_emailed: int | None
 
 
 # The refusals this route answers with, named in the contract the way
@@ -73,6 +78,7 @@ def run_summary(run: Run) -> RunSummary:
         error=run.error,
         postings_seen=run.postings_seen,
         matches_created=run.matches_created,
+        matches_emailed=run.matches_emailed,
     )
 
 

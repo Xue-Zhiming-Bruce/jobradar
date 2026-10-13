@@ -39,7 +39,7 @@ from app.routes import internal
 from app.routes.internal import get_pipeline, get_run_starter
 from app.routes.runs import REAPED_RUN_ERROR, reap_stale_runs
 
-# The seven columns of a run, and therefore the whole body this route may answer
+# The eight columns of a run, and therefore the whole body this route may answer
 # with. A field that is not here is a field the route invented.
 RUN_FIELDS = {
     "id",
@@ -49,6 +49,7 @@ RUN_FIELDS = {
     "error",
     "postings_seen",
     "matches_created",
+    "matches_emailed",
 }
 
 # Values that must not reach the wire: the shared secret a tick would carry, and
@@ -94,6 +95,7 @@ def test_a_running_run_reads_back_exactly_as_its_row_holds_it(client: TestClient
     assert body["error"] is None
     assert body["postings_seen"] == 0
     assert body["matches_created"] == 0
+    assert body["matches_emailed"] is None  # no digest of this run has recorded one yet
     assert datetime.fromisoformat(body["started_at"]) is not None
 
 
@@ -112,6 +114,7 @@ def test_a_finished_run_reads_its_end_state_and_counts(
         error=error,
         postings_seen=7,
         matches_created=3,
+        matches_emailed=2,
     )
 
     response = read(client, run_id)
@@ -122,7 +125,45 @@ def test_a_finished_run_reads_its_end_state_and_counts(
     assert body["error"] == error
     assert body["postings_seen"] == 7
     assert body["matches_created"] == 3
+    assert body["matches_emailed"] == 2
     assert datetime.fromisoformat(body["finished_at"]) == finished_at
+
+
+# What a run's row says about its own email: `0`, a count and NULL are three
+# different answers, and the row is where a client reads them (#36, `_docs/plan.md`).
+
+
+def test_the_body_tells_a_run_that_emailed_nothing_from_one_that_did(engine: Engine) -> None:
+    """The read serves the row's own value, and `0` is not the same answer as NULL.
+
+    Three finished runs, seeded through the app's own session: one that emailed
+    nothing, one that emailed two matches, and one that never recorded a count
+    because it was written before the column existed. Each is told apart by its
+    own row, and the read answers each with that row's value -- no mailer and no
+    walk over `match` is involved here.
+
+    The read is driven over the database the `engine` fixture chose, so the case
+    runs on SQLite and on PostgreSQL, and the app is started around the rows the
+    way `test_a_running_row_left_by_a_dead_process_is_failed_when_the_app_starts`
+    starts it.
+    """
+    ended = datetime.now(UTC)
+    emailed_nothing = seed(status="succeeded", finished_at=ended, matches_emailed=0)
+    emailed_two = seed(status="succeeded", finished_at=ended, matches_emailed=2)
+    never_recorded = seed(status="succeeded", finished_at=ended)
+
+    assert [run_row(run_id).matches_emailed for run_id in (emailed_nothing, never_recorded)] == [
+        0,
+        None,
+    ]
+
+    with TestClient(app) as read_client:
+        answered = {
+            run_id: read(read_client, run_id).json()["matches_emailed"]
+            for run_id in (emailed_nothing, emailed_two, never_recorded)
+        }
+
+    assert answered == {emailed_nothing: 0, emailed_two: 2, never_recorded: None}
 
 
 def test_the_read_answers_for_the_id_it_was_asked_for(client: TestClient) -> None:
@@ -165,7 +206,7 @@ def test_reading_a_run_needs_no_secret(
 def test_the_body_carries_no_secret_no_resume_text_and_no_database_url(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The body is the row's seven columns: nothing private can ride along on it."""
+    """The body is the row's eight columns: nothing private can ride along on it."""
     monkeypatch.setenv("TICK_SECRET", SECRET)
     run_id = seed(status="failed", error="the board refused: acme")
 
@@ -251,7 +292,7 @@ def seed_a_posting_a_match_and_a_resume() -> None:
 def test_the_reap_finishes_a_running_row_with_a_reason_an_end_and_the_counts_it_left(
     engine: Engine,
 ) -> None:
-    run_id = seed(status="running", postings_seen=5, matches_created=2)
+    run_id = seed(status="running", postings_seen=5, matches_created=2, matches_emailed=3)
 
     assert reap_stale_runs() == 1
 
@@ -261,7 +302,10 @@ def test_the_reap_finishes_a_running_row_with_a_reason_an_end_and_the_counts_it_
     assert row.error == REAPED_RUN_ERROR
     assert row.finished_at is not None
     assert row.finished_at >= row.started_at  # an aware UTC instant, never before the start
-    assert (row.postings_seen, row.matches_created) == (5, 2)  # the record of how far it got
+    # The record of how far it got, the digest's own count included: the reap
+    # writes the end and nothing else (#35), and the end of a run writes no count
+    # of its own (#36).
+    assert (row.postings_seen, row.matches_created, row.matches_emailed) == (5, 2, 3)
 
 
 def test_a_running_row_left_by_a_dead_process_is_failed_when_the_app_starts(

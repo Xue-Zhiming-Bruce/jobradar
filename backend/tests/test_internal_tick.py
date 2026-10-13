@@ -300,10 +300,13 @@ def test_a_valid_tick_answers_202_with_the_running_row_it_wrote_before_the_work_
         "error",
         "postings_seen",
         "matches_created",
+        "matches_emailed",
     }
     assert body["status"] == "running"
     assert (body["finished_at"], body["error"]) == (None, None)
     assert (body["postings_seen"], body["matches_created"]) == (0, 0)
+    # #36's field: the row is written before any digest of it ran, so no count yet.
+    assert body["matches_emailed"] is None
 
     assert len(captured) == 1  # exactly one unit of work was handed over
     assert pipeline.run_ids == []  # and it has provably not run yet

@@ -23,6 +23,7 @@ export const runSummary = {
   error: null,
   postings_seen: 0,
   matches_created: 0,
+  matches_emailed: null,
 }
 
 /** The terminal row `GET /runs/{id}` answers with, so the dev button reaches an outcome. */
@@ -34,6 +35,7 @@ export const runSucceeded = {
   error: null,
   postings_seen: 12,
   matches_created: 4,
+  matches_emailed: 3,
 }
 
 // One row per state, newest first, so a test can tell all three treatments apart:
