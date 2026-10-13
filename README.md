@@ -121,19 +121,31 @@ It exits 0 when both services are healthy; the app is then on
 serves both, so there is one origin, no CORS and no second service.
 
 - `api` — the API and the frontend's build in one image, published `8000:8000`.
-  Healthcheck: `GET /healthz`, read with the image's own Python. It runs as a
-  non-root user of its own (`USER jobradar`, uid 10001), so a request that could
-  write a file is not a request that can rewrite the image.
+  It runs as a non-root user of its own (`USER jobradar`, uid 10001), so a request
+  that could write a file is not a request that can rewrite the image. Every start
+  goes through `docker-entrypoint.sh`: `alembic upgrade head` first, and uvicorn
+  only once that succeeded — a failed upgrade exits the container non-zero rather
+  than leave the API serving against a schema it does not match. Healthcheck:
+  `GET /healthz`, read with the image's own Python, **and** `alembic current`
+  reporting the revision this image carries.
 - `db` — PostgreSQL 17. It publishes **no** host port, so nothing outside the
   compose network reaches it. Healthcheck: `pg_isready`.
 
-`docker compose ps` shows both as `healthy`. The tables are created by the app's
-own `init_db()` at startup, which is all a database that does not exist yet
-needs: no seed step and no `docker compose exec` before the API serves. A
-database that already holds rows is brought to the schema `backend/app/models.py`
-declares by `uv run alembic upgrade head` from a checkout — the container does
-not run it, see **Changing the schema** under Backend — and a change to the
-models ships as a revision.
+`docker compose ps` shows both as `healthy`, and the container names the revision
+it applied:
+
+    docker compose exec api alembic current   # 0006_run_matches_emailed (head)
+
+There is no migration step to run by hand. The image ships `alembic.ini` and
+`migrations/`, and the container applies them at startup against the same
+`DATABASE_URL` the app uses — no second connection setting and no environment
+variable of its own. A database that does not exist yet is built by the baseline
+revision, so nothing has to happen before the API serves: no seed step and no
+`docker compose exec`. A database that already holds rows is adopted where it
+stands — the baseline revision creates a table only when it is missing, later
+revisions add what the models gained, and every row stays as it was — so a second
+`docker compose up` sends no `CREATE` or `DROP` and changes no row. A change to
+the models ships as a revision, see **Changing the schema** under Backend.
 
 ### Where the data lives
 
@@ -416,21 +428,24 @@ score range moved from 100 to 90, nothing else — writes no revision, because a
 empty one is discarded rather than committed; write that one by hand with
 `uv run alembic revision -m "<message>"` and fill in the `op.*` calls yourself.
 
-**A database that already exists.** The local `backend/data/jobradar.db`, the
-compose volume and the deployed Neon database are all brought to the current
-schema by the same command, run from a checkout:
+**A database that already exists.** A container brings the database it is given to
+the revision history its image carries: `docker compose up` runs `alembic upgrade
+head` at startup, before uvicorn, through the app's own `database_url()`, and an
+upgrade that fails exits the container non-zero instead of serving. The one
+database no container sees is the local `backend/data/jobradar.db`, so it keeps
+the command run from a checkout:
 
-    cd backend && DATABASE_URL=<the compose or Neon URL> uv run alembic upgrade head
+    cd backend && DATABASE_URL=<the Neon URL> uv run alembic upgrade head
 
-It is run from `backend/` because that is where `alembic.ini` and `migrations/`
-are, and with `DATABASE_URL` set because that is the one connection input the
-revision environment reads — unset, the command would run against the local
-SQLite file. `uv run alembic current` says which revision the database is at. The
-image carries neither `alembic.ini` nor `migrations/` and runs no migration at
-startup, so the step is manual until #47 ships both; on a database that already
-holds rows it creates only what is missing and leaves every row as it was, so it
-is safe to re-run. `uv run alembic downgrade base` drops all five tables: it is
-destructive, and it is meant for the disposable databases of local development.
+Run from `backend/` because that is where `alembic.ini` and `migrations/` are, and
+with `DATABASE_URL` set because that is the one connection input the revision
+environment reads — unset, the command would run against the local SQLite file.
+`uv run alembic current` says which revision the database is at; inside a
+container, `docker compose exec api alembic current` says the same for the compose
+volume. On a database that already holds rows it creates only what is missing and
+leaves every row as it was, so it is safe to re-run. `uv run alembic downgrade
+base` drops all five tables: it is destructive, and it is meant for the disposable
+databases of local development.
 
 ## Frontend
 
@@ -675,15 +690,9 @@ Each with what it costs, because a limitation without a consequence is a slogan.
   inactivity, so a late or missing digest is expected rather than a fault. That is
   why the in-app **"Run digest now"** button is the reliable path, and why the
   demo uses it (`_docs/decisions/2026-10-11-deploy-and-repo.md`).
-- **A deployed database is migrated by hand, until #47.** `init_db()` creates the
-  tables in a database that does not exist yet, and `cd backend &&
-  DATABASE_URL=<the URL> uv run alembic upgrade head` adopts one that already
-  holds rows, but the image carries neither `alembic.ini` nor `migrations/` and
-  runs no migration at startup, so that command is run from a checkout: a schema
-  change reaches a brand-new database on deploy and one that already holds rows
-  only when someone runs it. #47 ships the files and the startup step. And
-  `downgrade base` is destructive — it drops the five tables — which is
-  acceptable only while the databases in existence are disposable.
+- **`downgrade base` is destructive.** It drops the five tables and every row in
+  them, which is acceptable only while the databases in existence are disposable:
+  the local SQLite file and the compose volume this file calls a throwaway.
 - **The free tier sleeps.** `_docs/plan.md`'s "Known constraints" records that a
   Render free instance spins down after 15 minutes idle and takes about a minute
   to wake, so the first request after a quiet period is slow. That is the free
