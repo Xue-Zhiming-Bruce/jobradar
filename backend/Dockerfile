@@ -47,6 +47,18 @@ COPY backend/app ./app
 # service and no CORS.
 COPY --from=frontend /build/dist ./app/static
 
+# A user of its own, so the serving process is not root. Nothing in the image is
+# written at run time except the uploads volume, so no `/app` ownership is needed
+# here -- the source is read-only. The uid is fixed because a *fresh* named volume
+# inherits the owner of the image's directory it covers, which is what lets the
+# app write its upload into `/data/uploads`; an existing root-owned volume from an
+# earlier image is not, see `README.md`.
+RUN useradd --uid 10001 --user-group jobradar \
+    && mkdir -p /data/uploads \
+    && chown -R jobradar:jobradar /data/uploads
+
+USER jobradar
+
 EXPOSE 8000
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
