@@ -75,6 +75,7 @@ MATCH_COLUMNS = (
     "reason",
     "gaps",
     "state",
+    "outcome",
     "created_at",
     "notified_at",
 )
@@ -513,6 +514,7 @@ def test_one_call_records_the_rejection_on_the_row_keyed_by_the_posting(
     assert stored["posting_id"] == posting_id
     assert stored["score"] == 0
     assert stored["reason"] == "Prefiltered out: title term 'intern'"
+    assert stored["outcome"] == "rejected"
     assert stored["gaps"] is None
     assert stored["state"] == "new"
     assert stored["notified_at"] is None
@@ -557,6 +559,7 @@ def test_a_second_call_updates_the_one_row_and_keeps_its_id_and_created_at(
     assert rows[0]["created_at"] == first["created_at"]
     assert rows[0]["score"] == 0
     assert rows[0]["state"] == first["state"] == "new"
+    assert rows[0]["outcome"] == first["outcome"] == "rejected"
     assert rows[0]["reason"] == "Prefiltered out: title term 'junior'"
 
 

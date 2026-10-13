@@ -12,6 +12,7 @@ foreign keys -- are pinned here as declared, and refused by the engines in
 `tests/test_engine_parity.py`.
 """
 
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -189,6 +190,22 @@ def test_no_app_module_names_a_dialect() -> None:
         if "sqlalchemy.dialects" in path.read_text(encoding="utf-8")
     )
     assert naming_a_dialect == []
+
+
+def test_the_two_writers_are_the_only_modules_that_assign_an_outcome() -> None:
+    """One writer per state: only the prefilter and the scorer decide an outcome.
+
+    `outcome=` and `.outcome =` are assignments; a module that merely compares
+    the column -- `Match.outcome != 'scored'`, say -- is neither, which keeps
+    this a test about who writes the marker rather than about who mentions it.
+    """
+    assigning = sorted(
+        path.relative_to(APP_ROOT).as_posix()
+        for path in APP_ROOT.rglob("*.py")
+        if re.search(r"\boutcome\s*=(?!=)", path.read_text(encoding="utf-8"))
+    )
+
+    assert assigning == ["matching/prefilter.py", "matching/scorer.py"]
 
 
 def test_every_string_column_carries_the_length_declared_for_it() -> None:

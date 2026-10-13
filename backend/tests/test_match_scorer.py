@@ -100,6 +100,7 @@ MATCH_COLUMNS = (
     "reason",
     "gaps",
     "state",
+    "outcome",
     "created_at",
     "notified_at",
 )
@@ -1024,7 +1025,48 @@ def test_a_refused_call_does_not_consume_the_cap(monkeypatch: pytest.MonkeyPatch
     assert len(requests) == 1
 
 
-# One writer, on the single `match` row a posting is allowed -- on both engines.
+# One writer per state, on the single `match` row a posting is allowed -- on both engines.
+
+
+def test_the_three_states_are_told_apart_by_the_column_and_not_by_the_text(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#30's whole point, through the two real writers: one column, three values.
+
+    The three rows are indistinguishable by `score` -- all three are 0 -- and the
+    assertions are on `outcome` and `score`, never on `reason.startswith`, so a
+    reader that only had the text could not pass this case.
+    """
+    rejected_posting, scored_zero_posting, failed_posting = _stored_postings(3)
+    monkeypatch.setenv("PREFILTER_TITLE_TERMS", "intern")
+
+    record_rejection(rejected_posting, prefilter(_intern_posting()))
+    record_score(
+        scored_zero_posting, MatchResult(score=0, reason="No fit, and the model said so.", gaps=[])
+    )
+    record_score(
+        failed_posting,
+        MatchResult(score=0, reason=NOT_SCORED_PREFIX + "the model call failed", gaps=[]),
+    )
+
+    stored = {row["posting_id"]: row for row in _matches()}
+    assert set(stored) == {rejected_posting, scored_zero_posting, failed_posting}
+    assert (stored[rejected_posting]["outcome"], stored[rejected_posting]["score"]) == (
+        "rejected",
+        0,
+    )
+    assert (stored[scored_zero_posting]["outcome"], stored[scored_zero_posting]["score"]) == (
+        "scored",
+        0,
+    )
+    assert (stored[failed_posting]["outcome"], stored[failed_posting]["score"]) == (
+        "not_scored",
+        0,
+    )
+    # And each row still carries the reason its writer wrote.
+    assert stored[rejected_posting]["reason"].startswith(REJECTION_REASON_PREFIX)
+    assert stored[scored_zero_posting]["reason"] == "No fit, and the model said so."
+    assert stored[failed_posting]["reason"].startswith(NOT_SCORED_PREFIX)
 
 
 def test_a_first_score_inserts_the_one_row_the_posting_is_allowed(engine: Engine) -> None:
@@ -1042,6 +1084,7 @@ def test_a_first_score_inserts_the_one_row_the_posting_is_allowed(engine: Engine
     assert stored["reason"] == "Fits the backend work."
     assert stored["gaps"] == '["No Go.", "No on-call."]'
     assert stored["state"] == "new"
+    assert stored["outcome"] == "scored"
     assert stored["notified_at"] is None
     assert stored["created_at"].tzinfo is not None
     assert stored["created_at"].utcoffset() == timedelta(0)
@@ -1074,6 +1117,7 @@ def test_a_not_scored_result_is_stored_like_any_other(engine: Engine) -> None:
     assert stored["score"] == 0
     assert stored["reason"] == "Not scored: the model call failed (HTTP 500)"
     assert stored["gaps"] == "[]"
+    assert stored["outcome"] == "not_scored"
 
 
 def test_a_score_over_a_recorded_rejection_updates_that_row_and_leaves_one(
@@ -1085,6 +1129,7 @@ def test_a_score_over_a_recorded_rejection_updates_that_row_and_leaves_one(
     record_rejection(posting_id, prefilter(_intern_posting()))
     rejected = _matches()[0]
     assert rejected["reason"].startswith(REJECTION_REASON_PREFIX)
+    assert rejected["outcome"] == "rejected"
 
     record_score(posting_id, MatchResult(score=70, reason="Fits the backend work.", gaps=[]))
 
@@ -1098,6 +1143,29 @@ def test_a_score_over_a_recorded_rejection_updates_that_row_and_leaves_one(
     assert rows[0]["gaps"] == "[]"
     assert rows[0]["state"] == "new"
     assert rows[0]["notified_at"] is None
+    assert rows[0]["outcome"] == "scored"
+
+
+def test_a_not_scored_result_over_a_recorded_rejection_is_that_one_row(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model outage over a rejected posting rewrites the marker too, not only the text."""
+    posting_id = _one_stored_posting()
+    monkeypatch.setenv("PREFILTER_TITLE_TERMS", "intern")
+    record_rejection(posting_id, prefilter(_intern_posting()))
+    rejected = _matches()[0]
+    assert rejected["outcome"] == "rejected"
+
+    record_score(
+        posting_id,
+        MatchResult(score=0, reason=NOT_SCORED_PREFIX + "the model call failed", gaps=[]),
+    )
+
+    rows = _matches()
+    assert len(rows) == 1
+    assert rows[0]["id"] == rejected["id"]
+    assert (rows[0]["outcome"], rows[0]["score"]) == ("not_scored", 0)
+    assert rows[0]["reason"] == "Not scored: the model call failed"
 
 
 def test_a_second_score_with_the_same_result_leaves_the_one_row_as_it_was(engine: Engine) -> None:
@@ -1125,6 +1193,7 @@ def test_a_second_score_updates_the_values_on_the_same_row(engine: Engine) -> No
     assert rows[0]["id"] == first["id"]
     assert rows[0]["created_at"] == first["created_at"]
     assert (rows[0]["score"], rows[0]["reason"], rows[0]["gaps"]) == (91, "Fits now.", "[]")
+    assert rows[0]["outcome"] == first["outcome"] == "scored"
 
 
 def test_a_row_the_owner_saved_and_a_digest_notified_keeps_both(engine: Engine) -> None:

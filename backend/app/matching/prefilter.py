@@ -22,11 +22,11 @@ a regex, and `None` reads as the empty string: a posting without a location can
 never trip the location rule, and one without a description is judged by its
 title alone.
 
-A rejection is told from a score by `score = 0` and by `REJECTION_REASON_PREFIX`,
-which is the contract #10 reads to keep a prefiltered posting out of the digest.
-That is why the rejection is written into the columns `match` already has rather
-than into a marker column of its own: a column needs the migration path #21 owns,
-and that marker is #30.
+A rejection is told from a score by the row's own `outcome = 'rejected'`, and by
+`REJECTION_REASON_PREFIX`, which is the first text of the stored reason. The
+column is the reader's marker (#30 gave the row one, in place of the prefix #10
+used to string-match); the prefix stays, because other modules and #31 read it,
+and because it is what a reader of the reason sees.
 
 Each of the four variables is a comma-separated list whose entries are trimmed,
 lower-cased and stripped of empties. The format has one limit: a term cannot
@@ -127,11 +127,14 @@ def record_rejection(posting_id: int, decision: PrefilterDecision) -> None:
     """Record one rejection on the `match` row keyed by `posting_id`.
 
     One `session_scope()` per call, written through the ORM so the model's own
-    defaults fill `created_at`, `state` and `gaps` on a first rejection. A
-    posting rejected a second time -- after its title changed, say -- is the same
-    row: `match.posting_id` is unique, so the row is looked up and its `score` and
-    `reason` are written again, where inserting blind would be an `IntegrityError`
-    the second time.
+    defaults fill `created_at`, `state` and `gaps` on a first rejection. Both
+    paths write `outcome = 'rejected'`, the row's own marker of which of the
+    three situations it records, and the reason keeps `REJECTION_REASON_PREFIX`
+    for the readers that still match on it. A posting rejected a second time --
+    after its title changed, say -- is the same row: `match.posting_id` is
+    unique, so the row is looked up and its `score`, `reason` and `outcome` are
+    written again, where inserting blind would be an `IntegrityError` the second
+    time.
 
     A decision that passed is refused: a score-0 row for a posting that passed is
     a rejection the digest must never see.
@@ -144,10 +147,13 @@ def record_rejection(posting_id: int, decision: PrefilterDecision) -> None:
     with db.session_scope() as session:
         row = session.scalar(select(Match).where(Match.posting_id == posting_id))
         if row is None:
-            session.add(Match(posting_id=posting_id, score=0, reason=reason))
+            session.add(
+                Match(posting_id=posting_id, score=0, reason=reason, outcome="rejected")
+            )
         else:
             row.score = 0
             row.reason = reason
+            row.outcome = "rejected"
 
 
 def _terms(configured: str) -> tuple[str, ...]:

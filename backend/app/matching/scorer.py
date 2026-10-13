@@ -27,7 +27,9 @@ answer still unusable after the last attempt, the run's cap -- is a normal
 `MatchResult` with `score = 0`, `gaps = []` and a reason beginning
 `NOT_SCORED_PREFIX`, *returned* rather than raised, because a model outage has to
 reach #9's run row instead of its traceback. A score of 0 is below any cutoff, so
-#10's digest cannot alert on one. The only exceptions `score` raises are
+#10's digest cannot alert on one. `record_score` reads that same prefix to mark the
+row `outcome = 'not_scored'`: the prefix stays on the stored reason, and the
+column is what #10's selection now reads. The only exceptions `score` raises are
 `ScorerConfigurationError`'s two -- no key, no resume text -- and both happen
 before any request.
 
@@ -251,15 +253,24 @@ def record_score(posting_id: int, result: MatchResult) -> None:
     defaults fill `created_at` and the `state` of a fresh row. A posting that
     already has a row -- a previous score, or the `Prefiltered out: ...` row a
     rejection wrote -- is that same row: `match.posting_id` is unique, so the row
-    is looked up and its `score`, `reason` and `gaps` are written, where inserting
-    blind would be an `IntegrityError`. A posting scored after it was prefiltered
-    out therefore no longer reads as a rejection to #10.
+    is looked up and its `score`, `reason`, `gaps` and `outcome` are written,
+    where inserting blind would be an `IntegrityError`. A posting scored after it
+    was prefiltered out therefore no longer reads as a rejection to #10, by
+    `outcome` or by reason.
+
+    `outcome` is this module's own reading of the result it was handed and no
+    caller's: `'not_scored'` when the reason begins `NOT_SCORED_PREFIX` -- the
+    shape every failure this module returns has -- and `'scored'` otherwise, a
+    genuine `score = 0` included, because the model answered that one.
 
     `state` and `notified_at` are left alone on an update, so a row the owner
     saved stays saved and a digest that already went out is not re-sent. `gaps` is
     stored as JSON text -- "[]" for no gaps -- which is the format #10 and #12 read.
     """
     gaps = json.dumps(result.gaps)
+    # One writer per state, decided here rather than by the caller that got the
+    # result: a genuine 0 and a model outage both carry score = 0.
+    outcome = "not_scored" if result.reason.startswith(NOT_SCORED_PREFIX) else "scored"
     with db.session_scope() as session:
         row = session.scalar(select(Match).where(Match.posting_id == posting_id))
         if row is None:
@@ -269,12 +280,14 @@ def record_score(posting_id: int, result: MatchResult) -> None:
                     score=result.score,
                     reason=result.reason,
                     gaps=gaps,
+                    outcome=outcome,
                 )
             )
         else:
             row.score = result.score
             row.reason = result.reason
             row.gaps = gaps
+            row.outcome = outcome
 
 
 def request_body(prompt: str, images: list[bytes] | None = None) -> dict[str, object]:
