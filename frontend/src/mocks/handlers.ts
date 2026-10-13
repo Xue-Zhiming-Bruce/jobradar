@@ -14,6 +14,15 @@ export const handlers = [
 
   http.delete('/watchlist/:id', () => new HttpResponse(null, { status: 204 })),
 
+  // The fields the body named echo back over the row it was sent to, so a rename
+  // and a toggle both show their write without the mock keeping state.
+  http.patch('/watchlist/:id', async ({ request, params }) => {
+    const body = (await request.json()) as Record<string, unknown>
+    const id = Number(params.id)
+    const row = companies.find((company) => company.id === id) ?? companies[0]
+    return HttpResponse.json({ ...row, ...body, id })
+  }),
+
   http.post('/resume', () => HttpResponse.json(resumeUploaded, { status: 201 })),
 
   http.post('/internal/tick', () => HttpResponse.json(runSummary, { status: 202 })),

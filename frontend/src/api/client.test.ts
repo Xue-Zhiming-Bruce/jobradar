@@ -10,6 +10,7 @@ import {
   removeCompany,
   setMatchState,
   startTick,
+  updateCompany,
   uploadResume,
 } from './client'
 
@@ -197,6 +198,64 @@ describe('the wire is decoded into the UI', () => {
     expect(requests).toEqual([{ method: 'PATCH', path: '/matches/7', body: { state: 'saved' } }])
   })
 
+  it('updateCompany sends the rename to PATCH /watchlist/7 and decodes the answered row', async () => {
+    const requests: { method: string; path: string; body: unknown }[] = []
+    server.use(
+      http.patch('/watchlist/:id', async ({ request }) => {
+        requests.push({
+          method: request.method,
+          path: new URL(request.url).pathname,
+          body: await request.json(),
+        })
+        return HttpResponse.json({
+          id: 7,
+          name: 'Acme Corporation',
+          slug: 'acme',
+          is_active: true,
+          source: 'lever',
+        })
+      }),
+    )
+
+    expect(await updateCompany(7, { name: 'Acme Corporation' })).toEqual({
+      id: 7,
+      name: 'Acme Corporation',
+      slug: 'acme',
+      isActive: true,
+      source: 'lever',
+    })
+    expect(requests).toEqual([
+      { method: 'PATCH', path: '/watchlist/7', body: { name: 'Acme Corporation' } },
+    ])
+  })
+
+  it('updateCompany carries the toggle alone, and decodes is_active into isActive', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.patch('/watchlist/:id', async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({
+          id: 7,
+          name: 'Acme',
+          slug: 'acme',
+          is_active: false,
+          source: 'greenhouse',
+        })
+      }),
+    )
+
+    expect(await updateCompany(7, { is_active: false })).toEqual({
+      id: 7,
+      name: 'Acme',
+      slug: 'acme',
+      isActive: false,
+      source: 'greenhouse',
+    })
+    expect(bodies).toEqual([{ is_active: false }])
+    // One key exactly: the call adds nothing of its own to the body it was given.
+    expect(Object.keys(bodies[0] as Record<string, unknown>)).toEqual(['is_active'])
+  })
+
   it('startTick answers with the run it started, and sends no secret', async () => {
     const requests: Request[] = []
     server.use(
@@ -280,9 +339,22 @@ describe('a 204 is empty and a non-2xx is an error', () => {
   })
 
   it.each([
+    ['a 404 on an id no row has', 404, 'There is no watched company with id 9'],
+    ['a 422 on a blank name', 422, 'name must not be blank'],
+  ])('updateCompany surfaces %s verbatim as a refusal', async (_case, status, message) => {
+    server.use(http.patch('/watchlist/:id', rejecting(status, message)))
+
+    const failure = await rejection(() => updateCompany(9, { name: 'Acme' }))
+
+    expect(failure.message).toBe(message)
+    expect(failure.status).toBe(status)
+  })
+
+  it.each([
     ['listWatchlist', (): Promise<unknown> => listWatchlist()],
     ['addCompany', (): Promise<unknown> => addCompany({ name: 'Acme', slug: 'acme' })],
     ['removeCompany', (): Promise<unknown> => removeCompany(9)],
+    ['updateCompany', (): Promise<unknown> => updateCompany(9, { name: 'Acme' })],
     ['uploadResume', (): Promise<unknown> => uploadResume(new File(['x'], 'resume.txt'))],
     ['listMatches', (): Promise<unknown> => listMatches()],
     ['setMatchState', (): Promise<unknown> => setMatchState(9, 'saved')],

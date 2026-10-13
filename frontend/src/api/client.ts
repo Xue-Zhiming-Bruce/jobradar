@@ -245,6 +245,11 @@ export async function removeCompany(id: number): Promise<void> {
   await request<void>(`/watchlist/${id}`, { method: 'DELETE' })
 }
 
+/** Edits one watched company and answers the row as `PATCH /watchlist/{id}` read it after the write. */
+export async function updateCompany(id: number, update: CompanyUpdate): Promise<WatchedCompany> {
+  return decodeCompany(await request<WireCompany>(`/watchlist/${id}`, sendJson(update, 'PATCH')))
+}
+
 export async function listMatches(): Promise<Match[]> {
   return (await request<WireMatch[]>('/matches')).map(decodeMatch)
 }

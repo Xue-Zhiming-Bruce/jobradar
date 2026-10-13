@@ -53,6 +53,20 @@ describe('the mock answers the shapes the contract requires', () => {
     expect(await response.text()).toBe('')
   })
 
+  it('PATCH /watchlist/:id answers one WatchedCompany for a one-field body', async () => {
+    const response = await api('/watchlist/1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_active: false }),
+    })
+
+    expect(response.status).toBe(200)
+    const row = (await response.json()) as { id: number; is_active: boolean }
+    expect(Object.keys(row).sort()).toEqual(requiredKeys('WatchedCompany'))
+    expect(row.id).toBe(1)
+    expect(row.is_active).toBe(false)
+  })
+
   it('POST /resume answers a ResumeUploaded', async () => {
     const form = new FormData()
     form.append('file', new File(['a resume'], 'resume.txt', { type: 'text/plain' }))

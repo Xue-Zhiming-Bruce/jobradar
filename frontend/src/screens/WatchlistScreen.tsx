@@ -3,7 +3,9 @@ import {
   addCompany,
   listWatchlist,
   removeCompany,
+  updateCompany,
   type CompanySource,
+  type CompanyUpdate,
   type WatchedCompany,
 } from '../api/client'
 
@@ -11,7 +13,10 @@ import {
 const LOADING = 'Loading the watchlist...'
 const EMPTY = 'No watched companies yet.'
 
-/** Adds a company by name, board slug and source, lists the watchlist, removes a row. */
+/**
+ * Adds a company by name, board slug and source, lists the watchlist, renames a
+ * row, takes one out of the poll and puts it back, removes a row.
+ */
 export default function WatchlistScreen() {
   // `null` is "not read yet", so loading is not the same screen as empty.
   const [companies, setCompanies] = useState<WatchedCompany[] | null>(null)
@@ -49,6 +54,24 @@ export default function WatchlistScreen() {
     } catch (failure) {
       setFormError(failure instanceof Error ? failure.message : String(failure))
     }
+  }
+
+  // Only the row the answer carries is replaced, and a refusal leaves the list alone.
+  async function edit(id: number, body: CompanyUpdate) {
+    try {
+      const updated = await updateCompany(id, body)
+      setFormError(null)
+      setCompanies((rows) => (rows ?? []).map((row) => (row.id === updated.id ? updated : row)))
+    } catch (failure) {
+      setFormError(failure instanceof Error ? failure.message : String(failure))
+    }
+  }
+
+  function rename(event: FormEvent<HTMLFormElement>, id: number) {
+    event.preventDefault()
+    // The field is uncontrolled: the route stores the name it was sent and answers it back.
+    const typed = new FormData(event.currentTarget).get('name') as string
+    void edit(id, { name: typed })
   }
 
   return (
@@ -90,6 +113,20 @@ export default function WatchlistScreen() {
                 {company.name} ({company.slug})
               </span>
               <span>{company.source}</span>
+              {!company.isActive && <span>Inactive</span>}
+              <form onSubmit={(event) => rename(event, company.id)}>
+                <label>
+                  New name
+                  <input name="name" defaultValue={company.name} />
+                </label>
+                <button type="submit">Rename</button>
+              </form>
+              <button
+                type="button"
+                onClick={() => edit(company.id, { is_active: !company.isActive })}
+              >
+                {company.isActive ? 'Deactivate' : 'Activate'}
+              </button>
               <button type="button" onClick={() => remove(company.id)}>
                 Remove
               </button>

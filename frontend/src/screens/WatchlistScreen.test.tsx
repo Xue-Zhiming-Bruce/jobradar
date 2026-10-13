@@ -20,6 +20,28 @@ function withheld() {
 /** The list row a company is rendered in, so a button is clicked on its own row. */
 const row = (text: string) => screen.getByText(text).closest('li') as HTMLElement
 
+/** The two rows the edit cases start from: Acme on Greenhouse, Globex on Lever. */
+const twoRows = [
+  { id: 1, name: 'Acme', slug: 'acme', is_active: true, source: 'greenhouse' },
+  { id: 2, name: 'Globex', slug: 'globex', is_active: true, source: 'lever' },
+]
+
+/** One recorded write, so a case can assert the path and the body it carried. */
+type Recorded = { path: string; body: unknown }
+
+/** Records every `PATCH /watchlist/:id` and answers each with `answer`. */
+const answeringPatch = (written: Recorded[], answer: Record<string, unknown>) =>
+  http.patch('/watchlist/:id', async ({ request }) => {
+    written.push({ path: new URL(request.url).pathname, body: await request.json() })
+    return HttpResponse.json(answer)
+  })
+
+/** Types a name into a row's own field and submits that row's form. */
+function renameRow(text: string, name: string) {
+  fireEvent.change(within(row(text)).getByLabelText('New name'), { target: { value: name } })
+  fireEvent.click(within(row(text)).getByRole('button', { name: 'Rename' }))
+}
+
 /** The form's own controls, typed the way they are read back. */
 const typedInto = (label: string) => (screen.getByLabelText(label) as HTMLInputElement).value
 const selectedSource = () => (screen.getByLabelText('Source') as HTMLSelectElement).value
@@ -182,6 +204,205 @@ describe('the watchlist screen', () => {
     expect(typedInto('Name')).toBe('')
     expect(typedInto('Board slug')).toBe('')
     expect(selectedSource()).toBe('greenhouse')
+  })
+})
+
+describe("the watchlist screen's edit controls", () => {
+  it('gives a row a New name field holding its stored name, a Rename button and one toggle', async () => {
+    render(<WatchlistScreen />)
+    await screen.findByText('Acme (acme)')
+
+    const acme = row('Acme (acme)')
+
+    expect(within(acme).getByRole('textbox')).toBeDefined() // a text box, not a select
+    expect((within(acme).getByLabelText('New name') as HTMLInputElement).value).toBe('Acme')
+    expect(within(acme).getByRole('button', { name: 'Rename' })).toBeDefined()
+    expect(within(acme).getByRole('button', { name: 'Deactivate' })).toBeDefined()
+    expect(within(acme).queryByText('Inactive')).toBeNull()
+    // The add form keeps the only `Name` field, and the only `combobox`.
+    expect(screen.getByLabelText('Name')).toBeDefined()
+    expect(screen.getAllByRole('combobox')).toHaveLength(1)
+  })
+
+  it('renames one row from the answer, and leaves every other row byte-identical', async () => {
+    const written: Recorded[] = []
+    let reads = 0
+    server.use(
+      http.get('/watchlist', () => {
+        reads += 1
+        return HttpResponse.json(twoRows)
+      }),
+      // The answer disagrees with the pre-write row on the source, so a row built
+      // from local state would show the source this screen already held.
+      answeringPatch(written, {
+        id: 1,
+        name: 'Acme Corporation',
+        slug: 'acme',
+        is_active: true,
+        source: 'lever',
+      }),
+    )
+    render(<WatchlistScreen />)
+    await screen.findByText('Acme (acme)')
+    const globex = row('Globex (globex)').outerHTML
+
+    renameRow('Acme (acme)', 'Acme Corporation')
+
+    expect(await screen.findByText('Acme Corporation (acme)')).toBeDefined()
+    expect(written).toEqual([{ path: '/watchlist/1', body: { name: 'Acme Corporation' } }])
+    expect(within(row('Acme Corporation (acme)')).getByText('lever')).toBeDefined()
+    expect(row('Globex (globex)').outerHTML).toBe(globex)
+    expect(reads).toBe(1) // no second read of the list
+  })
+
+  it('takes a row out of the poll on Deactivate, from the answer', async () => {
+    const written: Recorded[] = []
+    server.use(
+      http.get('/watchlist', () => HttpResponse.json(twoRows)),
+      answeringPatch(written, {
+        id: 1,
+        name: 'Acme',
+        slug: 'acme',
+        is_active: false,
+        source: 'greenhouse',
+      }),
+    )
+    render(<WatchlistScreen />)
+    await screen.findByText('Acme (acme)')
+
+    fireEvent.click(within(row('Acme (acme)')).getByRole('button', { name: 'Deactivate' }))
+
+    expect(await within(row('Acme (acme)')).findByText('Inactive')).toBeDefined()
+    expect(written).toEqual([{ path: '/watchlist/1', body: { is_active: false } }])
+    expect(within(row('Acme (acme)')).getByRole('button', { name: 'Activate' })).toBeDefined()
+    expect(within(row('Globex (globex)')).queryByText('Inactive')).toBeNull()
+    expect(within(row('Globex (globex)')).getByRole('button', { name: 'Deactivate' })).toBeDefined()
+  })
+
+  it('puts a row the list read as inactive back in the poll from the same control', async () => {
+    const written: Recorded[] = []
+    server.use(
+      http.get('/watchlist', () => HttpResponse.json([{ ...twoRows[0], is_active: false }, twoRows[1]])),
+      answeringPatch(written, {
+        id: 1,
+        name: 'Acme',
+        slug: 'acme',
+        is_active: true,
+        source: 'greenhouse',
+      }),
+    )
+    render(<WatchlistScreen />)
+    await screen.findByText('Acme (acme)')
+
+    expect(within(row('Acme (acme)')).getByText('Inactive')).toBeDefined()
+    // A deactivated company is still renamed from its row.
+    expect((within(row('Acme (acme)')).getByLabelText('New name') as HTMLInputElement).value).toBe(
+      'Acme',
+    )
+
+    fireEvent.click(within(row('Acme (acme)')).getByRole('button', { name: 'Activate' }))
+
+    await waitFor(() => expect(within(row('Acme (acme)')).queryByText('Inactive')).toBeNull())
+    expect(written).toEqual([{ path: '/watchlist/1', body: { is_active: true } }])
+    expect(within(row('Acme (acme)')).queryByRole('button', { name: 'Activate' })).toBeNull()
+    expect(within(row('Acme (acme)')).getByRole('button', { name: 'Deactivate' })).toBeDefined()
+  })
+
+  it("shows the route's detail on a refused rename, and leaves the row and the typed name alone", async () => {
+    const detail = 'There is no watched company with id 1'
+    const written: Recorded[] = []
+    server.use(
+      http.get('/watchlist', () => HttpResponse.json(twoRows)),
+      http.patch('/watchlist/:id', async ({ request }) => {
+        written.push({ path: new URL(request.url).pathname, body: await request.json() })
+        return HttpResponse.json({ detail }, { status: 404 })
+      }),
+    )
+    render(<WatchlistScreen />)
+    await screen.findByText('Acme (acme)')
+
+    renameRow('Acme (acme)', 'Acme Corporation')
+
+    expect((await screen.findByRole('alert')).textContent).toBe(detail)
+    expect(screen.queryByText('Acme Corporation (acme)')).toBeNull()
+    expect(within(row('Acme (acme)')).getByText('greenhouse')).toBeDefined()
+    expect((within(row('Acme (acme)')).getByLabelText('New name') as HTMLInputElement).value).toBe(
+      'Acme Corporation',
+    )
+    expect(written).toEqual([{ path: '/watchlist/1', body: { name: 'Acme Corporation' } }])
+  })
+
+  it('shows the blank name the route refused, sending that one field and changing nothing', async () => {
+    const detail = 'name must not be blank'
+    const bodies: unknown[] = []
+    server.use(
+      http.get('/watchlist', () => HttpResponse.json(twoRows)),
+      http.patch('/watchlist/:id', async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ detail }, { status: 422 })
+      }),
+    )
+    render(<WatchlistScreen />)
+    await screen.findByText('Acme (acme)')
+
+    renameRow('Acme (acme)', '')
+
+    expect((await screen.findByRole('alert')).textContent).toBe(detail)
+    expect(screen.getByText('Acme (acme)')).toBeDefined()
+    expect((within(row('Acme (acme)')).getByLabelText('New name') as HTMLInputElement).value).toBe('')
+    expect(bodies).toEqual([{ name: '' }])
+  })
+
+  it('leaves the row and its control as they were on a refused toggle', async () => {
+    const detail = 'The company could not be written'
+    const written: Recorded[] = []
+    server.use(
+      http.get('/watchlist', () => HttpResponse.json(twoRows)),
+      http.patch('/watchlist/:id', async ({ request }) => {
+        written.push({ path: new URL(request.url).pathname, body: await request.json() })
+        return HttpResponse.json({ detail }, { status: 500 })
+      }),
+    )
+    render(<WatchlistScreen />)
+    await screen.findByText('Acme (acme)')
+
+    fireEvent.click(within(row('Acme (acme)')).getByRole('button', { name: 'Deactivate' }))
+
+    expect((await screen.findByRole('alert')).textContent).toBe(detail)
+    expect(within(row('Acme (acme)')).queryByText('Inactive')).toBeNull()
+    expect(within(row('Acme (acme)')).getByRole('button', { name: 'Deactivate' })).toBeDefined()
+    expect(written).toEqual([{ path: '/watchlist/1', body: { is_active: false } }])
+  })
+
+  it('never puts a second field on the wire, and never a source or a slug', async () => {
+    const bodies: Record<string, unknown>[] = []
+    // The route stores what it was sent and answers it back, so the mock keeps one row.
+    let stored: Record<string, unknown> = { ...twoRows[0] }
+    server.use(
+      http.get('/watchlist', () => HttpResponse.json([twoRows[0]])),
+      http.patch('/watchlist/:id', async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>
+        bodies.push(body)
+        stored = { ...stored, ...body }
+        return HttpResponse.json(stored)
+      }),
+    )
+    render(<WatchlistScreen />)
+    await screen.findByText('Acme (acme)')
+
+    renameRow('Acme (acme)', 'Acme Ltd')
+    await screen.findByText('Acme Ltd (acme)')
+    fireEvent.click(within(row('Acme Ltd (acme)')).getByRole('button', { name: 'Deactivate' }))
+    await within(row('Acme Ltd (acme)')).findByText('Inactive')
+    fireEvent.click(within(row('Acme Ltd (acme)')).getByRole('button', { name: 'Activate' }))
+    await waitFor(() => expect(within(row('Acme Ltd (acme)')).queryByText('Inactive')).toBeNull())
+
+    expect(bodies).toEqual([{ name: 'Acme Ltd' }, { is_active: false }, { is_active: true }])
+    for (const body of bodies) {
+      expect(Object.keys(body)).toHaveLength(1)
+      expect(Object.keys(body)).not.toContain('source')
+      expect(Object.keys(body)).not.toContain('slug')
+    }
   })
 })
 
