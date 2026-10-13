@@ -132,9 +132,14 @@ def record_rejection(posting_id: int, decision: PrefilterDecision) -> None:
     three situations it records, and the reason keeps `REJECTION_REASON_PREFIX`
     for the readers that still match on it. A posting rejected a second time --
     after its title changed, say -- is the same row: `match.posting_id` is
-    unique, so the row is looked up and its `score`, `reason` and `outcome` are
-    written again, where inserting blind would be an `IntegrityError` the second
-    time.
+    unique, so the row is looked up and its `score`, `reason`, `gaps` and
+    `outcome` are written again, where inserting blind would be an
+    `IntegrityError` the second time. `gaps` is written as NULL on that path,
+    because a rejection row has one spelling of "no gaps" whichever path wrote
+    it -- the insert path below leaves the column to the model's own default,
+    which is that same NULL. A score's gap list describes the score the row no
+    longer carries, and `digest._gaps` and `routes/matches.py` decode NULL to
+    `[]` anyway.
 
     A decision that passed is refused: a score-0 row for a posting that passed is
     a rejection the digest must never see.
@@ -151,8 +156,12 @@ def record_rejection(posting_id: int, decision: PrefilterDecision) -> None:
                 Match(posting_id=posting_id, score=0, reason=reason, outcome="rejected")
             )
         else:
+            # The owner's `state` and a digest's `notified_at` are left alone:
+            # the verdict on a posting is the owner's and not the prefilter's to
+            # overwrite, and a rejection does not un-send an email.
             row.score = 0
             row.reason = reason
+            row.gaps = None
             row.outcome = "rejected"
 
 
