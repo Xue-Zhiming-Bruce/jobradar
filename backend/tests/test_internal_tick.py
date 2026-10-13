@@ -658,3 +658,193 @@ def test_a_rematch_row_that_cannot_be_written_is_500_and_the_guard_is_given_back
     assert captured == []
     assert rematch(client).status_code == 202  # the guard was released on that path too
     assert len(captured) == 1
+
+
+# The second admission (#77): the app's own page, proven by `Origin` naming the
+# request's own `Host`. One guard, `_require_admitted_caller`, is the whole rule,
+# so every case below runs against both doors.
+
+_RUN_PATHS = [
+    pytest.param("/internal/tick", id="the tick"),
+    pytest.param("/internal/rematch", id="the re-match"),
+]
+
+# One `Origin` and the `Host` it names: a default port omitted or spelled out, a
+# non-default port, and http and https -- the scheme the container never sees.
+_SAME_HOSTS = [
+    pytest.param("https://jobs.example", "jobs.example", id="a default port omitted"),
+    pytest.param("https://jobs.example", "jobs.example:443", id="a default port spelled out"),
+    pytest.param("http://jobs.example", "jobs.example:80", id="http on its own default"),
+    pytest.param("http://localhost:8000", "localhost:8000", id="a non-default port"),
+]
+
+
+@pytest.fixture
+def any_work() -> Iterator[FakePipeline]:
+    """One fake over both work providers, so a case can drive either route's door."""
+    fake = FakePipeline()
+    app.dependency_overrides[get_pipeline] = lambda: fake
+    app.dependency_overrides[get_rematch] = lambda: fake
+    try:
+        yield fake
+    finally:
+        app.dependency_overrides.pop(get_pipeline, None)
+        app.dependency_overrides.pop(get_rematch, None)
+
+
+def press(client: TestClient, path: str, headers: dict[str, str]) -> Response:
+    """One press of a run route with exactly the headers a case chose."""
+    return client.post(path, headers=headers)
+
+
+@pytest.mark.parametrize(
+    ("origin", "host", "expected"),
+    [
+        ("https://jobs.example", "jobs.example", True),
+        ("https://jobs.example", "jobs.example:443", True),
+        ("http://jobs.example", "jobs.example:80", True),
+        ("http://localhost:8000", "localhost:8000", True),
+        ("https://jobs.example", "jobs.example:8443", False),
+        ("http://jobs.example:8000", "jobs.example:8001", False),
+        ("https://evil.example", "jobs.example", False),
+        ("null", "jobs.example", False),
+        ("https://jobs.example", None, False),
+        (None, "jobs.example", False),
+        ("https://jobs.example:not-a-port", "jobs.example", False),
+        ("https://jobs.example", "jobs.example:not-a-port", False),
+    ],
+)
+def test_same_origin_ignores_the_scheme_and_resolves_the_default_port(
+    origin: str | None, host: str | None, expected: bool
+) -> None:
+    """The scheme is ignored, a scheme-default port omitted equals one spelled out, else it is text."""
+    assert internal._same_origin(origin, host) is expected
+
+
+@pytest.mark.parametrize("path", _RUN_PATHS)
+@pytest.mark.parametrize(("origin", "host"), _SAME_HOSTS)
+def test_a_same_origin_press_with_no_secret_is_202_and_starts_the_work(
+    client: TestClient,
+    captured: list[Callable[[], None]],
+    any_work: FakePipeline,
+    path: str,
+    origin: str,
+    host: str,
+) -> None:
+    """The app's own page needs no secret: its `Origin` names the request's own `Host`."""
+    response = press(client, path, {internal.ORIGIN_HEADER: origin, internal.HOST_HEADER: host})
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "running"
+    assert len(captured) == 1  # exactly one unit of work was handed over
+    assert any_work.run_ids == []  # and it has provably not run yet
+    (row,) = run_rows()
+    assert row["id"] == body["id"] and row["status"] == "running"
+
+    captured[0]()  # the work, inline, on this test's own thread
+
+    assert any_work.run_ids == [body["id"]]
+    assert run_rows()[0]["status"] == "succeeded"
+
+
+@pytest.mark.parametrize("path", _RUN_PATHS)
+def test_an_origin_naming_another_host_is_401_and_writes_no_row(
+    client: TestClient, captured: list[Callable[[], None]], any_work: FakePipeline, path: str
+) -> None:
+    """A page the browser carries a press to is admitted only for its own host."""
+    response = press(
+        client,
+        path,
+        {internal.ORIGIN_HEADER: "https://evil.example", internal.HOST_HEADER: "jobs.example"},
+    )
+
+    message = refusal(response, 401)
+    assert TICK_SECRET_HEADER in message  # the refusal names the header it wanted
+    assert run_rows() == []  # a refusal is inert
+    assert captured == []
+    assert any_work.run_ids == []
+
+
+@pytest.mark.parametrize("path", _RUN_PATHS)
+def test_no_origin_and_no_secret_is_401(
+    client: TestClient, captured: list[Callable[[], None]], any_work: FakePipeline, path: str
+) -> None:
+    message = refusal(press(client, path, {}), 401)
+    assert TICK_SECRET_HEADER in message
+    assert run_rows() == [] and captured == [] and any_work.run_ids == []
+
+
+@pytest.mark.parametrize("path", _RUN_PATHS)
+def test_a_valid_secret_with_no_origin_is_202(
+    client: TestClient, captured: list[Callable[[], None]], any_work: FakePipeline, path: str
+) -> None:
+    """curl, the Actions workflow and `mcp/` send the header and see today's answers."""
+    response = press(client, path, {TICK_SECRET_HEADER: SECRET})
+
+    assert response.status_code == 202
+    assert len(captured) == 1
+    captured[0]()
+    assert run_rows()[0]["status"] == "succeeded"
+
+
+@pytest.mark.parametrize("path", _RUN_PATHS)
+def test_a_same_origin_press_while_a_run_is_in_progress_is_409(
+    client: TestClient, captured: list[Callable[[], None]], any_work: FakePipeline, path: str
+) -> None:
+    headers = {internal.ORIGIN_HEADER: "https://jobs.example", internal.HOST_HEADER: "jobs.example"}
+
+    assert press(client, path, headers).status_code == 202
+    message = refusal(press(client, path, headers), 409)
+
+    assert "in progress" in message
+    assert len(captured) == 1  # no second unit of work
+    assert len(run_rows()) == 1  # no second row
+    captured[0]()
+    assert run_rows()[0]["status"] == "succeeded"
+
+
+@pytest.mark.parametrize("path", _RUN_PATHS)
+def test_a_starter_that_cannot_start_the_work_is_500_and_gives_the_guard_back(
+    client: TestClient, any_work: FakePipeline, path: str
+) -> None:
+    """The row is written before the hand-over, so a starter that raises leaves it and frees the guard."""
+
+    def the_thread_will_not_start(work: Callable[[], None]) -> None:
+        raise RuntimeError("no thread")
+
+    app.dependency_overrides[get_run_starter] = lambda: the_thread_will_not_start
+    try:
+        response = press(
+            client,
+            path,
+            {internal.ORIGIN_HEADER: "https://jobs.example", internal.HOST_HEADER: "jobs.example"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_run_starter, None)
+
+    refusal(response, 500)
+    assert any_work.run_ids == []  # the work never ran
+    assert [row["status"] for row in run_rows()] == ["running"]  # the row it wrote first
+    assert not internal._run_in_progress.locked()  # the guard was given back
+
+
+@pytest.mark.parametrize("path", _RUN_PATHS)
+def test_with_no_configured_secret_only_the_instance_s_own_page_is_admitted(
+    client: TestClient,
+    captured: list[Callable[[], None]],
+    any_work: FakePipeline,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    """`TICK_SECRET` unset is "open to its own page only", not open to everyone."""
+    monkeypatch.delenv(internal.TICK_SECRET_VARIABLE, raising=False)
+    page = {internal.ORIGIN_HEADER: "https://jobs.example", internal.HOST_HEADER: "jobs.example"}
+
+    assert press(client, path, {}).status_code == 401
+    assert TICK_SECRET_HEADER in refusal(press(client, path, {TICK_SECRET_HEADER: SECRET}), 401)
+    assert run_rows() == [] and captured == []
+
+    assert press(client, path, page).status_code == 202  # its own page is still admitted
+    captured[0]()
+    assert run_rows()[0]["status"] == "succeeded"

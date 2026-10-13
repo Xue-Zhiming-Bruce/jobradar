@@ -5,11 +5,21 @@ The header is `X-Tick-Secret` and the value it is compared against is the
 Neither is read at import: the variable is read per request the way
 `app.services.resume.uploads_dir()` reads its own, so a deployment sets it in the
 environment and a test sets it with `monkeypatch.setenv`. A request without the
-header, with an empty one or with a different one is `401`, and a process whose
-`TICK_SECRET` is unset or empty refuses every tick -- this endpoint is never open
-by default, and an empty variable is not a password. The two values are compared
+header, with an empty one or with a different one is refused, and a process whose
+`TICK_SECRET` is unset or empty refuses every caller that is not the instance's
+own page -- an empty variable is not a password. The two values are compared
 with `hmac.compare_digest`, never with `==`, and neither is logged, stored on a
 row, echoed in a detail or answered with: the value is compared and dropped.
+
+The one guard both routes call is `_require_admitted_caller`, and it admits
+exactly two callers: the one that sent the configured secret, or the one whose
+`Origin` header names the request's own `Host` (host and non-default port equal,
+scheme ignored). The second is what lets the app's own in-page buttons press a
+run on an instance with a token configured, since the bundle cannot carry the
+secret. It is an admission rule, not a security boundary: a browser cannot forge
+its `Origin` cross-site, but a non-browser client can send any `Origin` it likes,
+so anything that can reach the URL can press and spend the owner's model calls.
+`#77` is where that model is decided, and `README.md` states its cost.
 
 A valid tick does four things and nothing else, in this order. It claims the
 guard without blocking, writes the run row (`running`, both counts 0), hands the
@@ -73,6 +83,7 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, select
@@ -93,6 +104,15 @@ router = APIRouter()
 # once. The route reads this variable and no other module does.
 TICK_SECRET_HEADER = "X-Tick-Secret"
 TICK_SECRET_VARIABLE = "TICK_SECRET"
+
+# The second proof: the browser sets `Origin` on every same-origin `POST`, and the
+# request's own `Host` is what that origin has to name.
+ORIGIN_HEADER = "Origin"
+HOST_HEADER = "Host"
+
+# A scheme's default port, so an `Origin` that omits it (the browser does) equals
+# a `Host` that omits it too -- and one that spells it out.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 # The vocabulary `run.status` accepts in `app.models.Run`, spelled the way the
 # check constraint spells it: this module writes `running` and one of the two.
@@ -115,7 +135,12 @@ Pipeline = Callable[[int], None]
 # `app.routes.watchlist` names its own.
 STARTED_RESPONSE = {202: {"description": "A run started: the run row this request wrote"}}
 UNAUTHORISED_RESPONSE = {
-    401: {"description": "The request's shared internal header is missing, empty or wrong"}
+    401: {
+        "description": (
+            "The request is not admitted: it carried neither the shared internal "
+            f"header nor an {ORIGIN_HEADER} naming this instance's own host"
+        )
+    }
 }
 BUSY_RESPONSE = {409: {"description": "A run is already in progress in this process"}}
 UNRECORDED_RESPONSE = {
@@ -227,13 +252,55 @@ def _start_on_a_daemon_thread(work: Callable[[], None]) -> None:
     threading.Thread(target=work, daemon=True).start()
 
 
+def _same_origin(origin: str | None, host: str | None) -> bool:
+    """Whether `Origin` names the same host and port as the request's own `Host`.
+
+    The scheme is ignored -- TLS terminates in front of the container, so the app
+    sees `http` from a browser that reached the edge over `https` -- except that
+    it decides the default port, so an `Origin` the browser wrote without a port
+    (`https://example.com`) equals a `Host` with that port spelled out. Both
+    values are read as text and compared as text; neither is stored or logged. An
+    `Origin` of `null`, a missing header, a non-numeric port or a different host
+    is not this instance's page, and answers `False` rather than raising.
+    """
+    if not origin or not host:
+        return False
+    try:
+        page = urlsplit(origin)
+        own = urlsplit(f"//{host}")
+        default_port = _DEFAULT_PORTS.get(page.scheme, 0)
+        page_port = page.port or default_port
+        own_port = own.port or default_port
+    except ValueError:  # a port that is not a number is not this instance's page
+        return False
+    return bool(page.hostname and own.hostname) and (
+        page.hostname == own.hostname and page_port == own_port
+    )
+
+
+def _require_admitted_caller(request: Request) -> None:
+    """Admit the operator's secret or this instance's own page, and refuse the rest.
+
+    The one guard both routes call, so the tick and the re-match cannot disagree
+    about who is admitted. A request whose `Origin`/`Host` match is admitted, and
+    so is one whose secret matches -- `_require_tick_secret` holds that
+    comparison. A caller that offers neither is refused with one `401` naming both
+    ways in. Neither header is stored, logged, echoed or written to a row.
+    """
+    if _same_origin(request.headers.get(ORIGIN_HEADER), request.headers.get(HOST_HEADER)):
+        return
+    _require_tick_secret(request.headers.get(TICK_SECRET_HEADER))
+
+
 def _require_tick_secret(provided: str | None) -> None:
-    """Refuse the caller who did not send the configured value, and name the header.
+    """Refuse the caller whose secret does not match, and name both ways in.
 
     The comparison is over both values' bytes, so it is constant-time rather than
     stopping at the first difference, and a header a client sent as non-ASCII text
     is a wrong value rather than an exception. The refusal is inert: it logs the
-    header's name, never either value, and it writes no row.
+    header's name, never either value, and it writes no row. It names the second
+    admission too, so a caller that is not this instance's own page is not left
+    guessing which of the two it failed.
     """
     configured = tick_secret()
     offered = provided or ""
@@ -245,7 +312,10 @@ def _require_tick_secret(provided: str | None) -> None:
         )
         raise HTTPException(
             status_code=401,
-            detail=f"The {TICK_SECRET_HEADER} header is missing, empty or wrong",
+            detail=(
+                f"The {TICK_SECRET_HEADER} header is missing, empty or wrong, and the "
+                f"request's {ORIGIN_HEADER} does not name this instance's own host"
+            ),
         )
 
 
@@ -351,15 +421,16 @@ def _start_run(request: Request, starter: RunStarter, pipeline: Pipeline) -> Run
     """Check the caller, claim the guard, write the row, and hand the work over.
 
     The one body the tick and the re-match share, because they differ only in which
-    `Pipeline` provider they take. The caller is checked first, then the guard is
-    claimed, then the row is written, then the work is handed over -- and the answer
-    carries that row in status `running` rather than waiting for the work, which is
-    what `GET /runs/{id}` is for. Nothing before the hand-over can leave the guard
-    held: a row that cannot be written, like work that cannot be started, is a `500`
-    and gives the guard back, so an endpoint recovers instead of refusing every
-    later call.
+    `Pipeline` provider they take. The caller is admitted first -- by the secret or
+    by the request's own page, `_require_admitted_caller`'s one rule -- then the
+    guard is claimed, then the row is written, then the work is handed over, and the
+    answer carries that row in status `running` rather than waiting for the work,
+    which is what `GET /runs/{id}` is for. Nothing before the hand-over can leave
+    the guard held: a row that cannot be written, like work that cannot be started,
+    is a `500` and gives the guard back, so an endpoint recovers instead of refusing
+    every later call.
     """
-    _require_tick_secret(request.headers.get(TICK_SECRET_HEADER))
+    _require_admitted_caller(request)
 
     if not _run_in_progress.acquire(blocking=False):
         raise HTTPException(

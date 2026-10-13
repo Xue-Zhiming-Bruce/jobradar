@@ -59,6 +59,13 @@ export type RunSummary = {
   postingsSeen: number
   matchesCreated: number
   companiesNotFetched: number | null
+  /**
+   * What a re-match's model cap left for a later press (#64): `null` for a tick
+   * and for a re-match that left nothing, `0` for a re-match that decided every
+   * candidate, and a positive count when the cap stopped it short. A tick and a
+   * `0` both render no line, so the two are kept apart here and not in the screen.
+   */
+  postingsNotRematched: number | null
   /** What this run did with each company it attempted: `RunCompanyOutcome` in the contract. */
   companyOutcomes: RunCompanyOutcome[]
 }
@@ -146,6 +153,7 @@ type WireRunSummary = {
   postings_seen: number
   matches_created: number
   companies_not_fetched: number | null
+  postings_not_rematched: number | null
   company_outcomes: WireRunCompanyOutcome[]
 }
 
@@ -204,6 +212,8 @@ const decodeRun = (wire: WireRunSummary): RunSummary => ({
   postingsSeen: wire.postings_seen,
   matchesCreated: wire.matches_created,
   companiesNotFetched: wire.companies_not_fetched,
+  // Copied verbatim, never `?? 0`: `null` and `0` are two different answers (#64).
+  postingsNotRematched: wire.postings_not_rematched,
   companyOutcomes: wire.company_outcomes.map(decodeRunCompanyOutcome),
 })
 
@@ -266,9 +276,20 @@ export async function uploadResume(file: File): Promise<ResumeUploaded> {
   return decodeResume(await request<WireResumeUploaded>('/resume', { method: 'POST', body }))
 }
 
-/** Sends no secret: this bundle is public, so how a browser tick is authorised is `#13`'s. */
+/**
+ * Sends no secret: this bundle is public, and the server admits the app's own
+ * page by the press's same-origin `Origin` header, not by a credential.
+ */
 export async function startTick(): Promise<RunSummary> {
   return decodeRun(await request<WireRunSummary>('/internal/tick', { method: 'POST' }))
+}
+
+/**
+ * Starts one re-match (#64's route), through the same admission as a tick and the
+ * same decode: no body, no header, the row the `202` carries.
+ */
+export async function rematch(): Promise<RunSummary> {
+  return decodeRun(await request<WireRunSummary>('/internal/rematch', { method: 'POST' }))
 }
 
 export async function getRun(id: number): Promise<RunSummary> {

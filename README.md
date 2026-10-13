@@ -689,6 +689,14 @@ Each with what it costs, because a limitation without a consequence is a slogan.
 - **One user, no accounts and no sharing.** There is no login and nothing scoped
   to a user: the watchlist, the resume and the matches belong to the instance, so
   two people cannot use one instance without sharing all three.
+- **The run buttons are admitted by same-origin, not by a login.** With no login,
+  whoever can reach the URL can press both **"Run digest now"** and **"Re-match
+  stored postings"**: one press spends at most `SCORER_MAX_POSTINGS` model calls
+  of the owner's key, and a digest press also sends mail. Both routes admit a
+  press whose `Origin` names the request's own `Host` — an admission rule shaped
+  like a CSRF guard, not a credential, because a non-browser client can send any
+  `Origin` it likes. Scripts, the scheduled Actions workflow and `mcp/` keep using
+  `X-Tick-Secret`.
 - **No embeddings and no vector store, so a match is one LLM call per posting**,
   capped for a single run by `SCORER_MAX_POSTINGS` (default 50). Cost and latency
   grow with the size of the watchlist, and postings past the cap in one run are

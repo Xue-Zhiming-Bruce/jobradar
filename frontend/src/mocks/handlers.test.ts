@@ -83,6 +83,13 @@ describe('the mock answers the shapes the contract requires', () => {
     expect(await keysOf(response)).toEqual(requiredKeys('RunSummary'))
   })
 
+  it('POST /internal/rematch answers a RunSummary', async () => {
+    const response = await api('/internal/rematch', { method: 'POST' })
+
+    expect(response.status).toBe(202)
+    expect(await keysOf(response)).toEqual(requiredKeys('RunSummary'))
+  })
+
   it('GET /runs/:id answers a RunSummary', async () => {
     const response = await api('/runs/1')
 

@@ -27,6 +27,9 @@ export const handlers = [
 
   http.post('/internal/tick', () => HttpResponse.json(runSummary, { status: 202 })),
 
+  // The re-match answers the same fresh `running` row the tick does (#64).
+  http.post('/internal/rematch', () => HttpResponse.json(runSummary, { status: 202 })),
+
   http.get('/runs/:id', () => HttpResponse.json(runSucceeded)),
 
   http.get('/matches', () => HttpResponse.json(matches)),

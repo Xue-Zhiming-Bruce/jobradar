@@ -7,13 +7,14 @@ import { server } from './mocks/server'
 afterEach(cleanup)
 
 describe('the app', () => {
-  it('renders the resume upload, the watchlist, the matches and the run button', async () => {
+  it('renders the resume upload, the watchlist, the matches and the two run controls', async () => {
     render(<App />)
 
     expect(screen.getByLabelText('Resume file')).toBeDefined()
     expect(await screen.findByText('Acme (acme)')).toBeDefined()
     expect(await screen.findByText('Globex: Data engineer')).toBeDefined()
     expect(screen.getByRole('button', { name: 'Run digest now' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Re-match stored postings' })).toBeDefined()
   })
 
   it('shows a refused tick as an error and leaves the rest of the screen usable', async () => {
