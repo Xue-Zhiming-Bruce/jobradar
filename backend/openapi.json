@@ -421,7 +421,7 @@
             }
           },
           "401": {
-            "description": "The request's shared internal header is missing, empty or wrong"
+            "description": "The request is not admitted: it carried neither the shared internal header nor an Origin naming this instance's own host"
           },
           "409": {
             "description": "A run is already in progress in this process"
@@ -452,7 +452,7 @@
             }
           },
           "401": {
-            "description": "The request's shared internal header is missing, empty or wrong"
+            "description": "The request is not admitted: it carried neither the shared internal header nor an Origin naming this instance's own host"
           },
           "409": {
             "description": "A run is already in progress in this process"
