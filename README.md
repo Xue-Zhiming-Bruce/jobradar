@@ -514,9 +514,8 @@ or a screen is the app's business. Its four optional arguments are the route's o
 query parameters and only the ones it was given are sent: `min_score` is a floor
 on the score, `state` is one value of the column's vocabulary (`"new"`, `"saved"`
 or `"dismissed"`), `company_id` narrows to one company's postings, and `limit` is
-the newest N (at most 200). A list
-is rendered as one JSON block per row, because that is how the SDK renders a
-returned list; anything else is one JSON block. Every failure a client can see is
+the newest N (at most 200). A list is rendered as one JSON block per row, because
+that is how the SDK renders a returned list; anything else is one JSON block. Every failure a client can see is
 a tool error (`isError`) carrying the app's own `detail` text, never a hang, never
 a silent success and never a traceback.
 
