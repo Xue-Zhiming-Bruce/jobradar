@@ -58,6 +58,12 @@ export type RunSummary = {
   error: string | null
   postingsSeen: number
   matchesCreated: number
+  /**
+   * How many matches this run's own digest emailed: `0` when the digest ran and
+   * sent nothing, and `null` until the send records a count -- the `202`'s fresh
+   * row, and a send that raised. Two different answers, copied verbatim (#78).
+   */
+  matchesEmailed: number | null
   companiesNotFetched: number | null
   /**
    * What a re-match's model cap left for a later press (#64): `null` for a tick
@@ -152,6 +158,7 @@ type WireRunSummary = {
   error: string | null
   postings_seen: number
   matches_created: number
+  matches_emailed: number | null
   companies_not_fetched: number | null
   postings_not_rematched: number | null
   company_outcomes: WireRunCompanyOutcome[]
@@ -211,6 +218,9 @@ const decodeRun = (wire: WireRunSummary): RunSummary => ({
   error: wire.error,
   postingsSeen: wire.postings_seen,
   matchesCreated: wire.matches_created,
+  // Copied verbatim, never `?? 0`: `null` (no answer yet) and `0` (the digest
+  // emailed nothing) are two different answers (#78).
+  matchesEmailed: wire.matches_emailed,
   companiesNotFetched: wire.companies_not_fetched,
   // Copied verbatim, never `?? 0`: `null` and `0` are two different answers (#64).
   postingsNotRematched: wire.postings_not_rematched,
