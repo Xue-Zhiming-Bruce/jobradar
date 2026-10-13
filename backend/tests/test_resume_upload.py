@@ -52,9 +52,10 @@ DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 SMALL_LIMIT = 1024
 
 _UNSUPPORTED_DECLARED_TYPES = [
-    # A scan format this file's own task does not accept: it is still a `415` now
-    # that a scan can be read, and #53 is where TIFF, HEIC and WebP arrive.
-    ("scan.tiff", b"II*\x00", "image/tiff"),
+    # Where `("scan.tiff", b"II*\x00", "image/tiff")` stood until #53: TIFF, HEIC
+    # and WebP are readable formats now, so a `415` needs a real image format this
+    # app still does not read -- and the list still covers four unsupported types.
+    ("scan.gif", b"GIF89a", "image/gif"),
     ("archive.zip", b"PK\x03\x04", "application/zip"),
     ("rows.csv", b"title,company\n", "text/csv"),
     # Real PDF bytes under a type nobody promised to read: refused as well,

@@ -37,10 +37,13 @@ _EXPECTED_EXTENSIONS = {
     resume.TEXT_PLAIN: ".txt",
     resume.APPLICATION_PDF: ".pdf",
     resume.DOCX: ".docx",
-    # The two scan images #27 reads: the stored file keeps the format's own
-    # extension the way every other upload does.
+    # The five scan images #27 and #53 read: the stored file keeps the format's
+    # own extension the way every other upload does.
     resume.IMAGE_PNG: ".png",
     resume.IMAGE_JPEG: ".jpg",
+    resume.IMAGE_TIFF: ".tif",
+    resume.IMAGE_HEIC: ".heic",
+    resume.IMAGE_WEBP: ".webp",
 }
 
 
@@ -52,6 +55,22 @@ def test_uploads_dir_is_read_in_one_module_only() -> None:
     )
 
     assert readers == ["resume.py"]
+
+
+def test_the_heif_plugin_is_registered_in_one_module_only() -> None:
+    """One `pillow_heif` under `app/`: `resume.py`, the module that opens the images.
+
+    The registration is global -- it is what makes `Image.open` read a HEIC at all
+    -- so a second module naming the plugin would be a second registration and no
+    single place to read the decision from. The library is named nowhere else.
+    """
+    namers = sorted(
+        path.name
+        for path in APP_ROOT.rglob("*.py")
+        if "pillow_heif" in path.read_text(encoding="utf-8")
+    )
+
+    assert namers == ["resume.py"]
 
 
 def test_max_upload_bytes_is_read_in_one_module_only() -> None:

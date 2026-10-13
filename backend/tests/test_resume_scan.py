@@ -10,10 +10,11 @@ that ignored the seam, or that read a real key from the shell, fails here instea
 of quietly passing. The cases that assert stored rows take the shared `engine`
 fixture, so they run on SQLite and on PostgreSQL.
 
-The scans are synthetic and built by this module -- a small PNG, a small JPEG and
-a PDF whose pages carry those images -- because the repository is public and holds
-no resume, real or otherwise. The text a scan yields is user data and the key is a
-credential, so the last case proves neither reaches a body or a log record.
+The scans are synthetic and built by this module -- a small PNG, a small JPEG, a
+multi-frame TIFF, an animated WebP, a small HEIC and a PDF whose pages carry those
+images -- because the repository is public and holds no resume, real or otherwise.
+The text a scan yields is user data and the key is a credential, so the last cases
+prove neither reaches a body or a log record.
 """
 
 import ast
@@ -58,9 +59,13 @@ TEXT_PLAIN = "text/plain"
 APPLICATION_PDF = "application/pdf"
 IMAGE_PNG = "image/png"
 IMAGE_JPEG = "image/jpeg"
-# A scan format this task does not accept and #53 does: still a 415.
 IMAGE_TIFF = "image/tiff"
+IMAGE_HEIC = "image/heic"
+IMAGE_WEBP = "image/webp"
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+# An image format this app still does not read: the `415` the moved assertions use.
+IMAGE_GIF = "image/gif"
 
 # A limit small enough that an oversized scan is cheap to send.
 SMALL_LIMIT = 64
@@ -150,6 +155,45 @@ def scanned_pdf_bytes(pages: list[tuple[int, int]]) -> bytes:
     images = [Image.new("L", size, color=200) for size in pages]
     buffer = BytesIO()
     images[0].save(buffer, format="PDF", save_all=True, append_images=images[1:])
+    return buffer.getvalue()
+
+
+def tiff_bytes(frames: int = 1) -> bytes:
+    """A TIFF of `frames` pages, built here: a scanner's feed, one frame per page.
+
+    The frames differ in size, so the frame order a case asserts is a fact about
+    the page images rather than a coincidence of identical bytes.
+    """
+    images = [Image.new("L", (40 + index, 30), color=200) for index in range(frames)]
+    buffer = BytesIO()
+    images[0].save(buffer, format="TIFF", save_all=True, append_images=images[1:])
+    return buffer.getvalue()
+
+
+def webp_bytes(frames: int = 1) -> bytes:
+    """A WebP of `frames` frames: animated, which is the shape that has more than one.
+
+    Every frame is the same size, which is the format's own rule, and they differ
+    in what they draw, so the one page image a case expects can be told from the
+    frames it is not.
+    """
+    images = [Image.new("L", (60, 20), color=10 + 90 * index) for index in range(frames)]
+    buffer = BytesIO()
+    images[0].save(
+        buffer, format="WEBP", save_all=True, append_images=images[1:], duration=100
+    )
+    return buffer.getvalue()
+
+
+def heic_bytes(size: tuple[int, int] = (40, 30)) -> bytes:
+    """One synthetic HEIC, encoded by the wheel the app ships: no photograph, no fixture file.
+
+    It is written through `Image.save(format="HEIF")`, which works because
+    `app.services.resume` registered the plugin; a broken registration fails here
+    rather than passing as `415`. The bytes go nowhere: they are a test's own.
+    """
+    buffer = BytesIO()
+    Image.new("RGB", size, color=(200, 10, 10)).save(buffer, format="HEIF")
     return buffer.getvalue()
 
 
@@ -391,7 +435,7 @@ def test_a_blank_text_file_or_docx_is_422_and_the_reader_is_never_consulted(
     assert stored_files(uploads_dir) == []
 
 
-# The type gate, on the two types this task adds.
+# The type gate: the declared type and the bytes have to name the same format.
 
 
 @pytest.mark.parametrize(
@@ -412,12 +456,47 @@ def test_a_blank_text_file_or_docx_is_422_and_the_reader_is_never_consulted(
             id="PNG bytes declared a JPEG",
         ),
         pytest.param(
-            "scan.tiff",
-            b"II*\x00",
+            "scan.webp",
+            webp_bytes(),
+            IMAGE_PNG,
+            "Unsupported resume type 'image/png': the file's bytes are not a PNG image",
+            id="WebP bytes declared a PNG",
+        ),
+        pytest.param(
+            "scan.png",
+            png_bytes(),
+            IMAGE_WEBP,
+            "Unsupported resume type 'image/webp': the file's bytes are not a WebP image",
+            id="PNG bytes declared a WebP",
+        ),
+        pytest.param(
+            "scan.heic",
+            heic_bytes(),
             IMAGE_TIFF,
-            "Unsupported resume type 'image/tiff': send a PDF, a DOCX, a PNG, a JPEG or a "
-            "plain text file",
-            id="a scan format this task does not accept",
+            "Unsupported resume type 'image/tiff': the file's bytes are not a TIFF image",
+            id="HEIC bytes declared a TIFF",
+        ),
+        pytest.param(
+            "scan.tif",
+            tiff_bytes(),
+            IMAGE_HEIC,
+            "Unsupported resume type 'image/heic': the file's bytes are not a HEIC image",
+            id="TIFF bytes declared a HEIC",
+        ),
+        pytest.param(
+            "scan.heic",
+            b"\x00\x00\x00\x18ftypisom" + b"\x00" * 40,
+            IMAGE_HEIC,
+            "Unsupported resume type 'image/heic': the file's bytes are not a HEIC image",
+            id="an MP4-shaped body declared a HEIC",
+        ),
+        pytest.param(
+            "scan.gif",
+            b"GIF89a",
+            IMAGE_GIF,
+            "Unsupported resume type 'image/gif': send a PDF, a DOCX, a PNG, a JPEG, a "
+            "TIFF, a HEIC, a WebP or a plain text file",
+            id="a scan format this app does not accept",
         ),
     ],
 )
@@ -429,6 +508,13 @@ def test_a_scan_that_is_not_the_type_its_bytes_are_is_415(
     content_type: str,
     message: str,
 ) -> None:
+    """Both halves of the gate have to agree, in both directions.
+
+    The `image/gif` case is where `image/tiff` stood until #53: TIFF is readable
+    now, and the sentence a client fixes their request from enumerates the formats
+    this app does read, so it moved with the set and a format it still does not
+    read stands in its place. No other case here changed.
+    """
     reader = FakeResumeOcr(SENTINEL)
     install(reader)
 
@@ -452,6 +538,54 @@ def test_a_truncated_scan_is_422_naming_the_damage_and_no_model_is_asked(
     message = refusal(upload(client, "scan.png", truncated, IMAGE_PNG), 422)
 
     assert message == "The image/png file is corrupt or truncated: it could not be read"
+    assert reader.calls == []
+    assert rows() == []
+    assert stored_files(uploads_dir) == []
+
+
+@pytest.mark.parametrize(
+    ("filename", "data", "content_type"),
+    [
+        pytest.param(
+            "scan.tif",
+            b"II*\x00" + b"\x00" * 60,
+            IMAGE_TIFF,
+            id="a TIFF header with no image data after it",
+        ),
+        pytest.param(
+            "scan.webp",
+            b"RIFF\x00\x00\x00\x00WEBP" + b"not an image after the form type",
+            IMAGE_WEBP,
+            id="a WebP whose body is garbage",
+        ),
+        pytest.param(
+            "scan.heic",
+            heic_bytes()[:20],
+            IMAGE_HEIC,
+            id="a HEIC the bundled decoder refuses",
+        ),
+    ],
+)
+def test_a_corrupt_scan_of_the_new_formats_is_422_and_never_a_500(
+    client: TestClient,
+    uploads_dir: Path,
+    filename: str,
+    data: bytes,
+    content_type: str,
+) -> None:
+    """Right signature, undecodable body: #27's typed `422`, and no `500` either way.
+
+    The signature is what lets each body through the byte gate, so what refuses it
+    is the decoder -- which is the point. `TestClient` re-raises what the app does
+    not handle, so a `422` here is also proof the refusal did not escape.
+    """
+    assert resume_service.content_type_of(content_type, data) == content_type
+    reader = FakeResumeOcr(SENTINEL)
+    install(reader)
+
+    message = refusal(upload(client, filename, data, content_type), 422)
+
+    assert message == f"The {content_type} file is corrupt or truncated: it could not be read"
     assert reader.calls == []
     assert rows() == []
     assert stored_files(uploads_dir) == []
@@ -519,6 +653,51 @@ def test_a_scan_past_the_cap_is_read_in_two_requests_and_stored_whole(
     assert [window_images(request) for request in requests] == [pages[0:5], pages[5:6]]
     (row,) = rows()
     assert row["text"] == "pages one to five\nthe sixth page"
+    assert stored_files(uploads_dir) == [row["stored_path"]]
+
+
+def test_a_twelve_frame_tiff_is_read_in_three_requests_in_frame_order(
+    client: TestClient, uploads_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scanner's TIFF feed is pages: every frame, in order, five per request.
+
+    `ceil(12 / 5)` is three windows, and the stacked text is the three answers
+    joined in frame order -- nothing reordered, nothing dropped.
+    """
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    tiff = tiff_bytes(12)
+    requests: list[Any] = []
+    install(
+        LlmResumeOcr(
+            client=vision_transport(
+                [
+                    ocr_answer("frames one to five"),
+                    ocr_answer("frames six to ten"),
+                    ocr_answer("frames eleven and twelve"),
+                ],
+                requests,
+            )
+        )
+    )
+
+    response = upload(client, "feed.tif", tiff, IMAGE_TIFF)
+
+    assert response.status_code == 201, response.text
+    assert len(requests) == 3
+    pages = resume_service.scan_images(IMAGE_TIFF, tiff)
+    assert len(pages) == 12
+    assert [window_images(request) for request in requests] == [
+        pages[0:5],
+        pages[5:10],
+        pages[10:12],
+    ]
+    (row,) = rows()
+    assert row["text"] == (
+        "frames one to five\nframes six to ten\nframes eleven and twelve"
+    )
+    assert row["content_type"] == IMAGE_TIFF
+    assert row["stored_path"].suffix == ".tif"
+    assert row["stored_path"].read_bytes() == tiff
     assert stored_files(uploads_dir) == [row["stored_path"]]
 
 
@@ -617,15 +796,29 @@ def test_a_reader_that_failed_is_502_with_the_scorer_s_own_wording(
     assert stored_files(uploads_dir) == []
 
 
+@pytest.mark.parametrize(
+    ("filename", "data", "content_type"),
+    [
+        pytest.param("big.png", png_bytes((80, 80)), IMAGE_PNG, id="png"),
+        pytest.param("big.tif", tiff_bytes(2), IMAGE_TIFF, id="tiff"),
+        pytest.param("big.heic", heic_bytes((80, 80)), IMAGE_HEIC, id="heic"),
+        pytest.param("big.webp", webp_bytes(2), IMAGE_WEBP, id="webp"),
+    ],
+)
 def test_an_upload_over_the_limit_is_413_and_the_reader_is_never_consulted(
-    client: TestClient, uploads_dir: Path, small_limit: int
+    client: TestClient,
+    uploads_dir: Path,
+    small_limit: int,
+    filename: str,
+    data: bytes,
+    content_type: str,
 ) -> None:
-    data = png_bytes((80, 80))
+    """The limit is checked on the bytes that arrived, before any of them is decoded."""
     assert len(data) > small_limit
     reader = FakeResumeOcr(SENTINEL)
     install(reader)
 
-    message = refusal(upload(client, "big.png", data, IMAGE_PNG), 413)
+    message = refusal(upload(client, filename, data, content_type), 413)
 
     assert message == f"Resume is {len(data)} bytes: the upload limit is {small_limit} bytes"
     assert reader.calls == []
@@ -692,7 +885,7 @@ def test_the_upload_stays_async_and_reads_a_scan_in_a_thread() -> None:
     )
 
 
-# The page images: the upload's own image, or the PDF's pages, each a PNG.
+# The page images: the upload's own image, or a TIFF's frames, or a PDF's pages, each a PNG.
 
 
 @pytest.mark.parametrize(
@@ -700,6 +893,8 @@ def test_the_upload_stays_async_and_reads_a_scan_in_a_thread() -> None:
     [
         pytest.param(png_bytes((40, 30)), IMAGE_PNG, id="png"),
         pytest.param(jpeg_bytes((60, 20)), IMAGE_JPEG, id="jpeg"),
+        pytest.param(heic_bytes((40, 30)), IMAGE_HEIC, id="heic"),
+        pytest.param(webp_bytes(), IMAGE_WEBP, id="webp"),
     ],
 )
 def test_a_scan_image_is_its_own_one_page_image(data: bytes, content_type: str) -> None:
@@ -707,6 +902,42 @@ def test_a_scan_image_is_its_own_one_page_image(data: bytes, content_type: str) 
 
     assert page.startswith(b"\x89PNG\r\n\x1a\n")
     assert Image.open(BytesIO(page)).size == Image.open(BytesIO(data)).size
+
+
+def test_an_animated_webp_yields_one_page_image_of_its_first_frame() -> None:
+    """The other frames of an animation are not pages, so none of them is sent."""
+    data = webp_bytes(2)
+    assert Image.open(BytesIO(data)).n_frames == 2
+
+    (page,) = resume_service.scan_images(IMAGE_WEBP, data)
+
+    # The first frame draws 10, the second 100.
+    assert Image.open(BytesIO(page)).convert("L").getpixel((0, 0)) == 10
+
+
+@pytest.mark.parametrize("frames", [1, 7], ids=["one frame", "seven frames"])
+def test_a_tiff_yields_one_page_image_per_frame_in_frame_order(frames: int) -> None:
+    """Every frame, in frame order: the sizes make the order a fact, not a coincidence."""
+    data = tiff_bytes(frames)
+
+    pages = resume_service.scan_images(IMAGE_TIFF, data)
+
+    assert len(pages) == frames
+    assert [Image.open(BytesIO(page)).size for page in pages] == [
+        (40 + index, 30) for index in range(frames)
+    ]
+    for page in pages:
+        assert page.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_a_tiff_frame_over_the_edge_is_scaled_to_it() -> None:
+    """1800 px in, at most 1600 px out: the bound every other page image meets."""
+    buffer = BytesIO()
+    Image.new("L", (1800, 40), color=200).save(buffer, format="TIFF")
+
+    (page,) = resume_service.scan_images(IMAGE_TIFF, buffer.getvalue())
+
+    assert max(Image.open(BytesIO(page)).size) == resume_service.OCR_MAX_IMAGE_EDGE
 
 
 def test_a_scanned_pdf_yields_one_png_per_page_image() -> None:
@@ -764,3 +995,37 @@ def test_neither_the_ocr_text_nor_the_key_reaches_a_log_or_a_body(
     assert "(text read by OCR)" in route_lines[0]
     # The key reached no column either: not the text, not the filename, not the path.
     assert [value for value in row.values() if isinstance(value, str) and THE_KEY in value] == []
+
+
+def test_no_page_image_byte_reaches_a_log_line_or_a_message(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A page image is a request payload: its bytes are not logged and not answered with.
+
+    The needles are the page image's own base64 and the upload's bytes as a log
+    record would print them, and one request carrying that base64 proves each
+    needle is the payload rather than a string that could not appear anywhere.
+    """
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    caplog.set_level(logging.DEBUG)
+    data = heic_bytes()
+    requests: list[Any] = []
+    install(LlmResumeOcr(client=vision_transport([ocr_answer(SENTINEL)], requests)))
+
+    stored = upload(client, "scan.heic", data, IMAGE_HEIC)
+    install(RefusingOcr("the model call failed (HTTP 500)"))
+    failed = upload(client, "scan-again.heic", data, IMAGE_HEIC)
+    # A record of the test's own, so an empty stream cannot pass as evidence.
+    logging.getLogger("tests.resume_scan").debug("the capture is live")
+
+    assert (stored.status_code, failed.status_code) == (201, 502)
+    (page,) = window_images(requests[0])
+    encoded = base64.b64encode(page).decode("ascii")
+    assert encoded in requests[0].content.decode("utf-8")  # the needle is the payload
+
+    lines = log_lines(caplog.records)
+    assert lines, "the capture must be non-vacuous"
+    for needle in (encoded, str(page), str(data), SENTINEL, THE_KEY):
+        assert [line for line in lines if needle in line] == [], needle
+        assert needle not in stored.text
+        assert needle not in failed.text

@@ -13,12 +13,12 @@ under `uploads_dir()` with a name this module generates -- the client's
 raises a `ResumeRejected` naming what was wrong; the route turns that into the
 HTTP answer.
 
-A scan is one of those formats: a PNG, a JPEG or an image-only PDF carries no
-text layer, so `extract_text` refuses it as blank like any other file without
-text, and `OCR_CONTENT_TYPES` is what tells the route which of those refusals is
-a scan worth reading by a model. `scan_images` is the other half -- the page
-images of that upload, bounded and normalised -- and it is as model-free and
-key-free as the rest of this module.
+A scan is one of those formats: a PNG, a JPEG, a TIFF, a HEIC, a WebP or an
+image-only PDF carries no text layer, so `extract_text` refuses it as blank like
+any other file without text, and `OCR_CONTENT_TYPES` is what tells the route
+which of those refusals is a scan worth reading by a model. `scan_images` is the
+other half -- the page images of that upload, bounded and normalised -- and it is
+as model-free and key-free as the rest of this module.
 
 `UPLOADS_DIR` and `MAX_UPLOAD_BYTES` are read here and in no other module, the
 way the database URL is read in `app/db.py` only. Unset means the defaults below,
@@ -46,13 +46,20 @@ from io import BytesIO
 from pathlib import Path
 from xml.etree import ElementTree
 
-from PIL import Image
+from PIL import Image, ImageSequence
+from pillow_heif import register_heif_opener
 from pypdf import PdfReader
 from sqlalchemy import select, update
 from sqlalchemy.orm import load_only
 
 from app import db
 from app.models import Resume
+
+# HEIC is HEVC inside an ISO-BMFF container, which Pillow does not read on its
+# own: this one call registers the plugin for every `Image.open` in the process,
+# and it is here -- the one module that decides what an upload's bytes are -- so
+# the HEIF reader is registered once and in the module that opens the image.
+register_heif_opener()
 
 UPLOADS_DIR_VARIABLE = "UPLOADS_DIR"
 MAX_UPLOAD_BYTES_VARIABLE = "MAX_UPLOAD_BYTES"
@@ -68,16 +75,28 @@ APPLICATION_PDF = "application/pdf"
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 IMAGE_PNG = "image/png"
 IMAGE_JPEG = "image/jpeg"
+IMAGE_TIFF = "image/tiff"
+IMAGE_HEIC = "image/heic"
+IMAGE_WEBP = "image/webp"
 
 # The formats this app reads, spelled the one way the column and the contract
 # store them: a client's header is canonicalised to one of these.
-SUPPORTED_CONTENT_TYPES = (TEXT_PLAIN, APPLICATION_PDF, DOCX, IMAGE_PNG, IMAGE_JPEG)
+SUPPORTED_CONTENT_TYPES = (
+    TEXT_PLAIN,
+    APPLICATION_PDF,
+    DOCX,
+    IMAGE_PNG,
+    IMAGE_JPEG,
+    IMAGE_TIFF,
+    IMAGE_HEIC,
+    IMAGE_WEBP,
+)
 
-# The formats a scan is written in: the two images, and the PDF a scanner fills
+# The formats a scan is written in: the five images, and the PDF a scanner fills
 # with them. The route asks a model to read a file of one of these when its own
 # readers found no text, and only then: a blank text file or DOCX is no scan, so
 # its refusal stays a refusal.
-OCR_CONTENT_TYPES = (APPLICATION_PDF, IMAGE_PNG, IMAGE_JPEG)
+OCR_CONTENT_TYPES = (APPLICATION_PDF, IMAGE_PNG, IMAGE_JPEG, IMAGE_TIFF, IMAGE_HEIC, IMAGE_WEBP)
 
 _EXTENSIONS = {
     TEXT_PLAIN: ".txt",
@@ -85,15 +104,31 @@ _EXTENSIONS = {
     DOCX: ".docx",
     IMAGE_PNG: ".png",
     IMAGE_JPEG: ".jpg",
+    IMAGE_TIFF: ".tif",
+    IMAGE_HEIC: ".heic",
+    IMAGE_WEBP: ".webp",
 }
 
-# What the bytes of a PDF, an OOXML package or one of the two scan images start
+# What the bytes of a PDF, an OOXML package or one of the five scan images start
 # with, and the part a Word document has and an Excel workbook
 # (`xl/workbook.xml`) does not.
 _PDF_MAGIC = b"%PDF"
 _ZIP_MAGIC = b"PK\x03\x04"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _JPEG_MAGIC = b"\xff\xd8\xff"
+# A TIFF's header: byte order, then the version. 43 is BigTIFF, which Pillow
+# reads as the same format (`PIL/TiffImagePlugin.py` reads both).
+_TIFF_MAGIC = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")
+# A WebP is a RIFF container: `RIFF` at offset 0 and the form type at offset 8.
+# The first four bytes alone admit a WAV, so both are checked.
+_WEBP_MAGIC = b"RIFF"
+_WEBP_FORM = b"WEBP"
+# A HEIC is HEVC inside an ISO-BMFF container: the box type at offset 4 and the
+# major brand at offset 8. The brand set is what tells a HEIF image from the
+# other ISO-BMFF files -- an MP4 (`ftypisom`), a video, an AVIF -- which this app
+# does not read. Every one of these brands carries HEVC.
+_HEIC_MAGIC = b"ftyp"
+_HEIC_BRANDS = (b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"hevm", b"hevs")
 
 # At most this many page images reach ONE REQUEST, and none of them has a long
 # edge over this many pixels: the cap bounds the payload one request can carry
@@ -162,14 +197,14 @@ def content_type_of(declared: str | None, data: bytes) -> str:
     """The format an upload is, decided by its declared type *and* by its bytes.
 
     Returns the canonical media type the row stores. A declared type outside the
-    three supported ones, and bytes that are not the format they were declared as,
-    are both `UnsupportedResume`.
+    supported set, and bytes that are not the format they were declared as, are
+    both `UnsupportedResume`.
     """
     media_type = declared_content_type(declared)
     if media_type not in SUPPORTED_CONTENT_TYPES:
         raise UnsupportedResume(
             f"Unsupported resume type '{media_type or 'none'}': send a PDF, a DOCX, a "
-            f"PNG, a JPEG or a plain text file"
+            f"PNG, a JPEG, a TIFF, a HEIC, a WebP or a plain text file"
         )
     if media_type == APPLICATION_PDF and not data.startswith(_PDF_MAGIC):
         raise UnsupportedResume(
@@ -188,6 +223,22 @@ def content_type_of(declared: str | None, data: bytes) -> str:
         raise UnsupportedResume(
             f"Unsupported resume type '{media_type}': the file's bytes are not a JPEG image"
         )
+    if media_type == IMAGE_TIFF and not data.startswith(_TIFF_MAGIC):
+        raise UnsupportedResume(
+            f"Unsupported resume type '{media_type}': the file's bytes are not a TIFF image"
+        )
+    if media_type == IMAGE_HEIC and not (
+        data[4:8] == _HEIC_MAGIC and data[8:12] in _HEIC_BRANDS
+    ):
+        raise UnsupportedResume(
+            f"Unsupported resume type '{media_type}': the file's bytes are not a HEIC image"
+        )
+    if media_type == IMAGE_WEBP and not (
+        data.startswith(_WEBP_MAGIC) and data[8:12] == _WEBP_FORM
+    ):
+        raise UnsupportedResume(
+            f"Unsupported resume type '{media_type}': the file's bytes are not a WebP image"
+        )
     return media_type
 
 
@@ -199,8 +250,9 @@ def extract_text(content_type: str, data: bytes) -> str:
     uploads, not server errors. Blank is a rejection of its own, so a file that
     parses but says nothing is told apart from one that is broken -- and an image
     is decided here, at once: it has no text layer to read, and the bytes still
-    have to be an image, so a truncated PNG or JPEG is the corrupt upload this
-    reader refuses rather than something a model is asked about.
+    have to be an image, so a truncated PNG, JPEG, TIFF, HEIC or WebP is the
+    corrupt upload this reader refuses rather than something a model is asked
+    about.
     """
     readers = {
         TEXT_PLAIN: _text_file_text,
@@ -208,6 +260,9 @@ def extract_text(content_type: str, data: bytes) -> str:
         DOCX: _word_document_text,
         IMAGE_PNG: _image_text,
         IMAGE_JPEG: _image_text,
+        IMAGE_TIFF: _image_text,
+        IMAGE_HEIC: _image_text,
+        IMAGE_WEBP: _image_text,
     }
     try:
         text = readers[content_type](data)
@@ -237,13 +292,16 @@ def require_text(content_type: str, text: str) -> str:
 def scan_images(content_type: str, data: bytes) -> list[bytes]:
     """The page images of a scan, each re-encoded as a PNG with a long edge of at most 1600 px.
 
-    A PNG or a JPEG upload is its own one page image; a PDF contributes the images
-    its pages carry, in page order, which is what a scan is. Every page image is
-    returned, so no page is silently dropped: the reader bounds how many reach one
-    request (`OCR_MAX_IMAGES`), and the format is normalised here so nothing
-    downstream depends on how the scanner stored the stream. A PDF whose pages
-    hold no readable image is `[]` -- there is no image to send and no request to
-    make.
+    A PNG, a JPEG, a HEIC or a WebP upload is its own one page image -- the first
+    and primary frame, because an animated WebP's frames and a HEIC's burst or
+    auxiliary images are not pages. A TIFF contributes one page image per frame,
+    in frame order, because a scanner's TIFF feed is pages the way a scanned PDF
+    is, and a PDF contributes the images its pages carry, in page order. Every
+    page image is returned, so no page is silently dropped: the reader bounds how
+    many reach one request (`OCR_MAX_IMAGES`), and the format is normalised here so
+    nothing downstream depends on how the scanner stored the stream. A PDF whose
+    pages hold no readable image is `[]` -- there is no image to send and no
+    request to make.
 
     The bytes are user data and this function neither logs them nor returns them
     to a client: they are request payloads and nothing else. What will not load as
@@ -251,8 +309,10 @@ def scan_images(content_type: str, data: bytes) -> list[bytes]:
     a corrupt upload and not a model failure.
     """
     try:
-        if content_type in (IMAGE_PNG, IMAGE_JPEG):
+        if content_type in (IMAGE_PNG, IMAGE_JPEG, IMAGE_HEIC, IMAGE_WEBP):
             return [_png_page(_decoded_image(data))]
+        if content_type == IMAGE_TIFF:
+            return _tiff_page_images(data)
         if content_type == APPLICATION_PDF:
             return _pdf_page_images(data)
         return []
@@ -553,7 +613,7 @@ def _image_text(data: bytes) -> str:
     """A scan reads as blank: an image carries no text layer, so the reader answers nothing.
 
     It is still decoded here, so the bytes have to be an image before any model
-    is reached: `extract_text` turns a truncated PNG or JPEG into the same 422 a
+    is reached: `extract_text` turns a truncated image into the same 422 a
     truncated PDF gets. The scan is decoded once more where its request is built,
     which costs milliseconds against the seconds the model call takes.
     """
@@ -566,6 +626,19 @@ def _decoded_image(data: bytes) -> Image.Image:
     image = Image.open(BytesIO(data))
     image.load()
     return image
+
+
+def _tiff_page_images(data: bytes) -> list[bytes]:
+    """A TIFF's page images: one per frame, in frame order, however many frames it carries.
+
+    Every frame is decoded and returned, in the order it is stored, so a scanner's
+    multi-page feed is read whole rather than truncated at the reader's window:
+    each frame is copied before it is normalised, because the frames of one TIFF
+    are one decoder seeked rather than separate images and `_png_page` resizes the
+    image it is given.
+    """
+    with Image.open(BytesIO(data)) as image:
+        return [_png_page(frame.copy()) for frame in ImageSequence.Iterator(image)]
 
 
 def _pdf_page_images(data: bytes) -> list[bytes]:

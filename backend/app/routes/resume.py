@@ -7,12 +7,12 @@ Success is `201` and names the new resume; rejections are `415` for a type this
 app cannot read, `413` for an upload over the limit and `422` for a file that is
 corrupt, carries no text or was not sent as a named file part.
 
-A scan is the one upload whose text is not in the file: a PNG, a JPEG or an
-image-only PDF is a scan, `app.services.resume` refuses it as blank like any
-other file without text, and this module asks a model to read its pages instead
-of refusing it. That call is `app.matching.resume_ocr`'s and the reader arrives
-through a second `Depends` seam, the way the parser does, so no case here needs a
-key, a socket or a model. Its failures are the two statuses a scan adds: `503`
+A scan is the one upload whose text is not in the file: a PNG, a JPEG, a TIFF, a
+HEIC, a WebP or an image-only PDF is a scan, `app.services.resume` refuses it as
+blank like any other file without text, and this module asks a model to read its
+pages instead of refusing it. That call is `app.matching.resume_ocr`'s and the
+reader arrives through a second `Depends` seam, the way the parser does, so no
+case here needs a key, a socket or a model. Its failures are the two statuses a scan adds: `503`
 when no key is configured and `502` when the call or its answer failed, and a
 scan that yielded no text is still the `422` a text-less upload has always been.
 Nothing about a scan reaches a file except the upload itself: the page images are
@@ -179,7 +179,10 @@ def get_resume_ocr() -> ResumeOcr:
 )
 async def upload_resume(
     file: Annotated[
-        UploadFile, File(description="A PDF, a DOCX, a PNG, a JPEG or a UTF-8 text file")
+        UploadFile,
+        File(
+            description="A PDF, a DOCX, a PNG, a JPEG, a TIFF, a HEIC, a WebP or a UTF-8 text file"
+        ),
     ],
     ocr: Annotated[ResumeOcr, Depends(get_resume_ocr)],
 ) -> ResumeUploaded:
