@@ -24,10 +24,11 @@ build that is no longer there; it is revalidated instead. Without this, the
 `cache-control` was absent on both and the browser made a conditional request for
 every hashed asset on every load.
 
-`#43` mounts the hosted MCP endpoint at `/mcp`, from `app.mcp`: the same seven
-`mcp/` tools over streamable HTTP, on this origin and behind the bearer guard. It
-is registered after the API routers and before the UI mount, and its transport is
-started in the lifespan below.
+`#43` serves the hosted MCP endpoint at `/mcp` (with or without its trailing
+slash), from `app.mcp`: the same seven `mcp/` tools over streamable HTTP, on this
+origin and behind the bearer guard. Its routes are registered after the API
+routers and before the UI mount, and its transport is started in the lifespan
+below.
 """
 
 import os
@@ -40,6 +41,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.routing import Route
 from starlette.types import Scope
 
 from app import mcp
@@ -149,9 +151,12 @@ app.include_router(matches_router)
 
 # The hosted MCP endpoint (#43): the `mcp/` tools over streamable HTTP, on this
 # origin and behind the bearer guard, so one container serves the API, the UI and
-# MCP. Registered after the API routers and before the UI mount, because the mount
-# at `/` comes last and would otherwise swallow `/mcp`.
-app.mount(mcp.MCP_PATH, mcp.endpoint, name="mcp")
+# MCP. Registered as routes for the path with and without its trailing slash: a
+# `Mount` matches only the slashed form, and the UI's mount at `/` -- registered
+# last -- would otherwise swallow the bare path instead of letting Starlette
+# redirect it. Both spellings reach the transport at the same path.
+for path in (mcp.MCP_PATH, mcp.MCP_PATH + "/"):
+    app.routes.append(Route(path, endpoint=mcp.endpoint))
 
 # Last, after every `include_router` above: the API's own paths are matched
 # first, and only a path none of them claims reaches the built UI.

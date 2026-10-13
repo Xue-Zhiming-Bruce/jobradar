@@ -20,9 +20,9 @@ one module.
 A session manager can be run once per instance and an app's lifespan may run more
 than once in one process (the suite starts and stops `TestClient` many times), so
 `HostedEndpoint` builds the server, the transport and the session manager when
-its lifespan starts and drops them when it ends. `app.main` mounts it at
-`MCP_PATH` and enters its lifespan, and `README.md` states the path and the
-variable for an operator.
+its lifespan starts and drops them when it ends. `app.main` serves it at
+`MCP_PATH`, with and without the trailing slash, and enters its lifespan;
+`README.md` states the path and the variable for an operator.
 """
 
 import hmac
@@ -65,6 +65,17 @@ def auth_token() -> str:
 def _is_endpoint_path(path: str) -> bool:
     """Whether a request path belongs to the endpoint: `MCP_PATH` or something below it."""
     return path == MCP_PATH or path.startswith(MCP_PATH + "/")
+
+
+def _at_transport_root(scope: Scope) -> Scope:
+    """The scope as the transport sees it: the one endpoint at `/`, whatever path spelled it.
+
+    The transport serves a single endpoint at `/`, so both `/mcp` and `/mcp/`
+    have to reach it at the same path. A `Mount` would do that for the slashed
+    form only; `app.main` registers both spellings as routes and this makes them
+    identical below the router, so the documented path cannot mean two things.
+    """
+    return {**scope, "path": "/", "raw_path": b"/"}
 
 
 def _offered_token(scope: Scope) -> str | None:
@@ -140,8 +151,9 @@ class HostedEndpoint:
                 {"detail": "The MCP endpoint is not running"}, status_code=NOT_RUNNING_STATUS
             )(scope, receive, send)
             return
-        await self._app(scope, receive, send)
+        await self._app(_at_transport_root(scope), receive, send)
 
 
-# The one instance `app.main` mounts at `MCP_PATH` and starts in its lifespan.
+# The one instance `app.main` serves at `MCP_PATH`, with and without its trailing
+# slash, and starts in its lifespan.
 endpoint = HostedEndpoint()

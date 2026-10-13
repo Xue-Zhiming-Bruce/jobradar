@@ -11,10 +11,13 @@ is `401` and reaches no tool; an unset `MCP_AUTH_TOKEN` refuses every request wi
 the same `401` (the endpoint is off, AC4); the token is read per request, so
 changing the variable changes the verdict without a restart; the right token lists
 exactly the seven tools the stdio server lists, with the same input schemas (the
-same implementation, AC2); and the token's value appears in no refusal body.
+same implementation, AC2); the documented path reaches the transport both ways it
+can be spelled, with a built UI mounted at `/` (AC1); and the token's value
+appears in no refusal body.
 """
 
 import asyncio
+import importlib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -29,6 +32,8 @@ from mcp.server.mcpserver import MCPServer
 from app import mcp
 from app.main import app
 from jobradar_mcp.__main__ import build_server
+
+import app.main as main
 
 BASE_URL = "http://testserver"
 MCP_URL = f"{BASE_URL}{mcp.MCP_PATH}"
@@ -143,14 +148,16 @@ def test_the_token_is_read_per_request_not_at_import(
     assert new.status_code != mcp.REFUSAL_STATUS
 
 
-async def _tools_over_http(token: str) -> list[Any]:
+async def _tools_over_http(
+    token: str, target: Any = app, url: str = MCP_URL
+) -> list[Any]:
     """The tools the hosted transport advertises, through the SDK's own client."""
-    async with app.router.lifespan_context(app):
-        transport = httpx2.ASGITransport(app=app)
+    async with target.router.lifespan_context(target):
+        transport = httpx2.ASGITransport(app=target)
         async with httpx2.AsyncClient(
             transport=transport, base_url=BASE_URL, headers=_authorisation(token)
         ) as http_client:
-            async with streamable_http_client(MCP_URL, http_client=http_client) as (read, write):
+            async with streamable_http_client(url, http_client=http_client) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     return (await session.list_tools()).tools
@@ -170,6 +177,35 @@ def test_the_hosted_transport_serves_the_same_seven_tools_as_the_stdio_server(
     assert [(tool.name, tool.input_schema) for tool in hosted] == [
         (tool.name, tool.input_schema) for tool in over_stdio
     ]
+
+
+def _a_built_ui(directory: Path) -> None:
+    """A scratch build: the directory existing with a page in it is what mounts the UI at `/`."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "index.html").write_text("<!doctype html><html></html>", encoding="utf-8")
+
+
+def test_the_documented_path_reaches_the_transport_with_the_ui_mounted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, token: str
+) -> None:
+    """AC1: with a built UI mounted at `/`, `/mcp` reaches the transport, not the UI.
+
+    The container mounts the UI at `/`, whose catch-all matches the bare path
+    before Starlette's trailing-slash redirect can; a case that only runs with no
+    build present cannot see that -- which is how the documented path once
+    shipped answering 405/404. Both spellings are exercised, through the SDK's
+    own client, exactly as a hosted client reaches them.
+    """
+    _a_built_ui(tmp_path / "static")
+    monkeypatch.setenv(main.STATIC_DIR_VARIABLE, str(tmp_path / "static"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'jobradar.db'}")
+    mounted = importlib.reload(main).app
+
+    bare = asyncio.run(_tools_over_http(token, mounted, MCP_URL))
+    slashed = asyncio.run(_tools_over_http(token, mounted, MCP_URL + "/"))
+
+    assert [tool.name for tool in bare] == list(TOOL_NAMES)
+    assert [tool.name for tool in slashed] == list(TOOL_NAMES)
 
 
 def test_the_mount_answers_503_before_its_lifespan_starts(token: str) -> None:
