@@ -137,6 +137,15 @@ _HEIC_BRANDS = (b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"hevm", b
 # settings because nothing about a deployment changes either number.
 OCR_MAX_IMAGES = 5
 OCR_MAX_IMAGE_EDGE = 1600
+# At most this many page images ONE UPLOAD may hold, and so at most this many are
+# ever decoded and retained at once: a scan of at most the cap makes
+# `ceil(OCR_MAX_SCAN_IMAGES / OCR_MAX_IMAGES)` = 4 requests of at most
+# `OCR_MAX_IMAGES` page images each, and over the cap the scan is refused rather
+# than read in part. The cap is deliberately above the twelve page images the two
+# closed cases read (twelve frames of a TIFF, and a PDF of twelve page images), so
+# both stay legal uploads. A module constant rather than a setting, the way the
+# two numbers above are: nothing about a deployment changes it.
+OCR_MAX_SCAN_IMAGES = 20
 _WORD_DOCUMENT_PART = "word/document.xml"
 _WORD_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
@@ -161,6 +170,18 @@ class UnsupportedResume(ResumeRejected):
 
 class ResumeTooLarge(ResumeRejected):
     """The upload is bigger than `MAX_UPLOAD_BYTES` allows."""
+
+    status_code = 413
+
+
+class ResumeTooManyPages(ResumeRejected):
+    """The scan holds more page images than `OCR_MAX_SCAN_IMAGES` allows.
+
+    The same `413` as the byte limit, because it is the same refusal about the
+    same upload: too much of the client's file to read. A scan over the cap is
+    never truncated to it -- the message names both numbers, so the client knows
+    what to send instead.
+    """
 
     status_code = 413
 
@@ -296,12 +317,19 @@ def scan_images(content_type: str, data: bytes) -> list[bytes]:
     and primary frame, because an animated WebP's frames and a HEIC's burst or
     auxiliary images are not pages. A TIFF contributes one page image per frame,
     in frame order, because a scanner's TIFF feed is pages the way a scanned PDF
-    is, and a PDF contributes the images its pages carry, in page order. Every
-    page image is returned, so no page is silently dropped: the reader bounds how
-    many reach one request (`OCR_MAX_IMAGES`), and the format is normalised here so
-    nothing downstream depends on how the scanner stored the stream. A PDF whose
-    pages hold no readable image is `[]` -- there is no image to send and no
-    request to make.
+    is, and a PDF contributes the images its pages carry, in page order. At most
+    `OCR_MAX_SCAN_IMAGES` page images are returned: the reader bounds how many
+    reach one request (`OCR_MAX_IMAGES`), and a scan holding more than the cap is
+    refused here, `ResumeTooManyPages`, rather than truncated to it -- the rule is
+    `>`, the way the byte limit's `len(data) > limit` reads. The format is
+    normalised here so nothing downstream depends on how the scanner stored the
+    stream. A PDF whose pages hold no readable image is `[]` -- there is no image
+    to send and no request to make.
+
+    The cap counts what the whole scan holds, not what one request carries, and it
+    is spent as the page images are produced: the two producers that can exceed it
+    stop as it is passed, so at most `OCR_MAX_SCAN_IMAGES` + 1 are ever decoded and
+    the memory a scan occupies is the cap rather than the upload's own length.
 
     The bytes are user data and this function neither logs them nor returns them
     to a client: they are request payloads and nothing else. What will not load as
@@ -310,12 +338,19 @@ def scan_images(content_type: str, data: bytes) -> list[bytes]:
     """
     try:
         if content_type in (IMAGE_PNG, IMAGE_JPEG, IMAGE_HEIC, IMAGE_WEBP):
-            return [_png_page(_decoded_image(data))]
-        if content_type == IMAGE_TIFF:
-            return _tiff_page_images(data)
-        if content_type == APPLICATION_PDF:
-            return _pdf_page_images(data)
-        return []
+            images = [_png_page(_decoded_image(data))]
+        elif content_type == IMAGE_TIFF:
+            images = _tiff_page_images(data)
+        elif content_type == APPLICATION_PDF:
+            images = _pdf_page_images(data)
+        else:
+            images = []
+        if len(images) > OCR_MAX_SCAN_IMAGES:
+            raise ResumeTooManyPages(
+                f"Resume scan has {len(images)} page images: "
+                f"the scan limit is {OCR_MAX_SCAN_IMAGES} page images"
+            )
+        return images
     except ResumeRejected:
         raise
     except Exception as error:  # Pillow's and pypdf's own error family, at a trust boundary
@@ -629,29 +664,40 @@ def _decoded_image(data: bytes) -> Image.Image:
 
 
 def _tiff_page_images(data: bytes) -> list[bytes]:
-    """A TIFF's page images: one per frame, in frame order, however many frames it carries.
+    """A TIFF's page images: one per frame, in frame order, up to the scan cap.
 
-    Every frame is decoded and returned, in the order it is stored, so a scanner's
-    multi-page feed is read whole rather than truncated at the reader's window:
-    each frame is copied before it is normalised, because the frames of one TIFF
-    are one decoder seeked rather than separate images and `_png_page` resizes the
+    The reader stops as `OCR_MAX_SCAN_IMAGES` is passed instead of decoding the
+    whole feed and judging it afterwards, so about one frame beyond the cap is
+    what a too-long scan costs. One more than the cap is enough for
+    `scan_images` to refuse it and name the count it reached, and no frame beyond
+    that is decoded. It is a loop rather than a comprehension for that stop. Each
+    frame is copied before it is normalised, because the frames of one TIFF are
+    one decoder seeked rather than separate images and `_png_page` resizes the
     image it is given.
     """
+    images: list[bytes] = []
     with Image.open(BytesIO(data)) as image:
-        return [_png_page(frame.copy()) for frame in ImageSequence.Iterator(image)]
+        for frame in ImageSequence.Iterator(image):
+            images.append(_png_page(frame.copy()))
+            if len(images) > OCR_MAX_SCAN_IMAGES:
+                return images
+    return images
 
 
 def _pdf_page_images(data: bytes) -> list[bytes]:
-    """A PDF's page images, in page order, however many the pages carry.
+    """A PDF's page images, in page order, up to the scan cap.
 
-    Every page image is decoded: how many go into one request is the reader's
-    bound (`OCR_MAX_IMAGES`), not this one's, so a scan longer than the cap is
-    read whole rather than truncated at it.
+    The reader stops as `OCR_MAX_SCAN_IMAGES` is passed: a PDF holding more page
+    images than that is refused by `scan_images`, and the pages after the cap plus
+    one are never decoded. How many go into one request is the reader's own bound
+    (`OCR_MAX_IMAGES`), which is not this one.
     """
     images: list[bytes] = []
     for page in PdfReader(BytesIO(data)).pages:
         for found in page.images:
             images.append(_png_page(found.image))
+            if len(images) > OCR_MAX_SCAN_IMAGES:
+                return images
     return images
 
 

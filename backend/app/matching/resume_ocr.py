@@ -17,7 +17,10 @@ one of the scorer's own `SCORER_MAX_ATTEMPTS`. The pages come from
 scan's images are. A scan with more page images than `OCR_MAX_IMAGES` is read by
 consecutive bounded requests -- one per window of at most `OCR_MAX_IMAGES`
 images, in page order -- and the window answers are joined in order by one `"\n"`,
-the separator `_pdf_text` puts between a PDF's own pages. The prompt is
+the separator `_pdf_text` puts between a PDF's own pages. A scan is bounded as a
+whole as well as per request: `read` takes the clock before it starts decoding and
+ever sends an attempt once `OCR_SCAN_TIMEOUT_SECONDS` is spent, which is the one
+ceiling on how long one upload may hold its request open. The prompt is
 `ocr_prompt.txt` beside this module, read on every scan rather than at import, and
 it carries no text -- the pages are the input.
 
@@ -33,15 +36,17 @@ the scorer's own call does.
 
 The page images are user data and `LLM_API_KEY` is a credential, so neither reaches
 a message or a log line: every failure this module raises is one of the scorer's
-own wordings plus at most a status code, the one log line it writes names the
-media type, the byte count, the number of page images and the number of requests
-and never a pixel of the scan, and the key is read through `scorer.api_key()`.
+own wordings, this module's own wording for a scan over its time budget, plus at
+most a status code, the one log line it writes names the media type, the byte
+count, the number of page images and the number of requests and never a pixel of
+the scan, and the key is read through `scorer.api_key()`.
 Nothing here reads `os.environ`, and no byte of the scan is written to a file: the
 images are request payloads and nothing else.
 """
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -59,6 +64,21 @@ from app.matching.scorer import (
 from app.services import resume as resume_service
 
 logger = logging.getLogger(__name__)
+
+# One scan's wall clock: the decoding of its page images and every request made
+# for them, measured from the moment `read` starts that work. This repository
+# documents no platform request timeout, so this is the only ceiling an upload
+# holds -- and 60 s is stated against the worst case it replaces and against the
+# one request budget the repository names. `ceil(OCR_MAX_SCAN_IMAGES /
+# OCR_MAX_IMAGES)` = 4 windows of up to `SCORER_MAX_ATTEMPTS` x
+# `MODEL_TIMEOUT_SECONDS` = 90 s each is 360 s for one upload, which this bounds
+# at `OCR_SCAN_TIMEOUT_SECONDS` + `MODEL_TIMEOUT_SECONDS` = 90 s: the budget is
+# checked before an attempt is sent, and `ask_model` sets that attempt's own
+# `timeout=MODEL_TIMEOUT_SECONDS`, so the last attempt may start just inside the
+# budget and still answer up to one model timeout later. `tick.yml` polls on the
+# same 60 s. A module constant rather than a setting, the way
+# `resume.OCR_MAX_SCAN_IMAGES` is.
+OCR_SCAN_TIMEOUT_SECONDS = 60.0
 
 # The prompt, resolved from this file's location and never from the process's
 # working directory, so `Dockerfile`'s `COPY app ./app` ships it and a run from
@@ -130,6 +150,12 @@ class LlmResumeOcr:
         request for that window -- and a malformed answer costs an attempt:
         `SCORER_MAX_ATTEMPTS` requests and then `ResumeOcrError`, which fails the
         whole scan rather than answering part of it.
+
+        The clock is taken here, once, before the page images are decoded, so the
+        whole scan -- that decoding and every request -- is bounded by
+        `OCR_SCAN_TIMEOUT_SECONDS`: a scan whose budget is spent fails as the same
+        `ResumeOcrError`, raised before the attempt that would have outspent it
+        rather than after it.
         """
         key = api_key()
         if not key:
@@ -137,6 +163,7 @@ class LlmResumeOcr:
                 f"{LLM_API_KEY} is not set: reading a scan needs a model key"
             )
 
+        deadline = time.monotonic() + OCR_SCAN_TIMEOUT_SECONDS
         images = resume_service.scan_images(content_type, data)
         if not images:
             return ""
@@ -154,19 +181,38 @@ class LlmResumeOcr:
             len(images),
             len(windows),
         )
-        return "\n".join(_read_window(client, window, key) for window in windows)
+        return "\n".join(
+            _read_window(client, window, key, deadline, index, len(windows))
+            for index, window in enumerate(windows)
+        )
 
 
-def _read_window(client: httpx2.Client, window: list[bytes], key: str) -> str:
+def _read_window(
+    client: httpx2.Client,
+    window: list[bytes],
+    key: str,
+    deadline: float,
+    window_index: int,
+    window_count: int,
+) -> str:
     """One window's text, read by one request, or the typed error saying why there is none.
 
     The body is `scorer.request_body(_prompt(), window)` and the call is
     `scorer.ask_model`'s, so a window is the one request #27 pinned: at most
     `OCR_MAX_IMAGES` image parts. A malformed answer costs one of the scorer's
-    own `SCORER_MAX_ATTEMPTS`; a transport failure answers at once.
+    own `SCORER_MAX_ATTEMPTS`; a transport failure answers at once. Every attempt
+    -- the first try and each retry -- checks `deadline` before it is sent, so a
+    scan cannot outspend `OCR_SCAN_TIMEOUT_SECONDS` however the model answers;
+    what the check bounds is the sending, not the answer after it.
     """
+    spent = _spent_budget(deadline, window_index, window_count)
+    if spent:
+        raise ResumeOcrError(spent)
     body = request_body(_prompt(), window)
     for _ in range(SCORER_MAX_ATTEMPTS):
+        spent = _spent_budget(deadline, window_index, window_count)
+        if spent:
+            raise ResumeOcrError(spent)
         answer, failure = ask_model(client, body, key)
         if failure:
             raise ResumeOcrError(failure)
@@ -175,6 +221,25 @@ def _read_window(client: httpx2.Client, window: list[bytes], key: str) -> str:
             return text
     raise ResumeOcrError(
         f"the model's answer was unusable after {SCORER_MAX_ATTEMPTS} attempts"
+    )
+
+
+def _spent_budget(deadline: float, window_index: int, window_count: int) -> str | None:
+    """The wording for a scan whose budget is spent, or `None` while there is time left.
+
+    One wording for both places an attempt is checked -- a window's first try and
+    each retry -- so a failure names the same budget and the same window counts
+    however late in a scan it happens: how many windows were read whole, and how
+    many the scan holds. No page image, byte or text of the scan is in it. The
+    rule is `>`, as the byte limit's `len(data) > limit` reads: an attempt is
+    refused once the deadline is passed, and an instant exactly on it still has
+    its attempt sent.
+    """
+    if time.monotonic() <= deadline:
+        return None
+    return (
+        f"the scan spent its {OCR_SCAN_TIMEOUT_SECONDS:g} second budget after "
+        f"{window_index} of {window_count} windows"
     )
 
 

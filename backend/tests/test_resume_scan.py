@@ -28,6 +28,7 @@ import zipfile
 from collections.abc import Iterator
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx2
@@ -40,6 +41,7 @@ from sqlalchemy.engine import Engine
 
 from app import db
 from app.main import app
+from app.matching import resume_ocr as resume_ocr_module
 from app.matching.resume_ocr import FakeResumeOcr, LlmResumeOcr, ResumeOcr, ResumeOcrError
 from app.matching.scorer import LLM_API_KEY
 from app.models import Resume
@@ -756,6 +758,102 @@ def test_a_multi_window_scan_whose_windows_all_answer_null_is_422(
     assert stored_files(uploads_dir) == []
 
 
+# The scan cap: how many page images one upload may hold, and the 413 past it.
+
+
+def test_a_scan_over_the_cap_is_413_makes_no_request_and_stores_nothing(
+    client: TestClient, uploads_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cap is judged before a window is built, so not one page image is sent."""
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    pdf = scanned_pdf_bytes([(40, 30)] * (resume_service.OCR_MAX_SCAN_IMAGES + 3))
+    requests: list[Any] = []
+    install(LlmResumeOcr(client=vision_transport([ocr_answer(SENTINEL)], requests)))
+
+    detail = refusal(upload(client, "long.pdf", pdf, APPLICATION_PDF), 413)
+
+    assert detail == (
+        f"Resume scan has {resume_service.OCR_MAX_SCAN_IMAGES + 1} page images: "
+        f"the scan limit is {resume_service.OCR_MAX_SCAN_IMAGES} page images"
+    )
+    assert requests == []
+    assert rows() == []
+    assert stored_files(uploads_dir) == []
+    assert client.get("/resume").json() == []
+
+
+def test_an_upload_over_the_byte_limit_is_the_byte_413_before_the_scan_cap(
+    client: TestClient,
+    uploads_dir: Path,
+    small_limit: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bytes that arrived are weighed first: an over-cap scan may still be a byte refusal."""
+    pdf = scanned_pdf_bytes([(40, 30)] * (resume_service.OCR_MAX_SCAN_IMAGES + 3))
+    assert len(pdf) > small_limit
+    reader = FakeResumeOcr(SENTINEL)
+    install(reader)
+
+    detail = refusal(upload(client, "long.pdf", pdf, APPLICATION_PDF), 413)
+
+    assert detail == f"Resume is {len(pdf)} bytes: the upload limit is {small_limit} bytes"
+    assert reader.calls == []
+    assert rows() == []
+    assert stored_files(uploads_dir) == []
+
+
+def test_an_over_cap_scan_with_no_key_is_still_503(
+    client: TestClient, uploads_dir: Path
+) -> None:
+    """The key is checked first: an unkeyed deployment answers `503` for any scan."""
+    # No override: this case reaches the real reader, which refuses before decoding.
+    pdf = scanned_pdf_bytes([(40, 30)] * (resume_service.OCR_MAX_SCAN_IMAGES + 3))
+
+    response = upload(client, "long.pdf", pdf, APPLICATION_PDF)
+
+    assert response.status_code == 503, response.text
+    assert response.json() == {
+        "detail": f"{LLM_API_KEY} is not set: reading a scan needs a model key"
+    }
+    assert rows() == []
+    assert stored_files(uploads_dir) == []
+
+
+def test_a_scan_over_the_time_budget_is_502_and_the_window_already_read_is_dropped(
+    client: TestClient, uploads_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spent budget is #52's rule too: the first window's text is discarded, not stored."""
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    readings: list[float] = [
+        0.0,
+        0.0,
+        0.0,
+        resume_ocr_module.OCR_SCAN_TIMEOUT_SECONDS + 1.0,
+    ]
+    calls: list[float] = []
+
+    def now() -> float:
+        value = readings[min(len(calls), len(readings) - 1)]
+        calls.append(value)
+        return value
+
+    # The module's own clock, not the `time` module's: this case drives the real
+    # app, whose event loop reads `time.monotonic` for itself while it waits.
+    monkeypatch.setattr(resume_ocr_module, "time", SimpleNamespace(monotonic=now))
+    pdf = scanned_pdf_bytes([(40, 30)] * 6)
+    requests: list[Any] = []
+    install(LlmResumeOcr(client=vision_transport([ocr_answer(SENTINEL)], requests)))
+
+    detail = refusal(upload(client, "long.pdf", pdf, APPLICATION_PDF), 502)
+
+    assert detail == "the scan spent its 60 second budget after 1 of 2 windows"
+    assert len(requests) == 1, "the first window was read, the second was never sent"
+    assert SENTINEL not in detail  # what was read is not in the message either
+    assert rows() == []
+    assert stored_files(uploads_dir) == []
+    assert client.get("/resume").json() == []
+
+
 # The two failures a scan adds, and the limit it still meets.
 
 
@@ -928,6 +1026,79 @@ def test_a_tiff_yields_one_page_image_per_frame_in_frame_order(frames: int) -> N
     ]
     for page in pages:
         assert page.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_the_scan_cap_is_declared_beside_the_request_cap_and_moves_no_other_number() -> None:
+    """20 page images: four requests of five, and above the twelve the closed cases read."""
+    assert resume_service.OCR_MAX_SCAN_IMAGES == 20
+    assert resume_service.OCR_MAX_IMAGES == 5
+    assert resume_service.OCR_MAX_IMAGE_EDGE == 1600
+    # The two twelve-page scans #52 and #53 pinned stay legal uploads.
+    assert resume_service.OCR_MAX_SCAN_IMAGES > 12
+
+
+def test_a_scan_of_exactly_the_cap_is_read_whole() -> None:
+    """The rule is `>`, as `max_upload_bytes` reads: the cap itself is a legal upload."""
+    pdf = scanned_pdf_bytes([(40, 30)] * resume_service.OCR_MAX_SCAN_IMAGES)
+
+    pages = resume_service.scan_images(APPLICATION_PDF, pdf)
+
+    assert len(pages) == resume_service.OCR_MAX_SCAN_IMAGES
+
+
+def test_a_scan_one_page_image_past_the_cap_is_refused_naming_both_numbers() -> None:
+    pdf = scanned_pdf_bytes([(40, 30)] * (resume_service.OCR_MAX_SCAN_IMAGES + 1))
+
+    with pytest.raises(resume_service.ResumeTooManyPages) as raised:
+        resume_service.scan_images(APPLICATION_PDF, pdf)
+
+    # The route's own `_rejection` maps this, `413` included, with no new branch.
+    assert isinstance(raised.value, resume_service.ResumeRejected)
+    assert raised.value.status_code == 413
+    assert str(raised.value) == (
+        f"Resume scan has {resume_service.OCR_MAX_SCAN_IMAGES + 1} page images: "
+        f"the scan limit is {resume_service.OCR_MAX_SCAN_IMAGES} page images"
+    )
+
+
+def encoded_page_images(monkeypatch: pytest.MonkeyPatch) -> list[Image.Image]:
+    """Every image this case's scan encoded, counted where a page becomes request payload."""
+    encoded: list[Image.Image] = []
+    encode = resume_service._png_page
+
+    def counted(image: Image.Image) -> bytes:
+        encoded.append(image)
+        return encode(image)
+
+    monkeypatch.setattr(resume_service, "_png_page", counted)
+    return encoded
+
+
+@pytest.mark.parametrize(
+    ("content_type", "data"),
+    [
+        pytest.param(
+            APPLICATION_PDF,
+            scanned_pdf_bytes([(40, 30)] * (resume_service.OCR_MAX_SCAN_IMAGES + 3)),
+            id="a PDF of cap plus three pages",
+        ),
+        pytest.param(
+            IMAGE_TIFF,
+            tiff_bytes(resume_service.OCR_MAX_SCAN_IMAGES + 3),
+            id="a TIFF of cap plus three frames",
+        ),
+    ],
+)
+def test_a_scan_past_the_cap_stops_decoding_one_page_image_past_it(
+    content_type: str, data: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What a scan holds is the cap, not the upload: the producers stop as it is passed."""
+    encoded = encoded_page_images(monkeypatch)
+
+    with pytest.raises(resume_service.ResumeTooManyPages):
+        resume_service.scan_images(content_type, data)
+
+    assert len(encoded) == resume_service.OCR_MAX_SCAN_IMAGES + 1, "one past the cap, not 23"
 
 
 def test_a_tiff_frame_over_the_edge_is_scaled_to_it() -> None:
