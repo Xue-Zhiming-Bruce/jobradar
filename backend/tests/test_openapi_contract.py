@@ -228,7 +228,8 @@ def test_contract_describes_the_tick_and_the_run_it_started() -> None:
     read = contract["paths"]["/runs/{id}"]["get"]
 
     # One shape for a run wherever a client meets one: the `202` answers with the
-    # body the read answers with, and that body is the row's nine columns.
+    # body the read answers with, and that body is the row's nine columns plus the
+    # per-company outcomes the run recorded (#59).
     started = tick["responses"]["202"]["content"]["application/json"]["schema"]
     summary = read["responses"]["200"]["content"]["application/json"]["schema"]
     assert started["$ref"] == summary["$ref"]
@@ -243,8 +244,18 @@ def test_contract_describes_the_tick_and_the_run_it_started() -> None:
         "matches_created",
         "matches_emailed",
         "companies_not_fetched",
+        "company_outcomes",
     }
     assert run["required"] == list(run["properties"])
+    # The per-company list is the fourth shape `RunCompanyOutcome` declares: which
+    # company, by slug, what happened to it and, on a failure, the reason. The list
+    # is required and may be empty -- the tick's `202` answers `[]` -- so a client
+    # never has to treat a missing field as an empty one.
+    outcomes = run["properties"]["company_outcomes"]
+    assert outcomes["type"] == "array"
+    outcome = schemas[outcomes["items"]["$ref"].rsplit("/", 1)[-1]]
+    assert set(outcome["properties"]) == {"company_id", "slug", "outcome", "error"}
+    assert outcome["required"] == list(outcome["properties"])
     # The two fields that may be null by the wire's own reckoning: `0` is a run
     # that emailed nothing and NULL is a run that never recorded a count (#36),
     # and NULL is also every run whose board-call budget stopped no walk (#56).

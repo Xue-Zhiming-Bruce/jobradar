@@ -34,13 +34,14 @@ from sqlalchemy.engine import Engine
 
 from app import db, main
 from app.main import app
-from app.models import Company, Match, Posting, Resume, Run
+from app.models import Company, Match, Posting, Resume, Run, RunCompany
 from app.routes import internal
 from app.routes.internal import get_pipeline, get_run_starter
 from app.routes.runs import REAPED_RUN_ERROR, reap_stale_runs
 
-# The nine columns of a run, and therefore the whole body this route may answer
-# with. A field that is not here is a field the route invented.
+# The nine columns of a run plus the per-company outcomes it recorded, and
+# therefore the whole body this route may answer with. A field that is not here is
+# a field the route invented.
 RUN_FIELDS = {
     "id",
     "status",
@@ -51,6 +52,7 @@ RUN_FIELDS = {
     "matches_created",
     "matches_emailed",
     "companies_not_fetched",
+    "company_outcomes",
 }
 
 # Values that must not reach the wire: the shared secret a tick would carry, and
@@ -98,6 +100,7 @@ def test_a_running_run_reads_back_exactly_as_its_row_holds_it(client: TestClient
     assert body["matches_created"] == 0
     assert body["matches_emailed"] is None  # no digest of this run has recorded one yet
     assert body["companies_not_fetched"] is None  # and no budget stopped it yet
+    assert body["company_outcomes"] == []  # and no company has been attempted yet
     assert datetime.fromisoformat(body["started_at"]) is not None
 
 
@@ -200,6 +203,64 @@ def test_the_body_tells_a_run_the_budget_stopped_from_one_that_reached_the_end(
     assert answered == {stopped: 3, reached_the_end: None}
 
 
+# What a run recorded about each company it attempted: an outcome per company, and
+# the failure's own message on the company it names (#59).
+
+
+def test_a_partly_failed_run_is_served_with_the_company_that_failed_and_why(
+    client: TestClient,
+) -> None:
+    """The failed board by slug with its own message, and the board that answered beside it."""
+    run_id = seed(status="failed", error="1 of 2 companies failed: 'beta'")
+    with db.session_scope() as session:
+        answered = Company(name="Acme", slug="acme")
+        failed = Company(name="Beta", slug="beta")
+        session.add_all([answered, failed])
+        session.flush()
+        session.add(RunCompany(run_id=run_id, company_id=answered.id, outcome="fetched"))
+        session.add(
+            RunCompany(
+                run_id=run_id,
+                company_id=failed.id,
+                outcome="failed",
+                error="The board for company 'beta' could not be fetched: HTTP 503",
+            )
+        )
+        answered_id, failed_id = answered.id, failed.id
+
+    body = read(client, run_id).json()
+
+    assert body["status"] == "failed"
+    assert body["company_outcomes"] == [
+        {"company_id": answered_id, "slug": "acme", "outcome": "fetched", "error": None},
+        {
+            "company_id": failed_id,
+            "slug": "beta",
+            "outcome": "failed",
+            "error": "The board for company 'beta' could not be fetched: HTTP 503",
+        },
+    ]
+
+
+def test_a_run_where_nothing_failed_is_served_with_no_failed_company(client: TestClient) -> None:
+    """Every attempted company is on the wire, and not one of them reads as a failure."""
+    run_id = seed(status="succeeded")
+    with db.session_scope() as session:
+        company = Company(name="Acme", slug="acme")
+        session.add(company)
+        session.flush()
+        session.add(RunCompany(run_id=run_id, company_id=company.id, outcome="not_modified"))
+        company_id = company.id
+
+    body = read(client, run_id).json()
+
+    assert body["status"] == "succeeded"
+    assert body["company_outcomes"] == [
+        {"company_id": company_id, "slug": "acme", "outcome": "not_modified", "error": None}
+    ]
+    assert [row for row in body["company_outcomes"] if row["outcome"] == "failed"] == []
+
+
 def test_the_read_answers_for_the_id_it_was_asked_for(client: TestClient) -> None:
     first = seed(status="succeeded")
     second = seed(status="failed", error="a board was down")
@@ -240,7 +301,7 @@ def test_reading_a_run_needs_no_secret(
 def test_the_body_carries_no_secret_no_resume_text_and_no_database_url(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The body is the row's nine columns: nothing private can ride along on it."""
+    """The body is the row's nine columns and its per-company outcomes: nothing private rides along."""
     monkeypatch.setenv("TICK_SECRET", SECRET)
     run_id = seed(status="failed", error="the board refused: acme")
 
@@ -287,11 +348,11 @@ def run_rows() -> list[dict[str, Any]]:
 
 
 def table_counts() -> dict[str, int]:
-    """How many rows each of the four tables the reap must not write now holds."""
+    """How many rows each of the five tables the reap must not write now holds."""
     with db.session_scope() as session:
         return {
             model.__tablename__: session.scalar(select(func.count()).select_from(model))
-            for model in (Company, Posting, Match, Resume)
+            for model in (Company, Posting, Match, Resume, RunCompany)
         }
 
 

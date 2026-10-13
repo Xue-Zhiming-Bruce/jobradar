@@ -47,6 +47,20 @@ export type RunSummary = {
   postingsSeen: number
   matchesCreated: number
   companiesNotFetched: number | null
+  /** What this run did with each company it attempted: `RunCompanyOutcome` in the contract. */
+  companyOutcomes: RunCompanyOutcome[]
+}
+
+/**
+ * One company's outcome in one run, as the UI reads it: `'fetched'`,
+ * `'not_modified'` or `'failed'`, with the failure's own message on a `'failed'`
+ * row and none otherwise (#59). Nothing renders it yet: that is #74.
+ */
+export type RunCompanyOutcome = {
+  companyId: number
+  slug: string
+  outcome: string
+  error: string | null
 }
 
 /**
@@ -104,6 +118,13 @@ type WireResumeUploaded = {
   is_active: boolean
 }
 
+type WireRunCompanyOutcome = {
+  company_id: number
+  slug: string
+  outcome: string
+  error: string | null
+}
+
 type WireRunSummary = {
   id: number
   status: string
@@ -113,6 +134,7 @@ type WireRunSummary = {
   postings_seen: number
   matches_created: number
   companies_not_fetched: number | null
+  company_outcomes: WireRunCompanyOutcome[]
 }
 
 type WireMatch = {
@@ -154,6 +176,13 @@ const decodeMatch = (wire: WireMatch): Match => ({
   createdAt: wire.created_at,
 })
 
+const decodeRunCompanyOutcome = (wire: WireRunCompanyOutcome): RunCompanyOutcome => ({
+  companyId: wire.company_id,
+  slug: wire.slug,
+  outcome: wire.outcome,
+  error: wire.error,
+})
+
 const decodeRun = (wire: WireRunSummary): RunSummary => ({
   id: wire.id,
   status: wire.status,
@@ -163,6 +192,7 @@ const decodeRun = (wire: WireRunSummary): RunSummary => ({
   postingsSeen: wire.postings_seen,
   matchesCreated: wire.matches_created,
   companiesNotFetched: wire.companies_not_fetched,
+  companyOutcomes: wire.company_outcomes.map(decodeRunCompanyOutcome),
 })
 
 /** The server's `detail`, or the status text when the answer carries no JSON. */

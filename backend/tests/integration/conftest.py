@@ -190,7 +190,7 @@ def database(test_database_url: str, monkeypatch: pytest.MonkeyPatch) -> Iterato
 
     The tables are dropped before the case starts, so it begins on empty tables
     rather than inheriting whatever a previous run left, and dropped again
-    afterwards: the suite owns these five table names in this database and leaves
+    afterwards: the suite owns these six table names in this database and leaves
     no trace.
     """
     monkeypatch.setenv("DATABASE_URL", test_database_url)

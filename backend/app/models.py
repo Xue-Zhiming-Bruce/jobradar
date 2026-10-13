@@ -1,4 +1,4 @@
-"""The five tables JobRadar stores, declared once and nowhere else.
+"""The six tables JobRadar stores, declared once and nowhere else.
 
 `app.db.init_db()` builds every table from these models with SQLAlchemy's
 `create_all`, which creates only what is missing. It never alters a table that
@@ -9,8 +9,8 @@ That gap is real and is owned by #21 (schema migrations); nothing here migrates.
 
 The rules that keep the rows honest ride on these declarations and are enforced
 by the database on both engines rather than by a check in application code: the
-dedupe keys, at most one active resume, the score range, the three vocabularies
-the state, status and outcome columns accept, and the foreign keys, which
+dedupe keys, at most one active resume, the score range, the vocabularies the
+source, state, status and outcome columns accept, and the foreign keys, which
 cascade. A rule that is not declared here is not enforced, so a change to one of
 them is the migration gap #21 owns as well.
 
@@ -41,7 +41,7 @@ from sqlalchemy.types import TypeDecorator
 
 
 class Base(DeclarativeBase):
-    """One metadata object holding all five tables, for `create_all`."""
+    """One metadata object holding all six tables, for `create_all`."""
 
 
 def _utcnow() -> datetime:
@@ -265,3 +265,36 @@ class Run(Base):
     # than claiming a walk nobody bounded. Written by `services.pipeline`, the one
     # place that knows the bound stopped the walk; #9 writes neither side.
     companies_not_fetched: Mapped[int | None] = mapped_column(Integer)
+
+
+class RunCompany(Base):
+    """One company's outcome in one run: what its board answered, or why it did not.
+
+    One row per company a run's walk attempted, written by `services.pipeline` as
+    the walk reaches that company. A company the run's budget never reached has no
+    row -- it was not attempted -- and #56's `run.companies_not_fetched` counts
+    those instead, which is why a budget-stopped run is not a failed one. The two
+    foreign keys cascade, and the unique key is what makes "one outcome per company
+    per run" a rule the database enforces rather than a check the walk keeps.
+    """
+
+    __tablename__ = "run_company"
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('fetched', 'not_modified', 'failed')",
+            name="ck_run_company_outcome_values",
+        ),
+        UniqueConstraint("run_id", "company_id", name="uq_run_company_outcome"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("run.id", ondelete="CASCADE"))
+    company_id: Mapped[int] = mapped_column(ForeignKey("company.id", ondelete="CASCADE"))
+    # What the walk did with that board: `'fetched'` for a `200` whose payload was
+    # stored, `'not_modified'` for the `304` #55 added, `'failed'` for a fetch or a
+    # shrink refusal that raised. The one writer is `services.pipeline`.
+    outcome: Mapped[str] = mapped_column(String(20))
+    # A failure's own message, on a `'failed'` row and NULL everywhere else: the
+    # company's slug and, where a status decided it, the status code -- never a
+    # response body, a credential or a resume (#4/#9).
+    error: Mapped[str | None] = mapped_column(Text)

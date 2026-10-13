@@ -81,31 +81,49 @@ describe('the wire is decoded into the UI', () => {
     ])
   })
 
-  it('getRun turns matches_created into matchesCreated and keeps the ISO timestamps', async () => {
+  it('getRun turns matches_created into matchesCreated and decodes the company outcomes', async () => {
     server.use(
       http.get('/runs/7', () =>
         HttpResponse.json({
           id: 7,
-          status: 'done',
+          status: 'failed',
           started_at: '2026-05-01T10:00:00+00:00',
           finished_at: '2026-05-01T10:00:04+00:00',
-          error: null,
+          error: "1 of 2 companies failed: 'beta'",
           postings_seen: 12,
           matches_created: 4,
           companies_not_fetched: 3,
+          company_outcomes: [
+            { company_id: 1, slug: 'acme', outcome: 'fetched', error: null },
+            {
+              company_id: 2,
+              slug: 'beta',
+              outcome: 'failed',
+              error: "The board for company 'beta' could not be fetched: HTTP 503",
+            },
+          ],
         }),
       ),
     )
 
     expect(await getRun(7)).toEqual({
       id: 7,
-      status: 'done',
+      status: 'failed',
       started_at: '2026-05-01T10:00:00+00:00',
       finished_at: '2026-05-01T10:00:04+00:00',
-      error: null,
+      error: "1 of 2 companies failed: 'beta'",
       postingsSeen: 12,
       matchesCreated: 4,
       companiesNotFetched: 3,
+      companyOutcomes: [
+        { companyId: 1, slug: 'acme', outcome: 'fetched', error: null },
+        {
+          companyId: 2,
+          slug: 'beta',
+          outcome: 'failed',
+          error: "The board for company 'beta' could not be fetched: HTTP 503",
+        },
+      ],
     })
   })
 
@@ -194,6 +212,7 @@ describe('the wire is decoded into the UI', () => {
             postings_seen: 0,
             matches_created: 0,
             companies_not_fetched: null,
+            company_outcomes: [],
           },
           { status: 202 },
         )
@@ -209,6 +228,7 @@ describe('the wire is decoded into the UI', () => {
       postingsSeen: 0,
       matchesCreated: 0,
       companiesNotFetched: null,
+      companyOutcomes: [],
     })
     expect(requests).toHaveLength(1)
     expect(requests[0].headers.has('x-tick-secret')).toBe(false)

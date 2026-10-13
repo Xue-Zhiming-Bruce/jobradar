@@ -1,13 +1,13 @@
 """The migration path, measured against the models on both engines.
 
-`app.db.init_db()` creates the five tables in an empty database; the revisions in
-`migrations/versions/` bring a database that already exists to the same five
+`app.db.init_db()` creates the six tables in an empty database; the revisions in
+`migrations/versions/` bring a database that already exists to the same six
 tables -- the baseline, then the column #26 added, then the source column and
 check #28 added, then the outcome column, its check and its backfill #30 added,
 then the model and prompt-version columns #32 added, then the run's emailed
 count #36 added, then the two board-validator columns #55 added, then the run's
 unfetched-company count #56 added, then the company key widened from `slug`
-to `(source, slug)` #57. Two paths to one schema
+to `(source, slug)` #57, then the per-company outcome table #59 added. Two paths to one schema
 can drift, so nothing here assumes a revision is right: every test runs `alembic
 upgrade head` -- in-process, through `alembic.command.upgrade` -- against the
 database the shared `engine` fixture in `tests/conftest.py` supplies, and then
@@ -42,8 +42,8 @@ What is measured, in the order the guarantees build:
 One reading of a criterion is recorded here because the code depends on it: an
 `upgrade head` that adopts an existing database still creates alembic's own
 `alembic_version` table, which is how `alembic current` can report `head` at all.
-"Creates nothing" therefore means none of the five tables, and the assertions
-below name the five rather than counting statements.
+"Creates nothing" therefore means none of the six tables, and the assertions
+below name the six rather than counting statements.
 """
 
 import copy
@@ -67,14 +67,14 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 from app import db
 from app.matching.prefilter import REJECTION_REASON_PREFIX
 from app.matching.scorer import NOT_SCORED_PREFIX
-from app.models import Base, Company, Match, Posting, Resume
+from app.models import Base, Company, Match, Posting, Resume, Run, RunCompany
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 ALEMBIC_INI = BACKEND_ROOT / "alembic.ini"
 REVISIONS_DIR = BACKEND_ROOT / "migrations" / "versions"
 
 # The readable revision ids, in the order they apply, and the files that hold
-# them. The head is the last of the nine.
+# them. The head is the last of the ten.
 BASELINE_REVISION = "0001_baseline"
 BASELINE_REVISION_FILE = "0001_baseline_five_tables.py"
 PARSED_FIELDS_REVISION = "0002_parsed_fields"
@@ -93,6 +93,8 @@ COMPANIES_NOT_FETCHED_REVISION = "0008_run_companies_not_fetched"
 COMPANIES_NOT_FETCHED_REVISION_FILE = "0008_run_companies_not_fetched.py"
 SOURCE_SLUG_UNIQUE_REVISION = "0009_company_source_slug_unique"
 SOURCE_SLUG_UNIQUE_REVISION_FILE = "0009_company_source_slug_unique.py"
+RUN_COMPANY_REVISION = "0010_run_company_outcomes"
+RUN_COMPANY_REVISION_FILE = "0010_run_company_outcomes.py"
 THE_REVISION_FILES = (
     BASELINE_REVISION_FILE,
     PARSED_FIELDS_REVISION_FILE,
@@ -103,15 +105,16 @@ THE_REVISION_FILES = (
     BOARD_VALIDATOR_REVISION_FILE,
     COMPANIES_NOT_FETCHED_REVISION_FILE,
     SOURCE_SLUG_UNIQUE_REVISION_FILE,
+    RUN_COMPANY_REVISION_FILE,
 )
-HEAD_REVISION = SOURCE_SLUG_UNIQUE_REVISION
+HEAD_REVISION = RUN_COMPANY_REVISION
 
 # Alembic's own bookkeeping table: one row per applied revision. It is not one of
-# the five the models declare, and `alembic current` reads it.
+# the six the models declare, and `alembic current` reads it.
 ALEMBIC_VERSION_TABLE = "alembic_version"
 
-# The five tables `Base.metadata` holds, sorted so a failure reads in one order.
-THE_FIVE_TABLES = tuple(sorted(Base.metadata.tables))
+# The six tables `Base.metadata` holds, sorted so a failure reads in one order.
+THE_SIX_TABLES = tuple(sorted(Base.metadata.tables))
 
 # The one live index this schema declares, and the DDL both dialects render it as.
 # The predicate is what keeps a second *inactive* resume legal.
@@ -155,7 +158,7 @@ def database(engine: Engine) -> Iterator[Engine]:
     database that still says it is at `head` -- the PostgreSQL test database after
     an earlier test, or after an earlier run of the suite -- would make
     `upgrade head` a no-op and the comparison below vacuous. It has to go after one
-    too: `tests/conftest.py` drops the five tables and promises to leave the server
+    too: `tests/conftest.py` drops the six tables and promises to leave the server
     as it was found.
     """
     _drop_alembic_version(engine)
@@ -166,7 +169,7 @@ def database(engine: Engine) -> Iterator[Engine]:
 def _migrate(engine: Engine) -> None:
     """Empty the fixture's database and let the baseline revision build it instead.
 
-    `init_db()` has already created the same five tables in it: dropping them is
+    `init_db()` has already created the same six tables in it: dropping them is
     what makes what follows evidence about the *revision* rather than about the
     models' own `create_all`.
     """
@@ -185,9 +188,9 @@ def _dialect_of(engine: Engine) -> Dialect:
 
 
 def _reflected_tables(engine: Engine) -> MetaData:
-    """The five tables as the engine itself reports them, not as the models declare them."""
+    """The six tables as the engine itself reports them, not as the models declare them."""
     metadata = MetaData()
-    metadata.reflect(bind=engine, only=list(THE_FIVE_TABLES))
+    metadata.reflect(bind=engine, only=list(THE_SIX_TABLES))
     return metadata
 
 
@@ -549,10 +552,10 @@ def _company_with_posting(session: Session, slug: str = "acme") -> tuple[Company
 # exists" insufficient.
 
 
-def test_the_migrated_schema_holds_the_five_tables_and_alembics_own(database: Engine) -> None:
+def test_the_migrated_schema_holds_the_six_tables_and_alembics_own(database: Engine) -> None:
     _migrate(database)
 
-    assert set(inspect(database).get_table_names()) == set(THE_FIVE_TABLES) | {
+    assert set(inspect(database).get_table_names()) == set(THE_SIX_TABLES) | {
         ALEMBIC_VERSION_TABLE
     }
     assert _applied_revisions(database) == [HEAD_REVISION]
@@ -570,8 +573,8 @@ def test_every_migrated_column_matches_the_model_by_name_type_and_nullability(
     _migrate(database)
     dialect = _dialect_of(database)
 
-    assert {name: _reflected_columns(database, name) for name in THE_FIVE_TABLES} == {
-        name: _model_columns(Base.metadata.tables[name], dialect) for name in THE_FIVE_TABLES
+    assert {name: _reflected_columns(database, name) for name in THE_SIX_TABLES} == {
+        name: _model_columns(Base.metadata.tables[name], dialect) for name in THE_SIX_TABLES
     }
 
 
@@ -628,20 +631,22 @@ def test_the_partial_unique_index_rides_the_migrated_schema_with_its_predicate(
     } == {"sqlite": PARTIAL_INDEX_DDL, "postgres": PARTIAL_INDEX_DDL}
 
 
-def test_both_foreign_keys_cascade_on_the_migrated_schema(database: Engine) -> None:
+def test_the_foreign_keys_cascade_on_the_migrated_schema(database: Engine) -> None:
     _migrate(database)
 
     assert {
         (table_name, key["constrained_columns"][0]): key["options"].get("ondelete")
-        for table_name in THE_FIVE_TABLES
+        for table_name in THE_SIX_TABLES
         for key in inspect(database).get_foreign_keys(table_name)
     } == {
         ("posting", "company_id"): "CASCADE",
         ("match", "posting_id"): "CASCADE",
+        ("run_company", "run_id"): "CASCADE",
+        ("run_company", "company_id"): "CASCADE",
     }
 
 
-def test_the_migrated_schema_renders_the_five_tables_for_both_dialects(database: Engine) -> None:
+def test_the_migrated_schema_renders_the_six_tables_for_both_dialects(database: Engine) -> None:
     """The DDL-compile pattern of `test_models.py`, pointed at the migrated schema."""
     _migrate(database)
     reflected = _reflected_tables(database)
@@ -651,8 +656,8 @@ def test_the_migrated_schema_renders_the_five_tables_for_both_dialects(database:
             str(CreateTable(table).compile(dialect=dialect)) for table in reflected.sorted_tables
         )
 
-        assert all(re.search(rf'CREATE TABLE "?{name}"? \(', ddl) for name in THE_FIVE_TABLES)
-        assert ddl.count("ON DELETE CASCADE") == 2
+        assert all(re.search(rf'CREATE TABLE "?{name}"? \(', ddl) for name in THE_SIX_TABLES)
+        assert ddl.count("ON DELETE CASCADE") == 4
 
 
 # The rules of #23 on the migrated schema, asked the way test_engine_parity.py
@@ -796,9 +801,9 @@ def test_a_database_init_db_built_and_filled_is_adopted_by_upgrade_head(database
         database, lambda: command.upgrade(upgrade_config, "head")
     )
 
-    # None of the five tables is created or dropped: only alembic's own
+    # None of the six tables is created or dropped: only alembic's own
     # `alembic_version`, which is how `current` below can report `head` at all.
-    assert [line for line in statements if any(name in line for name in THE_FIVE_TABLES)] == []
+    assert [line for line in statements if any(name in line for name in THE_SIX_TABLES)] == []
     assert _written_rows(database) == before
 
     current_config = _config()
@@ -1056,7 +1061,7 @@ def test_the_downgrade_refuses_before_any_ddl_when_a_slug_lives_on_two_sources(
     and no temp table appears.
     """
     Base.metadata.drop_all(database)
-    command.upgrade(_config(), HEAD_REVISION)
+    command.upgrade(_config(), SOURCE_SLUG_UNIQUE_REVISION)
     _store_company_rows_before_this_revision(database, "acme", source="greenhouse")
     _store_company_rows_before_this_revision(database, "acme", source="lever")
     before = _company_rows_before_the_columns(database)
@@ -1069,7 +1074,7 @@ def test_the_downgrade_refuses_before_any_ddl_when_a_slug_lives_on_two_sources(
     assert _company_unique_constraints(database) == [["source", "slug"]]
     assert _company_rows_before_the_columns(database) == before
     assert "_alembic_tmp_company" not in inspect(database).get_table_names()
-    assert _applied_revisions(database) == [HEAD_REVISION]
+    assert _applied_revisions(database) == [SOURCE_SLUG_UNIQUE_REVISION]
 
 
 def test_the_validator_columns_are_added_null_with_no_backfill(database: Engine) -> None:
@@ -1127,7 +1132,7 @@ def test_the_four_documented_commands_do_what_they_say(database: Engine, tmp_pat
 
     command.upgrade(config, "head")
 
-    assert set(inspect(database).get_table_names()) == set(THE_FIVE_TABLES) | {
+    assert set(inspect(database).get_table_names()) == set(THE_SIX_TABLES) | {
         ALEMBIC_VERSION_TABLE
     }
     assert _applied_revisions(database) == [HEAD_REVISION]
@@ -1149,10 +1154,106 @@ def test_the_four_documented_commands_do_what_they_say(database: Engine, tmp_pat
     # `init_db()` is still what creates the tables in an empty database.
     db.init_db()
 
-    assert set(inspect(database).get_table_names()) == set(THE_FIVE_TABLES) | {
+    assert set(inspect(database).get_table_names()) == set(THE_SIX_TABLES) | {
         ALEMBIC_VERSION_TABLE
     }
     assert _applied_revisions(database) == []
+
+
+def test_the_run_company_table_appears_at_upgrade_and_is_gone_after_downgrade(
+    database: Engine,
+) -> None:
+    """#59's table: a database at #57 gains it, and `downgrade()` takes it away again.
+
+    The revision adds the sixth table and nothing else. The five tables #57 left
+    keep their rows in both directions, and the new table carries the two
+    cascading keys, the vocabulary check and the unique key by the names the
+    models declare.
+    """
+    Base.metadata.drop_all(database)
+    command.upgrade(_config(), SOURCE_SLUG_UNIQUE_REVISION)
+    _store_a_run_row_before_this_revision(
+        database, status="succeeded", error=None, postings_seen=12, matches_created=4
+    )
+    _store_company_rows_before_this_revision(database, "acme")
+    run_before = _run_rows_before_the_column(database)
+    companies_before = _company_rows_before_the_columns(database)
+    assert "run_company" not in inspect(database).get_table_names()
+
+    command.upgrade(_config(), "head")
+
+    assert "run_company" in inspect(database).get_table_names()
+    assert _applied_revisions(database) == [HEAD_REVISION]
+    assert [
+        constraint["column_names"]
+        for constraint in inspect(database).get_unique_constraints("run_company")
+    ] == [["run_id", "company_id"]]
+    assert {
+        check["name"] for check in inspect(database).get_check_constraints("run_company")
+    } == {"ck_run_company_outcome_values"}
+
+    command.downgrade(_config(), SOURCE_SLUG_UNIQUE_REVISION)
+
+    assert "run_company" not in inspect(database).get_table_names()
+    assert _applied_revisions(database) == [SOURCE_SLUG_UNIQUE_REVISION]
+    assert _run_rows_before_the_column(database) == run_before
+    assert _company_rows_before_the_columns(database) == companies_before
+
+
+def test_the_migrated_schema_refuses_a_second_outcome_for_one_company_and_an_unknown_one(
+    database: Engine,
+) -> None:
+    """One outcome per company per run, and the three values: the engine's rules, not the walk's."""
+    _migrate(database)
+
+    with db.session_scope() as session:
+        company = Company(name="Acme", slug="acme")
+        session.add(company)
+        session.flush()
+        first = Run(status="running")
+        session.add(first)
+        session.flush()
+        session.add(RunCompany(run_id=first.id, company_id=company.id, outcome="fetched"))
+        second = Run(status="running")
+        session.add(second)
+        session.flush()
+        company_id, first_run, second_run = company.id, first.id, second.id
+
+    with pytest.raises(IntegrityError) as duplicate:
+        with db.session_scope() as session:
+            session.add(
+                RunCompany(run_id=first_run, company_id=company_id, outcome="failed")
+            )
+
+    _assert_the_engine_named_what_it_refused(
+        duplicate.value, "run_company.run_id, run_company.company_id", "uq_run_company_outcome"
+    )
+
+    # A different run, so the unique key is not what refuses the value below.
+    with pytest.raises(IntegrityError) as unknown:
+        with db.session_scope() as session:
+            session.add(RunCompany(run_id=second_run, company_id=company_id, outcome="maybe"))
+
+    _assert_the_engine_named_what_it_refused(unknown.value, "ck_run_company_outcome_values")
+
+    with db.session_scope() as session:
+        session.add(
+            RunCompany(
+                run_id=second_run,
+                company_id=company_id,
+                outcome="failed",
+                error="The board for company 'acme' could not be fetched: HTTP 503",
+            )
+        )
+
+    with db.session_scope() as session:
+        assert [
+            (row.run_id, row.outcome, row.error)
+            for row in session.scalars(select(RunCompany).order_by(RunCompany.id))
+        ] == [
+            (first_run, "fetched", None),
+            (second_run, "failed", "The board for company 'acme' could not be fetched: HTTP 503"),
+        ]
 
 
 # Drift between the models and the history, reported by a plain test.

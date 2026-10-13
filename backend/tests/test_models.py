@@ -1,4 +1,4 @@
-"""The five tables, declared once, under the column names later tasks read.
+"""The six tables, declared once, under the column names later tasks read.
 
 `__tablename__` may appear in no module other than `app/models.py`: one place
 declares table structure, so one place has to be migrated (#21) when it changes.
@@ -22,7 +22,7 @@ from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.schema import CreateIndex, CreateTable
 
 from app import models
-from app.models import Base, Company, Match, Posting, Resume, Run, UTCDateTime
+from app.models import Base, Company, Match, Posting, Resume, Run, RunCompany, UTCDateTime
 
 APP_ROOT = Path(__file__).resolve().parent.parent / "app"
 
@@ -74,6 +74,7 @@ _EXPECTED_COLUMNS = {
         "matches_emailed",
         "companies_not_fetched",
     },
+    "run_company": {"id", "run_id", "company_id", "outcome", "error"},
 }
 
 # The length of every string column: the budget #2 declared, so a column is not
@@ -103,6 +104,8 @@ _STRING_LENGTHS = {
     ("match", "prompt_version"): 50,
     ("run", "status"): 20,
     ("run", "error"): None,
+    ("run_company", "outcome"): 20,
+    ("run_company", "error"): None,
 }
 
 _UNBOUNDED_STRING_COLUMNS = {
@@ -116,6 +119,7 @@ _UNBOUNDED_STRING_COLUMNS = {
     ("match", "reason"),
     ("match", "gaps"),
     ("run", "error"),
+    ("run_company", "error"),
 }
 
 # Every timestamp column, in every table: a timestamp, not a string or an epoch.
@@ -173,7 +177,7 @@ def _both_ddl() -> dict[str, str]:
     return {name: _ddl(_dialect(name)) for name in ("sqlite", "postgres")}
 
 
-def test_the_five_tables_are_declared_and_no_others() -> None:
+def test_the_six_tables_are_declared_and_no_others() -> None:
     assert set(Base.metadata.tables) == set(_EXPECTED_COLUMNS)
 
 
@@ -342,7 +346,7 @@ def test_defaults_are_python_side_except_the_outcome_the_database_fills() -> Non
 
 
 @pytest.mark.parametrize("dialect_name", sorted(_MATCH_TABLE_DDL))
-def test_the_rendered_ddl_creates_the_five_tables(dialect_name: str) -> None:
+def test_the_rendered_ddl_creates_the_six_tables(dialect_name: str) -> None:
     dialect = sqlite.dialect() if dialect_name == "sqlite" else postgresql.dialect()
 
     ddl = _ddl(dialect)
@@ -403,6 +407,7 @@ def test_the_dedupe_keys_are_declared_as_unique_constraints() -> None:
     assert unique_constraints["company"] == [["source", "slug"]]
     assert unique_constraints["posting"] == [["company_id", "external_id"]]
     assert unique_constraints["match"] == [["posting_id"]]
+    assert unique_constraints["run_company"] == [["run_id", "company_id"]]
 
 
 def test_uniqueness_never_leans_on_a_collation() -> None:
@@ -444,6 +449,9 @@ def test_the_checks_are_named_and_carry_plain_string_columns() -> None:
             "outcome IN ('scored', 'rejected', 'not_scored')"
         ),
         ("run", "ck_run_status_values"): "status IN ('running', 'succeeded', 'failed')",
+        ("run_company", "ck_run_company_outcome_values"): (
+            "outcome IN ('fetched', 'not_modified', 'failed')"
+        ),
     }
     for dialect_name, ddl in _both_ddl().items():
         assert all(
@@ -457,6 +465,7 @@ def test_the_checks_are_named_and_carry_plain_string_columns() -> None:
         # between the type and NOT NULL, on both engines.
         assert "outcome VARCHAR(20) DEFAULT 'scored' NOT NULL" in ddl, dialect_name
         assert "status VARCHAR(20) NOT NULL" in ddl, dialect_name
+        assert "outcome VARCHAR(20) NOT NULL" in ddl, dialect_name
 
 
 def test_every_foreign_key_cascades_on_both_engines() -> None:
@@ -469,9 +478,11 @@ def test_every_foreign_key_cascades_on_both_engines() -> None:
     assert declared == {
         ("posting", "company_id"): "CASCADE",
         ("match", "posting_id"): "CASCADE",
+        ("run_company", "run_id"): "CASCADE",
+        ("run_company", "company_id"): "CASCADE",
     }
     for dialect_name, ddl in _both_ddl().items():
-        assert ddl.count("ON DELETE CASCADE") == 2, dialect_name
+        assert ddl.count("ON DELETE CASCADE") == 4, dialect_name
 
 
 def test_the_slug_is_a_bounded_string_column_like_the_lengths_test_expects() -> None:
@@ -492,6 +503,9 @@ def test_every_column_a_constraint_rides_on_is_not_nullable() -> None:
         Match.__table__.c.state,
         Match.__table__.c.outcome,
         Run.__table__.c.status,
+        RunCompany.__table__.c.run_id,
+        RunCompany.__table__.c.company_id,
+        RunCompany.__table__.c.outcome,
     ]
 
     assert [column.name for column in riding_on_a_rule if column.nullable] == []

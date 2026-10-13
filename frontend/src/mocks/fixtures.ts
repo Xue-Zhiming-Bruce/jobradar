@@ -25,6 +25,8 @@ export const runSummary = {
   matches_created: 0,
   matches_emailed: null,
   companies_not_fetched: null,
+  // No company has been attempted yet, so the list the `202` answers with is empty.
+  company_outcomes: [],
 }
 
 /** The terminal row `GET /runs/{id}` answers with, so the dev button reaches an outcome. */
@@ -38,6 +40,10 @@ export const runSucceeded = {
   matches_created: 4,
   matches_emailed: 3,
   companies_not_fetched: null,
+  company_outcomes: [
+    { company_id: 1, slug: 'acme', outcome: 'fetched', error: null },
+    { company_id: 2, slug: 'globex', outcome: 'not_modified', error: null },
+  ],
 }
 
 // One row per state, newest first, so a test can tell all three treatments apart:

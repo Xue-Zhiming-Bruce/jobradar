@@ -33,13 +33,20 @@ which fetches a board per company, stores what it finds, scores each survivor
 and counts what it did, and then #10's digest, which emails the matches that
 qualify, marks them notified and records how many it emailed on the run's row.
 The order matters: a pipeline that raises sends no email at all, so the matches
-it scored before a board failure go out with the next successful run.
+it scored before a real failure go out with the next successful run; a walk that
+recorded a failed board is not that case -- it returned, so its digest still
+emails what the boards that answered produced (#59).
 
-The row's eight columns are the whole progress record, and this module is the
-only writer of `status`, `finished_at` and `error`: the row is inserted `running`
-with both counts 0, the pipeline writes the counts as the run earns them and the
-digest writes what it emailed, and the run's end writes `succeeded` or `failed`
-with the failure's own message in `error`. The request answered `202` long before any of that, so the row is where
+The row's nine columns are the whole progress record, and this module is the only
+writer of `status`, `finished_at` and `error`: the row is inserted `running` with
+both counts 0, the pipeline writes the counts as the run earns them, its own
+per-company outcome rows and the digest's `matches_emailed`, and the run's end
+writes `succeeded` or `failed`. The status is derived after the pipeline returned:
+`failed` when any `run_company` row of this run is `'failed'`, whether one board
+failed or all of them, and `succeeded` only when none did, with `error` a slug-only
+summary (`2 of 3 companies failed: 'beta', 'gamma'`) while each company's own
+message stays on its row. A pipeline that raised is the other path and keeps its
+own message in `error`, exactly as before. The request answered `202` long before any of that, so the row is where
 a failure has to be readable -- never a traceback to a client that is gone.
 
 The guard against two runs at once is this process's, not the database's. The
@@ -60,10 +67,11 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import func, select
 
 from app import db
 from app.matching.scorer import LlmScorer
-from app.models import Run
+from app.models import Company, Run, RunCompany
 from app.routes.runs import RunSummary, run_summary
 from app.services.digest import Mailer, SmtpMailer, send_digest
 from app.services.pipeline import run_pipeline
@@ -80,6 +88,8 @@ TICK_SECRET_VARIABLE = "TICK_SECRET"
 
 # The vocabulary `run.status` accepts in `app.models.Run`, spelled the way the
 # check constraint spells it: this module writes `running` and one of the two.
+# `FAILED` is also the word a `run_company` outcome carries for a board that
+# failed, which is the row `_recorded_failure` reads to derive the other one.
 RUNNING = "running"
 SUCCEEDED = "succeeded"
 FAILED = "failed"
@@ -231,6 +241,36 @@ def _without_the_secret(message: str | None) -> str | None:
     return message.replace(secret, "[redacted]")
 
 
+def _recorded_failure(run_id: int) -> str | None:
+    """The run's slug-only summary when a recorded board failed, or None when none did.
+
+    Read after the pipeline returned, from the rows the walk wrote: this counts
+    every company the run attempted and names the ones whose outcome is `'failed'`,
+    in the order the walk walked them. A run with no failed row -- an ordinary
+    walk, one the budget stopped, or one that never reached a board -- answers
+    `None` and ends `succeeded`. The slugs are the only text taken from anywhere
+    but the failure's own message, which each company's row already holds.
+    """
+    with db.session_scope() as session:
+        attempted = session.scalar(
+            select(func.count()).select_from(RunCompany).where(RunCompany.run_id == run_id)
+        )
+        failed = list(
+            session.scalars(
+                select(Company.slug)
+                .join(RunCompany, RunCompany.company_id == Company.id)
+                .where(RunCompany.run_id == run_id, RunCompany.outcome == FAILED)
+                .order_by(RunCompany.id)
+            )
+        )
+    if not failed:
+        return None
+    return (
+        f"{len(failed)} of {attempted} companies failed: "
+        + ", ".join(f"'{slug}'" for slug in failed)
+    )
+
+
 def _end_run(run_id: int, status: str, error: str | None) -> None:
     """Write how the run ended on its row: the status, the end and the message.
 
@@ -254,15 +294,18 @@ def _run(run_id: int, pipeline: Pipeline) -> None:
     Everything the pipeline raises lands on the row instead of on a thread nobody
     is watching: the request answered `202` a long time ago, so the row is where a
     failure has to be readable, and the message stored is the failure's own -- the
-    pipeline's text, never a traceback. The release is in a `finally` after that
-    write, so no path through a run leaves the guard held.
+    pipeline's text, never a traceback. A pipeline that returned is read back
+    afterwards: `failed` when any company it attempted failed, and `succeeded` only
+    when none did. The release is in a `finally` after that write, so no path
+    through a run leaves the guard held.
     """
     try:
         pipeline(run_id)
     except Exception as error:  # the work's whole failure family is the row's business
         _end_run(run_id, FAILED, str(error))
     else:
-        _end_run(run_id, SUCCEEDED, None)
+        failure = _recorded_failure(run_id)
+        _end_run(run_id, FAILED if failure else SUCCEEDED, failure)
     finally:
         logger.info("Run %s is over", run_id)
         _run_in_progress.release()

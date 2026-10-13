@@ -943,6 +943,42 @@
         "title": "ResumeUploaded",
         "description": "Body of a successful upload: which resume is now the active one."
       },
+      "RunCompanyOutcome": {
+        "properties": {
+          "company_id": {
+            "type": "integer",
+            "title": "Company Id"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "outcome": {
+            "type": "string",
+            "title": "Outcome"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "company_id",
+          "slug",
+          "outcome",
+          "error"
+        ],
+        "title": "RunCompanyOutcome",
+        "description": "One company's outcome in one run, as this API renders it.\n\nOne entry per company the run's walk attempted, in the order it attempted them\n(#59): `outcome` is `'fetched'`, `'not_modified'` or `'failed'`, and `error` is\nthe failure's own message on a `'failed'` row and NULL on every other. The slug\nis the company's own, read through the key the row holds, so a client reads\nwhich board failed without a second request. A company the run's budget never\nreached has no entry here: #56's `companies_not_fetched` counts those."
+      },
       "RunSummary": {
         "properties": {
           "id": {
@@ -1010,6 +1046,13 @@
               }
             ],
             "title": "Companies Not Fetched"
+          },
+          "company_outcomes": {
+            "items": {
+              "$ref": "#/components/schemas/RunCompanyOutcome"
+            },
+            "type": "array",
+            "title": "Company Outcomes"
           }
         },
         "type": "object",
@@ -1022,10 +1065,11 @@
           "postings_seen",
           "matches_created",
           "matches_emailed",
-          "companies_not_fetched"
+          "companies_not_fetched",
+          "company_outcomes"
         ],
         "title": "RunSummary",
-        "description": "One `run` row as this API renders it: its nine columns, and no derived field.\n\nThe same body a `202` from `POST /internal/tick` carries. `finished_at` and\n`error` are absent until the run ends, and the two counts the walk earns are\n0 from the moment the row is written: what the boards returned and how many\nmatches `record_score` wrote (#34), never a score computed here.\n`matches_emailed` is the third: how many matches this run's own digest emailed\n(#36), NULL until that digest records it -- which is the honest value for a\nrun still in flight, a row written before the column existed, and a run whose\nsend failed, and a different answer from a run that really did email none.\n`companies_not_fetched` is NULL for a run the board-call budget did not stop,\nwhich includes a run still in flight, and holds the count of active companies\nthe walk left for a later run when it did (#56)."
+        "description": "One `run` row as this API renders it: its nine columns and its per-company outcomes.\n\nThe same body a `202` from `POST /internal/tick` carries. `finished_at` and\n`error` are absent until the run ends, and the two counts the walk earns are\n0 from the moment the row is written: what the boards returned and how many\nmatches `record_score` wrote (#34), never a score computed here.\n`matches_emailed` is the third: how many matches this run's own digest emailed\n(#36), NULL until that digest records it -- which is the honest value for a\nrun still in flight, a row written before the column existed, and a run whose\nsend failed, and a different answer from a run that really did email none.\n`companies_not_fetched` is NULL for a run the board-call budget did not stop,\nwhich includes a run still in flight, and holds the count of active companies\nthe walk left for a later run when it did (#56).\n`company_outcomes` is one entry per company the run attempted and is empty for\na run that has not attempted one yet -- the `202`'s fresh row -- so a client\nreads the same shape from both routes at every point in a run's life."
       },
       "ValidationError": {
         "properties": {

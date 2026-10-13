@@ -4,15 +4,16 @@ A tick answers `202` with a run row while the work is still ahead of it, so this
 route is how a client -- the owner's browser, and #12's UI -- reads the rest:
 `running` while the run is in flight, then `succeeded` or `failed` with the
 counts the run earned and the failure's message when there was one. Nothing here
-is computed or invented: the body is the row's own nine columns, because the row
-is the whole progress record this app keeps, and `app.models.Run` is where their
-meaning is declared.
+is computed or invented: the body is the row's own nine columns plus the per-company
+outcomes of the run, because the row is the whole progress record this app keeps,
+and `app.models.Run` and `app.models.RunCompany` are where their meaning is
+declared.
 
 No secret is required, because reading one's own run is what the browser does and
 this app has no accounts (`_docs/plan.md`). The body carries what the row holds
 and nothing else -- no secret, no resume text, no database URL -- which is
-exactly the `RunSummary` model below: a field that is not on the row is not on
-the wire either.
+exactly the `RunSummary` model below: a field that is not on the row, nor in the
+`run_company` rows the row's id names, is not on the wire either.
 
 `RunSummary` and `run_summary()` are also what `POST /internal/tick` answers its
 `202` with, so a client that started a run reads the same shape twice and the
@@ -30,16 +31,34 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import update
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session
 
 from app import db
-from app.models import Run
+from app.models import Company, Run, RunCompany
 
 router = APIRouter()
 
 
+class RunCompanyOutcome(BaseModel):
+    """One company's outcome in one run, as this API renders it.
+
+    One entry per company the run's walk attempted, in the order it attempted them
+    (#59): `outcome` is `'fetched'`, `'not_modified'` or `'failed'`, and `error` is
+    the failure's own message on a `'failed'` row and NULL on every other. The slug
+    is the company's own, read through the key the row holds, so a client reads
+    which board failed without a second request. A company the run's budget never
+    reached has no entry here: #56's `companies_not_fetched` counts those.
+    """
+
+    company_id: int
+    slug: str
+    outcome: str
+    error: str | None
+
+
 class RunSummary(BaseModel):
-    """One `run` row as this API renders it: its nine columns, and no derived field.
+    """One `run` row as this API renders it: its nine columns and its per-company outcomes.
 
     The same body a `202` from `POST /internal/tick` carries. `finished_at` and
     `error` are absent until the run ends, and the two counts the walk earns are
@@ -52,6 +71,9 @@ class RunSummary(BaseModel):
     `companies_not_fetched` is NULL for a run the board-call budget did not stop,
     which includes a run still in flight, and holds the count of active companies
     the walk left for a later run when it did (#56).
+    `company_outcomes` is one entry per company the run attempted and is empty for
+    a run that has not attempted one yet -- the `202`'s fresh row -- so a client
+    reads the same shape from both routes at every point in a run's life.
     """
 
     id: int
@@ -63,6 +85,7 @@ class RunSummary(BaseModel):
     matches_created: int
     matches_emailed: int | None
     companies_not_fetched: int | None
+    company_outcomes: list[RunCompanyOutcome]
 
 
 # The refusals this route answers with, named in the contract the way
@@ -73,7 +96,26 @@ READ_RESPONSES = RUN_NOT_FOUND_RESPONSE | UNUSABLE_ID_RESPONSE
 
 
 def run_summary(run: Run) -> RunSummary:
-    """One run as this API renders it, read while its session is still open."""
+    """One run as this API renders it, read while its session is still open.
+
+    The per-company outcomes are read through that same session, in the order the
+    walk recorded them, so the run's own row and the companies it attempted are one
+    read. Both callers hold a live session: `read_run` reads a stored row and
+    `_claim_run` reads the row it just flushed, whose outcome list is empty because
+    no company has been attempted yet.
+    """
+    session = Session.object_session(run)
+    outcomes = [
+        RunCompanyOutcome(
+            company_id=row.company_id, slug=slug, outcome=row.outcome, error=row.error
+        )
+        for row, slug in session.execute(
+            select(RunCompany, Company.slug)
+            .join(Company, RunCompany.company_id == Company.id)
+            .where(RunCompany.run_id == run.id)
+            .order_by(RunCompany.id)
+        )
+    ]
     return RunSummary(
         id=run.id,
         status=run.status,
@@ -84,6 +126,7 @@ def run_summary(run: Run) -> RunSummary:
         matches_created=run.matches_created,
         matches_emailed=run.matches_emailed,
         companies_not_fetched=run.companies_not_fetched,
+        company_outcomes=outcomes,
     )
 
 

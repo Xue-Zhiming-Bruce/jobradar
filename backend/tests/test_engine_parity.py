@@ -45,7 +45,7 @@ _LONG_TEXT_COLUMNS = [
     (Run, "error"),
 ]
 
-# Every timestamp column in the five tables: each one has to round-trip.
+# Every timestamp column in the six tables: each one has to round-trip.
 _TIMESTAMP_COLUMNS = [
     (Resume, "uploaded_at"),
     (Company, "created_at"),
@@ -95,7 +95,7 @@ def _add_company_with_posting(
     return company, posting
 
 
-def test_create_read_update_delete_round_trip_over_all_five_tables(engine: Engine) -> None:
+def test_create_read_update_delete_round_trip_over_all_six_tables(engine: Engine) -> None:
     assert set(inspect(engine).get_table_names()) == set(Base.metadata.tables)
 
     with db.session_scope() as session:

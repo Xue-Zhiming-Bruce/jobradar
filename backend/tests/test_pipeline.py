@@ -58,7 +58,7 @@ from app.matching.scorer import (
     MatchResult,
     ScorerConfigurationError,
 )
-from app.models import Company, Match, Posting, Run
+from app.models import Company, Match, Posting, Run, RunCompany
 from app.routes.internal import TICK_SECRET_HEADER, get_pipeline, get_run_starter
 from app.services import pipeline as pipeline_module
 from app.services import resume
@@ -75,7 +75,6 @@ from app.sources import greenhouse
 from app.sources.base import (
     MAX_BODY_BYTES,
     BoardPostings,
-    BoardShrunk,
     BoardUnavailable,
     MalformedPayload,
     NotModified,
@@ -354,6 +353,25 @@ def _postings_of(company_id: int) -> dict[str, dict[str, Any]]:
         }
 
 
+def _company_outcomes(run_id: int) -> list[dict[str, Any]]:
+    """Every `run_company` row of that run, with its company's slug, in the order it was written."""
+    with db.session_scope() as session:
+        return [
+            {
+                "company_id": row.company_id,
+                "slug": slug,
+                "outcome": row.outcome,
+                "error": row.error,
+            }
+            for row, slug in session.execute(
+                select(RunCompany, Company.slug)
+                .join(Company, RunCompany.company_id == Company.id)
+                .where(RunCompany.run_id == run_id)
+                .order_by(RunCompany.id)
+            )
+        ]
+
+
 def _rows(model: type) -> int:
     """How many rows one table holds at all, so a stray insert cannot hide."""
     with db.session_scope() as session:
@@ -435,22 +453,28 @@ def test_each_company_is_fetched_through_the_adapter_its_row_names(engine: Engin
     assert set(_postings_of(lever)) == {"2"}
 
 
-def test_a_lever_source_error_fails_the_run_and_the_message_names_the_slug(engine: Engine) -> None:
-    _company("globex", source="lever")
+def test_a_lever_source_error_is_recorded_against_its_company_and_names_the_slug(
+    engine: Engine,
+) -> None:
+    company = _company("globex", source="lever")
     _active_resume()
     failure = UnknownSlug("There is no Lever board named 'globex'")
+    run = _run()
 
-    with pytest.raises(SourceError) as raised:
-        run_pipeline(
-            _run(),
-            sources={"lever": FakeSource(failing={"globex": failure})},
-            scorer=FakeScorer(_result()),
-        )
-
-    assert str(raised.value) == (
-        f"The board for company 'globex' could not be fetched: {failure}"
+    run_pipeline(
+        run,
+        sources={"lever": FakeSource(failing={"globex": failure})},
+        scorer=FakeScorer(_result()),
     )
-    assert isinstance(raised.value, SourceError)
+
+    assert _company_outcomes(run) == [
+        {
+            "company_id": company,
+            "slug": "globex",
+            "outcome": "failed",
+            "error": f"The board for company 'globex' could not be fetched: {failure}",
+        }
+    ]
 
 
 # Ingest owns every `posting` row: one call per company, and no row from anywhere else.
@@ -832,13 +856,13 @@ def test_postings_seen_counts_everything_returned_and_matches_created_only_the_s
     assert len(rejections) == 4
 
 
-def test_a_run_that_fails_half_way_keeps_the_counts_and_the_rows_it_earned(
+def test_a_run_that_records_a_failed_board_keeps_the_counts_and_the_rows_it_earned(
     engine: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed board aborts the walk, and nothing already written is rolled back."""
+    """One company's failure, and nothing already written by the other is rolled back."""
     monkeypatch.setenv(PREFILTER_TITLE_TERMS, "intern")
     watched = _company("acme")
-    _company("beta")
+    failed = _company("beta")
     source = FakeSource(
         {
             "acme": [
@@ -852,15 +876,19 @@ def test_a_run_that_fails_half_way_keeps_the_counts_and_the_rows_it_earned(
     _active_resume()
     run = _run()
 
-    with pytest.raises(SourceError) as raised:
-        run_pipeline(run, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+    run_pipeline(run, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
 
-    assert "beta" in str(raised.value)
+    assert [(row["slug"], row["outcome"]) for row in _company_outcomes(run)] == [
+        ("acme", "fetched"),
+        ("beta", "failed"),
+    ]
+    assert source.calls == ["acme", "beta"]  # the walk did not stop at the failure
     assert len(_postings_of(watched)) == 3
     assert len(_matches()) == 3
     row = _run_row(run)
     assert (row["postings_seen"], row["matches_created"]) == (3, 1)
     assert _rows(Posting) == 3  # the failing company stored nothing
+    assert _postings_of(failed) == {}
 
 
 def test_a_retry_after_a_failed_board_stores_and_matches_only_what_is_new(engine: Engine) -> None:
@@ -872,10 +900,10 @@ def test_a_retry_after_a_failed_board_stores_and_matches_only_what_is_new(engine
         {"acme": [_posting("1")]},
         failing={"beta": SourceError("The board 'beta' could not be reached")},
     )
-    with pytest.raises(SourceError):
-        run_pipeline(first, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+    run_pipeline(first, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
     before = _matches()
     assert len(before) == 1
+    assert [row["outcome"] for row in _company_outcomes(first)] == ["fetched", "failed"]
 
     second = _run()
     retried = FakeSource({"acme": [_posting("1")], "beta": [_posting("2")]})
@@ -901,20 +929,20 @@ def test_the_pipeline_writes_the_counts_and_leaves_the_run_rows_lifecycle_alone(
     )
 
     failing = _run()
-    with pytest.raises(SourceError):
-        run_pipeline(
-            failing,
-            sources={"greenhouse": FakeSource(failing={"acme": SourceError("no board today")})},
-            scorer=FakeScorer(_result()),
-        )
+    run_pipeline(
+        failing,
+        sources={"greenhouse": FakeSource(failing={"acme": SourceError("no board today")})},
+        scorer=FakeScorer(_result()),
+    )
 
     for run_id, seen, matched in ((succeeding, 1, 1), (failing, 0, 0)):
         row = _run_row(run_id)
         assert (row["status"], row["finished_at"], row["error"]) == ("running", None, None)
         assert (row["postings_seen"], row["matches_created"]) == (seen, matched)
+        assert [entry["outcome"] for entry in _company_outcomes(run_id)] != []  # its own row is written
 
 
-# A board that fails fails the run, and the message names the board.
+# A board that fails is recorded against its company, and the message names the board.
 
 
 @pytest.mark.parametrize(
@@ -927,22 +955,25 @@ def test_the_pipeline_writes_the_counts_and_leaves_the_run_rows_lifecycle_alone(
     ],
     ids=["an unknown slug", "a board that refused", "a malformed payload", "a timeout"],
 )
-def test_each_source_error_fails_the_run_and_the_message_names_the_slug(
+def test_each_source_error_is_recorded_against_its_company_and_names_the_slug(
     engine: Engine, failure: SourceError
 ) -> None:
-    _company("acme")
+    company = _company("acme")
     _active_resume()
     run = _run()
 
-    with pytest.raises(SourceError) as raised:
-        run_pipeline(
-            run, sources={"greenhouse": FakeSource(failing={"acme": failure})}, scorer=FakeScorer(_result())
-        )
-
-    assert str(raised.value) == (
-        f"The board for company 'acme' could not be fetched: {failure}"
+    run_pipeline(
+        run, sources={"greenhouse": FakeSource(failing={"acme": failure})}, scorer=FakeScorer(_result())
     )
-    assert isinstance(raised.value, SourceError)
+
+    assert _company_outcomes(run) == [
+        {
+            "company_id": company,
+            "slug": "acme",
+            "outcome": "failed",
+            "error": f"The board for company 'acme' could not be fetched: {failure}",
+        }
+    ]
     assert _rows(Posting) == 0
     assert _run_row(run)["postings_seen"] == 0
 
@@ -1092,9 +1123,10 @@ def test_a_parsed_skill_reaches_the_stored_reason_and_no_log_line(
     assert SKILL_SENTINEL not in client.get(f"/runs/{run_id}").text
 
 
-def test_the_pipeline_writes_no_row_of_its_own_but_the_runs_counts() -> None:
-    """A posting and a match row are written by the services: this module only reads them back."""
-    assert "session.add(" not in PIPELINE_SOURCE
+def test_the_pipeline_writes_only_the_outcome_rows_and_the_runs_counts() -> None:
+    """A posting row and a match row are written by the services: this module writes one row of its own."""
+    assert PIPELINE_SOURCE.count("session.add(") == 1  # the `run_company` row, and nothing else
+    assert "RunCompany(" in PIPELINE_SOURCE
     assert "session.delete(" not in PIPELINE_SOURCE
     assert ".commit(" not in PIPELINE_SOURCE
 
@@ -1226,21 +1258,27 @@ def test_a_304_leaves_the_stored_validator_exactly_as_it_was(engine: Engine) -> 
     assert _stored_validator(company) == (STORED_ETAG, STORED_LAST_MODIFIED)
 
 
-def test_a_refused_payload_leaves_the_stored_validator_untouched(engine: Engine) -> None:
+def test_a_refused_payload_records_its_own_failure_and_leaves_the_validator_untouched(
+    engine: Engine,
+) -> None:
     """The guard refuses before the ingest, so the validator it answered with is not written."""
     company = _company("acme")
     _open_postings(company, 4)
     _seed_validator(company, etag=STORED_ETAG, last_modified=None)
     _active_resume()
+    run = _run()
 
-    with pytest.raises(BoardShrunk):
-        run_pipeline(
-            _run(),
-            sources={"greenhouse": FakeSource({"acme": []}, validators={"acme": (ANSWERED_ETAG, None)})},
-            scorer=FakeScorer(_result()),
-        )
+    run_pipeline(
+        run,
+        sources={"greenhouse": FakeSource({"acme": []}, validators={"acme": (ANSWERED_ETAG, None)})},
+        scorer=FakeScorer(_result()),
+    )
 
     assert _stored_validator(company) == (STORED_ETAG, None)  # next run asks the same question
+    (recorded,) = _company_outcomes(run)
+    assert recorded["outcome"] == "failed"
+    assert "acme" in recorded["error"]  # the guard's own message, on the company's row
+    assert _open_count(company) == 4
 
 
 def test_a_payload_whose_ingest_raised_leaves_the_stored_validator_untouched(
@@ -1343,15 +1381,16 @@ def test_a_refused_board_is_never_handed_to_ingest(
     _active_resume()
     run = _run()
 
-    with pytest.raises(BoardShrunk) as raised:
-        run_pipeline(
-            run, sources={"greenhouse": FakeSource({"acme": []})}, scorer=FakeScorer(_result())
-        )
+    run_pipeline(
+        run, sources={"greenhouse": FakeSource({"acme": []})}, scorer=FakeScorer(_result())
+    )
 
     assert calls == []  # the ingest was not called for the refused company
-    assert type(raised.value) is BoardShrunk
-    assert "acme" in str(raised.value)
-    assert "0" in str(raised.value) and "4" in str(raised.value)  # both numbers, and no payload
+    (recorded,) = _company_outcomes(run)
+    assert recorded["outcome"] == "failed"
+    message = recorded["error"]
+    assert "acme" in message
+    assert "0" in message and "4" in message  # both numbers, and no payload
     assert _open_count(company) == 4
     assert _rows(Posting) == 4
     assert _run_row(run)["postings_seen"] == 0  # a refused board is counted by nobody
@@ -1392,12 +1431,16 @@ def test_the_guard_matrix(
     assert row["status"] == outcome
     assert _rows(Posting) == open_count  # nothing inserted and nothing deleted, either way
     assert _open_count(company) == open_count - closed
+    (recorded,) = _company_outcomes(row["id"])
     if outcome == "failed":
         assert (row["postings_seen"], row["matches_created"]) == (0, 0)
-        assert "acme" in row["error"]
-        assert str(open_count) in row["error"] and str(listed) in row["error"]
+        assert row["error"] == "1 of 1 companies failed: 'acme'"  # the run names the board
+        assert recorded["outcome"] == "failed"
+        assert "acme" in recorded["error"]  # and the company's own row carries the reason
+        assert str(open_count) in recorded["error"] and str(listed) in recorded["error"]
     else:
         assert row["error"] is None
+        assert recorded["outcome"] == "fetched"
         # Nothing listed is new -- every posting the board named is one already stored --
         # so `created_ids` is empty and the run matches nothing.
         assert (row["postings_seen"], row["matches_created"]) == (listed, 0)
@@ -1412,10 +1455,11 @@ def test_a_second_run_over_the_same_refused_board_is_refused_again(engine: Engin
     refusals: list[str] = []
 
     for _ in range(2):
-        with pytest.raises(BoardShrunk) as raised:
-            run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
-        assert type(raised.value) is BoardShrunk
-        refusals.append(str(raised.value))
+        run = _run()
+        run_pipeline(run, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+        (recorded,) = _company_outcomes(run)
+        assert recorded["outcome"] == "failed"
+        refusals.append(recorded["error"])
         assert _open_count(company) == 4
         assert _rows(Posting) == 4
 
@@ -1426,7 +1470,7 @@ def test_a_second_run_over_the_same_refused_board_is_refused_again(engine: Engin
 def test_a_refused_board_keeps_what_the_earlier_companies_earned(
     engine: Engine, client: TestClient, inline_starter: None
 ) -> None:
-    """#34's rule: the walk stops on the refusal, the earlier companies keep their rows and counts."""
+    """#59's rule: the refusal is recorded and the walk goes on, so what the other earned stays."""
     trusted = _company("acme")
     refused = _company("beta")
     _open_postings(refused, 4)
@@ -1436,8 +1480,12 @@ def test_a_refused_board_keeps_what_the_earlier_companies_earned(
     row = _tick(client, {"greenhouse": source})
 
     assert row["status"] == "failed"
-    assert "beta" in row["error"]
+    assert row["error"] == "1 of 2 companies failed: 'beta'"
     assert (row["postings_seen"], row["matches_created"]) == (3, 3)  # the refused board's 0 is not here
+    assert [(entry["slug"], entry["outcome"]) for entry in _company_outcomes(row["id"])] == [
+        ("acme", "fetched"),
+        ("beta", "failed"),
+    ]
     assert set(_postings_of(trusted)) == {"1", "2", "3"}
     assert len(_matches()) == 3
     assert _open_count(refused) == 4
@@ -1486,7 +1534,11 @@ def _board(*answers: httpx2.Response | Exception) -> Callable[[str], list[Source
 
 FAILED_BOARD_ANSWERS = [
     pytest.param(
-        lambda: httpx2.Response(503, text=f"<html><body>{PAYLOAD_SENTINEL}</body></html>"),
+        lambda: httpx2.Response(
+            503,
+            text=f"<html><body>{PAYLOAD_SENTINEL}</body></html>",
+            headers={"ETag": PAYLOAD_SENTINEL},
+        ),
         "HTTP 503",
         id="a board that refused every attempt",
     ),
@@ -1499,23 +1551,37 @@ FAILED_BOARD_ANSWERS = [
 
 
 @pytest.mark.parametrize("answer, expected", FAILED_BOARD_ANSWERS)
-def test_a_failed_board_puts_no_payload_text_on_the_run_row(
+def test_a_failed_board_leaves_no_payload_text_in_a_message_a_client_reads(
     engine: Engine,
     client: TestClient,
     inline_starter: None,
+    caplog: pytest.LogCaptureFixture,
     answer: Callable[[], httpx2.Response],
     expected: str,
 ) -> None:
-    """The row's `error` is the pipeline's own text, and a client reads it back: never the body's."""
+    """What a run says about a failure: the slug, the typed reason and no body, header or resume."""
+    caplog.set_level(logging.DEBUG)
     _company("acme")
     _active_resume()
 
     row = _tick(client, {"greenhouse": _board(answer())})
+    body = client.get(f"/runs/{row['id']}").text
 
     assert row["status"] == "failed"
-    assert "acme" in row["error"]
-    assert expected in row["error"]  # the typed refusal reached the row, and not a traceback
-    assert PAYLOAD_SENTINEL not in row["error"]
+    assert row["error"] == "1 of 1 companies failed: 'acme'"  # a slug, and no reason of its own
+    (recorded,) = _company_outcomes(row["id"])
+    assert recorded["outcome"] == "failed"
+    assert "acme" in recorded["error"]
+    assert expected in recorded["error"]  # the typed refusal reached the row, and not a traceback
+    assert caplog.records, "the capture must be non-vacuous"
+    for text in (recorded["error"], row["error"], body):
+        assert PAYLOAD_SENTINEL not in text
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if PAYLOAD_SENTINEL in record.getMessage() or PAYLOAD_SENTINEL in str(record.args)
+    ] == []
+    assert PAYLOAD_SENTINEL not in body  # the served outcomes carry the message, never the body
     assert _rows(Posting) == 0
 
 
@@ -1862,3 +1928,123 @@ def test_an_interval_of_zero_calls_the_seam_once_per_gap_all_the_same(
     )
 
     assert waits == [0.0, 0.0]
+
+
+# The per-company outcome (#59): what the walk records for each company it
+# attempted, and the run's status derived from it. A failed board is that
+# company's failure and nothing else's; a company the budget never reached is not
+# a failure at all.
+
+
+def test_a_failing_board_between_two_healthy_ones_leaves_the_walk_going(
+    engine: Engine, client: TestClient, inline_starter: None
+) -> None:
+    """The middle board raises: all three are asked, the two that answered score, the run fails."""
+    answered = _company("acme")
+    failing = _company("beta")
+    also_answered = _company("globex")
+    source = FakeSource(
+        {"acme": [_posting("1")], "globex": [_posting("3")]},
+        failing={"beta": BoardUnavailable("The board 'beta' refused to answer: HTTP 503")},
+    )
+    _active_resume()
+
+    row = _tick(client, {"greenhouse": source})
+
+    assert source.calls == ["acme", "beta", "globex"]  # every company was attempted
+    assert row["status"] == "failed"
+    assert row["error"] == "1 of 3 companies failed: 'beta'"  # a slug-only summary
+    assert (row["postings_seen"], row["matches_created"]) == (2, 2)  # the failed board's 0 is absent
+    assert set(_postings_of(answered)) == {"1"}
+    assert set(_postings_of(also_answered)) == {"3"}
+    assert _postings_of(failing) == {}  # the failed company stored nothing
+    outcomes = _company_outcomes(row["id"])
+    assert [(entry["slug"], entry["outcome"]) for entry in outcomes] == [
+        ("acme", "fetched"),
+        ("beta", "failed"),
+        ("globex", "fetched"),
+    ]
+    failed_entry = outcomes[1]
+    assert failed_entry["company_id"] == failing
+    assert "beta" in failed_entry["error"] and "HTTP 503" in failed_entry["error"]
+
+
+def test_every_board_failing_records_every_company_and_closes_nothing(
+    engine: Engine, client: TestClient, inline_starter: None
+) -> None:
+    """Three boards raising: the run is `failed`, every attempt is recorded, no stored row moves."""
+    companies = {slug: _company(slug) for slug in THREE_BOARDS}
+    for company_id in companies.values():
+        _stored_posting(company_id, external_id="stored")
+    before = {slug: _postings_of(company_id) for slug, company_id in companies.items()}
+    source = FakeSource(
+        failing={
+            slug: BoardUnavailable(f"The board '{slug}' refused to answer: HTTP 503")
+            for slug in THREE_BOARDS
+        }
+    )
+    _active_resume()
+
+    row = _tick(client, {"greenhouse": source})
+
+    assert source.calls == list(THREE_BOARDS)
+    assert row["status"] == "failed"
+    assert row["error"] == "3 of 3 companies failed: 'acme', 'beta', 'globex'"
+    assert (row["postings_seen"], row["matches_created"]) == (0, 0)
+    assert [(entry["slug"], entry["outcome"]) for entry in _company_outcomes(row["id"])] == [
+        (slug, "failed") for slug in THREE_BOARDS
+    ]
+    assert _rows(Match) == 0
+    assert {slug: _postings_of(company_id) for slug, company_id in companies.items()} == before
+    assert all(
+        posting["closed_at"] is None
+        for postings in before.values()
+        for posting in postings.values()
+    )
+
+
+def test_a_run_where_nothing_fails_records_every_attempted_company(
+    engine: Engine, client: TestClient, inline_starter: None
+) -> None:
+    """Two `200` boards and one `304`: `succeeded`, one outcome each, and no failed row anywhere."""
+    _company("acme")
+    unchanged = _company("beta")
+    _stored_posting(unchanged, external_id="stored")
+    _company("globex")
+    source = FakeSource(
+        {"acme": [_posting("1")], "globex": [_posting("3")]}, not_modified={"beta"}
+    )
+    _active_resume()
+
+    row = _tick(client, {"greenhouse": source})
+
+    assert (row["status"], row["error"]) == ("succeeded", None)
+    outcomes = _company_outcomes(row["id"])
+    assert [(entry["slug"], entry["outcome"]) for entry in outcomes] == [
+        ("acme", "fetched"),
+        ("beta", "not_modified"),
+        ("globex", "fetched"),
+    ]
+    assert [entry for entry in outcomes if entry["outcome"] == "failed"] == []
+    assert [entry["error"] for entry in outcomes] == [None, None, None]
+
+
+def test_a_budget_stopped_run_is_not_a_failed_one_and_records_nothing_for_the_rest(
+    engine: Engine, client: TestClient, inline_starter: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two of three companies asked: `succeeded` with the count, and no outcome row for the third."""
+    for slug in THREE_BOARDS:
+        _company(slug)
+    source = FakeSource(THREE_BOARDS)
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, "2")
+
+    row = _tick(client, {"greenhouse": source})
+
+    assert source.calls == ["acme", "beta"]
+    assert (row["status"], row["error"]) == ("succeeded", None)  # an unfetched company is not a failure
+    assert row["companies_not_fetched"] == 1
+    assert [(entry["slug"], entry["outcome"]) for entry in _company_outcomes(row["id"])] == [
+        ("acme", "fetched"),
+        ("beta", "fetched"),
+    ]

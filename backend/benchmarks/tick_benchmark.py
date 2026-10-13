@@ -22,7 +22,7 @@ PostgreSQL is required rather than preferred, and its absence is loud: an unset
 or empty `TEST_DATABASE_URL` exits non-zero naming the variable and the
 `docker run postgres:17` line, and a URL that names another engine is refused
 before a row is written, because SQLite timings say nothing about the engine the
-app deploys on. The database is a throwaway one and this script owns the five
+app deploys on. The database is a throwaway one and this script owns the six
 table names in it: the tables are emptied before and after every run, so a second
 run starts from empty. Nothing is written to a file -- not under `backend/data/`,
 not under `~/.jobradar` -- so `git status --short` is clean after a run.
@@ -185,7 +185,7 @@ def main(argv: list[str] | None = None) -> int:
     _require_postgres(engine)
     # The tables exist first, so an unreachable server is the app's own named error
     # rather than a traceback from the first statement, and then this run starts on
-    # five empty tables.
+    # six empty tables.
     db.init_db()
     _reset_tables(engine)
     try:
@@ -263,7 +263,7 @@ def _require_postgres(engine: Engine) -> None:
 
 
 def _reset_tables(engine: Engine) -> None:
-    """Empty the five tables, so a run starts from nothing and leaves nothing behind.
+    """Empty the six tables, so a run starts from nothing and leaves nothing behind.
 
     This script owns these table names in the throwaway database it was given, the
     way `tests/integration/conftest.py` does: rows a previous run left would make

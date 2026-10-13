@@ -132,16 +132,26 @@ class RaisingMailer:
 
 
 class FakeSource:
-    """Stands in for `greenhouse.fetch`: it answers with the postings it was built with."""
+    """Stands in for `greenhouse.fetch`: it answers with the postings it was built with.
 
-    def __init__(self, postings: list[SourcePosting]) -> None:
+    `failing` names the companies whose board raises instead: the walk records that
+    company's `'failed'` outcome and the rest of the run is unaffected.
+    """
+
+    def __init__(
+        self, postings: list[SourcePosting], *, failing: dict[str, SourceError] | None = None
+    ) -> None:
         self.postings = postings
+        self.failing = failing or {}
         self.calls: list[str] = []
 
     def __call__(
         self, slug: str, *, etag: str | None = None, last_modified: str | None = None
     ) -> BoardPostings:
         self.calls.append(slug)
+        failure = self.failing.get(slug)
+        if failure is not None:
+            raise failure
         return BoardPostings(list(self.postings), None, None)
 
 
@@ -981,6 +991,57 @@ def test_the_digest_is_the_only_module_that_writes_the_emailed_count() -> None:
     )
 
     assert assigning == ["services/digest.py"]
+
+
+def test_a_partly_failed_run_still_emails_the_matches_its_answering_boards_produced(
+    client: TestClient,
+    fake_mailer: FakeMailer,
+    inline_starter: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The walk recorded a failed board and returned, so the digest half runs (#59).
+
+    The run's own row says both things at once: one board failed, so the status is
+    `failed` and the summary names it, and the board that did answer produced a
+    match, so the mail carries it and `matches_emailed` counts it. A partly failed
+    run that sent nothing would be the silent miss `_docs/plan.md` forbids.
+    """
+    _company("acme")
+    _company("beta")
+    _active_resume()
+    source = FakeSource(
+        [
+            SourcePosting(
+                external_id="1",
+                title="Backend Engineer",
+                location="Berlin",
+                url="https://boards.test/1",
+                description="Synthetic posting, written for this test.",
+            )
+        ],
+        failing={"beta": SourceError("The board 'beta' refused to answer: HTTP 503")},
+    )
+
+    def the_real_walk(run_id: int, **_: object) -> None:
+        """#34's walk itself, so the outcome rows and the counts are the ones #59 writes."""
+        run_pipeline(
+            run_id,
+            sources={"greenhouse": source},
+            scorer=FakeScorer(MatchResult(score=90, reason="Synthetic fit.", gaps=[])),
+        )
+
+    monkeypatch.setattr(internal, "run_pipeline", the_real_walk)
+
+    response = _tick(client)
+
+    row = _run_row(response.json()["id"])
+    assert (row["status"], row["error"]) == ("failed", "1 of 2 companies failed: 'beta'")
+    assert (row["postings_seen"], row["matches_created"]) == (1, 1)
+    assert row["matches_emailed"] == 1  # the run failed for one board and mailed the other's match
+    _, body = _only_message(fake_mailer)
+    assert "Backend Engineer" in body
+    (match_row,) = _rows_of(Match)
+    assert _notified(match_row["id"]) is not None  # the match went out, so it is marked
 
 
 def test_a_run_whose_pipeline_raises_sends_no_email_and_the_match_goes_out_next_time(

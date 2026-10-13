@@ -7,7 +7,8 @@ this module touches none of them. It writes no `status`, no `finished_at` and no
 `error` -- a run that fails leaves the row as it found it and #9's `_run` records
 the failure, the message included -- and it opens no socket and sends no email:
 the sources and the scorer arrive as arguments, and the only configuration it
-reads is the two settings a run has for itself, below.
+reads is the two settings a run has for itself, below. It writes one row of its
+own, the `run_company` outcome of each company it attempted.
 
 One run does this, in this order, for every company whose `is_active` is true, in
 ascending `company.id` order:
@@ -17,9 +18,9 @@ ascending `company.id` order:
   company's name and never another company's adapter. The company's stored
   validator rides with the call as `etag`/`last_modified`, so a board that has not
   changed answers `304` and the walk skips that company entirely: `NotModified`
-  returns to the top before the guard, before `_add_counts` and before the ingest,
-  so a board that was not read closes nothing, is counted by nobody and aborts
-  nothing;
+  records `'not_modified'` and returns to the top before the guard, before
+  `_add_counts` and before the ingest, so a board that was not read closes nothing
+  and is counted by nobody;
 - `_refuse_shrunk_board`, which refuses that list when it names fewer than half
   the postings the company already has open, and at least
   `SHRINK_GUARD_MIN_OPEN_POSTINGS` of them are open: a `BoardShrunk`, raised before
@@ -27,7 +28,8 @@ ascending `company.id` order:
 - `ingest.ingest_postings(company_id, postings)` for the list that board
   returned, so every `posting` row -- the insert, the update in place, the close
   and the reopen -- is #6's, and this module writes no `posting` column; then
-  `_store_validator`, which writes the answer's own validator on the company row;
+  `_store_validator`, which writes the answer's own validator on the company row,
+  and `'fetched'` on that company's outcome row;
 - for each id `IngestResult.created_ids` reported, in that order: the row read
   back as a `SourcePosting` and offered to `prefilter` with the active resume's
   parsed skills. A posting the prefilter rejects is stored through
@@ -70,7 +72,7 @@ before the first call and never after the last, so a walk over `k` boards record
 that wants no pacing says so. The waits `fetch_body` itself makes on a retry are
 #54's and are not this.
 
-Three things are deliberately not done here:
+Six things are deliberately not done here:
 
 - a posting that was already stored is offered to neither the prefilter nor the
   scorer: only `created_ids` are matched. A reopened posting already has the one
@@ -84,24 +86,27 @@ Three things are deliberately not done here:
   posting. `LlmScorer.score` raises for an empty resume, so fetching first would
   store postings that can never be scored. Both values are user data: they go to
   the prefilter and the scorer and into no log line, no row and no message.
-- a board that fails fails the run. The first `SourceError` escaping a company's
-  fetch aborts the walk, naming that company's slug -- and never the board's
-  response body, which the adapters already keep out of their own messages. The
-  postings and matches the earlier companies earned stay written and the counts
-  keep them, so a failed run costs a retry. Skipping the company or keeping going
-  would be a silent miss, and a per-company column is the migration path #21
-  owns. Retries and backoff are #54's, and live in `app.sources.base`.
+- a board that fails is that company's failure, and the walk goes on. The fetch
+  and the guard sit in one per-company `try`: the first `SourceError` either of
+  them raises is recorded as that company's `'failed'` outcome, with the message
+  naming the company's slug -- and never the board's response body, which the
+  adapters already keep out of their own messages -- and the next company is
+  walked. A refused company is unchanged where it matters: its `posting` rows are
+  not inserted, updated, closed or reopened, its `match` rows are untouched and
+  its validator stays as it was, because the guard raises before `ingest_postings`
+  is called for it at all. The counts keep what the companies that did answer
+  earned, and the run's own status is derived from these rows by #9's `_run`. A
+  failure that is not a board's -- the resume read below, a scorer or an
+  `ingest_postings` -- still escapes this function and fails the run.
 - a board that lists far fewer postings than the company has open is refused the
   same way, as `BoardShrunk`: the guard reads `posting.closed_at`, adds no column
   and stores no history, so a board that genuinely shrank stays refused until the
-  owner deactivates the company (#29). The price -- the companies after it are not
-  fetched and the day's digest does not go out -- is #34's deliberate choice
-  against a silent miss, and the escape is #59.
+  owner deactivates the company (#29).
 - a `304` is not a failure and does not work like one: the board answered that
-  nothing changed, so the walk skips that company and goes on. The company's
-  stored validator is left exactly as it was -- it is still the validator of the
-  body this app holds -- and a run in which every board answers `304` is an
-  ordinary success with both counts 0.
+  nothing changed, so the walk records `'not_modified'` for that company and goes
+  on. The company's stored validator is left exactly as it was -- it is still the
+  validator of the body this app holds -- and a run in which every board answers
+  `304` is an ordinary success with both counts 0.
 - the validator is written only after the payload was trusted and stored: an
   unwritten validator costs one more unconditional fetch, while one written too
   early buys a board skipped forever. So a payload the guard refuses and an
@@ -118,7 +123,7 @@ from sqlalchemy import func, select
 from app import db
 from app.matching.prefilter import prefilter, record_rejection
 from app.matching.scorer import MatchScorer, record_score
-from app.models import Company, Posting, Run
+from app.models import Company, Posting, Run, RunCompany
 from app.services import resume
 from app.services.ingest import ingest_postings
 from app.sources.base import (
@@ -134,6 +139,13 @@ from app.sources.base import (
 # a run with nothing to score against would otherwise fetch and store postings it
 # can never match.
 NO_ACTIVE_RESUME = "No active resume: upload one before a run can score postings"
+
+# The vocabulary `RunCompany.outcome` accepts, spelled the way the check constraint
+# spells it: this module is the one writer of the column, and #9's `_run` derives a
+# run's status from the `'failed'` rows it finds.
+FETCHED = "fetched"
+NOT_MODIFIED = "not_modified"
+FAILED = "failed"
 
 # How many of a company's postings have to be open before its board's answer is
 # held to the ratio below. Under this many, a board is free to close everything it
@@ -214,7 +226,9 @@ def run_pipeline(
     own two settings and nothing else. `sleep` is the pacing seam: the wait before
     every board call but the first, `time.sleep` by default and a recorder in
     every test. Anything either collaborator raises escapes this function the way
-    it was raised: #9's `_run` is what turns it into the run row's failure.
+    it was raised, with one exception: a board's own `SourceError` is recorded
+    against the company it names and the walk goes on. #9's `_run` is what turns
+    an escaping failure into the run row's failure.
     """
     budget = request_budget()
     interval = request_interval_seconds()
@@ -232,14 +246,23 @@ def run_pipeline(
             break
         if index:
             sleep(interval)  # one wait per gap, and none before the first call
-        fetched = _fetched(sources[source], slug, etag=etag, last_modified=last_modified)
-        if isinstance(fetched, NotModified):
-            continue  # the board has not changed: nothing to store, close or count
-        postings = fetched.postings
-        _refuse_shrunk_board(company_id, slug, postings)
+        try:
+            fetched = _fetched(sources[source], slug, etag=etag, last_modified=last_modified)
+            if isinstance(fetched, NotModified):
+                # The board has not changed: nothing to store, close or count.
+                _record_outcome(run_id, company_id, NOT_MODIFIED)
+                continue
+            postings = fetched.postings
+            _refuse_shrunk_board(company_id, slug, postings)
+        except SourceError as error:
+            # That company's board failed, and no other company pays for it: the
+            # message is recorded against the company it names and the walk goes on.
+            _record_outcome(run_id, company_id, FAILED, str(error))
+            continue
         _add_counts(run_id, postings_seen=len(postings))
         created_ids = ingest_postings(company_id, postings).created_ids
         _store_validator(company_id, fetched.etag, fetched.last_modified)
+        _record_outcome(run_id, company_id, FETCHED)
         for posting_id, posting in _stored_postings(created_ids):
             decision = prefilter(posting, resume_must_haves=resume_must_haves)
             if not decision.passed:
@@ -275,8 +298,8 @@ def _fetched(
     as it is: either the postings and the validator that body arrived with, or the
     `NotModified` that says there is nothing to store. The source's own message is
     kept -- an adapter's failure message carries a status or the slug, never a
-    response body -- and the slug is added here, because a run's `error` names the
-    company whose board stopped the run and a caller cannot otherwise tell two
+    response body -- and the slug is added here, because the message is recorded
+    against the company whose board failed and a caller cannot otherwise tell two
     boards' failures apart. `NotModified` is not a `SourceError`, so it passes this
     seam through rather than being turned into a failure.
     """
@@ -313,10 +336,10 @@ def _refuse_shrunk_board(company_id: int, slug: str, postings: list[SourcePostin
     it. Fewer than half of the company's open postings, with at least
     `SHRINK_GUARD_MIN_OPEN_POSTINGS` of them open, is a `BoardShrunk` raised before
     `ingest_postings` is called -- so a refused board closes nothing, is counted by
-    nobody, and reaches the run's row as a failed board. Integer arithmetic, so
-    exactly half is allowed: a company that closes half its postings is a board's
-    ordinary business. The message names the company's slug and both numbers, and
-    nothing from the payload.
+    nobody, and reaches that company's own outcome row as `'failed'`. Integer
+    arithmetic, so exactly half is allowed: a company that closes half its postings
+    is a board's ordinary business. The message names the company's slug and both
+    numbers, and nothing from the payload.
     """
     open_count = _open_postings(company_id)
     if open_count >= SHRINK_GUARD_MIN_OPEN_POSTINGS and len(postings) * 2 < open_count:
@@ -360,6 +383,24 @@ def _source_posting(row: Posting) -> SourcePosting:
         url=row.url,
         description=row.description,
     )
+
+
+def _record_outcome(
+    run_id: int, company_id: int, outcome: str, error: str | None = None
+) -> None:
+    """Record what this run did with that company, in its own unit of work.
+
+    One row per company the walk attempted, written as the walk reaches it -- so a
+    company the budget never reached gets no row (#56 counts it instead) and a
+    company the walk failed on keeps the failure's own message. `error` is a
+    failure's message or nothing: a company that was fetched stored no error. The
+    unique key on `(run_id, company_id)` is the database's, so a second write for
+    one company in one run is an `IntegrityError` rather than a second row.
+    """
+    with db.session_scope() as session:
+        session.add(
+            RunCompany(run_id=run_id, company_id=company_id, outcome=outcome, error=error)
+        )
 
 
 def _record_not_fetched(run_id: int, count: int) -> None:
