@@ -184,6 +184,8 @@ def test_contract_describes_the_watchlist_routes() -> None:
     body_ref = created["requestBody"]["content"]["application/json"]["schema"]["$ref"]
     assert schemas[body_ref.rsplit("/", 1)[-1]]["required"] == ["name", "slug"]
     assert set(created["responses"]) == {"201", "404", "409", "422", "502"}
+    assert "source" in created["responses"]["409"]["description"]  # the pair, not the slug
+    assert "slug" in created["responses"]["409"]["description"]
     assert created["responses"]["201"]["content"]["application/json"]["schema"]["$ref"] == (
         company_ref
     )
@@ -195,13 +197,14 @@ def test_contract_describes_the_watchlist_routes() -> None:
     assert updated["responses"]["200"]["content"]["application/json"]["schema"][
         "$ref"
     ] == company_ref
-    # The two fields it may write, both optional, and nothing else: a body naming
-    # `slug` or `source` is refused rather than written, and the rendered schema
-    # carries no `required` key at all.
+    # The three fields it may carry, all optional, and nothing else: `slug` is
+    # refused as an unknown field, and a body naming `source` reaches the route,
+    # which answers the rule in words. The rendered schema carries no `required`
+    # key at all.
     assert updated["requestBody"]["required"] is True
     update_ref = updated["requestBody"]["content"]["application/json"]["schema"]["$ref"]
     edit = schemas[update_ref.rsplit("/", 1)[-1]]
-    assert set(edit["properties"]) == {"name", "is_active"}
+    assert set(edit["properties"]) == {"name", "is_active", "source"}
     assert edit["additionalProperties"] is False
     assert not edit.get("required")
     # The label is bounded by the column it lands in -- 255, the length of

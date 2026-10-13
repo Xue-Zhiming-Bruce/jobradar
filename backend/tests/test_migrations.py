@@ -6,7 +6,8 @@ tables -- the baseline, then the column #26 added, then the source column and
 check #28 added, then the outcome column, its check and its backfill #30 added,
 then the model and prompt-version columns #32 added, then the run's emailed
 count #36 added, then the two board-validator columns #55 added, then the run's
-unfetched-company count #56 added. Two paths to one schema
+unfetched-company count #56 added, then the company key widened from `slug`
+to `(source, slug)` #57. Two paths to one schema
 can drift, so nothing here assumes a revision is right: every test runs `alembic
 upgrade head` -- in-process, through `alembic.command.upgrade` -- against the
 database the shared `engine` fixture in `tests/conftest.py` supplies, and then
@@ -73,7 +74,7 @@ ALEMBIC_INI = BACKEND_ROOT / "alembic.ini"
 REVISIONS_DIR = BACKEND_ROOT / "migrations" / "versions"
 
 # The readable revision ids, in the order they apply, and the files that hold
-# them. The head is the last of the eight.
+# them. The head is the last of the nine.
 BASELINE_REVISION = "0001_baseline"
 BASELINE_REVISION_FILE = "0001_baseline_five_tables.py"
 PARSED_FIELDS_REVISION = "0002_parsed_fields"
@@ -90,6 +91,8 @@ BOARD_VALIDATOR_REVISION = "0007_company_board_validator"
 BOARD_VALIDATOR_REVISION_FILE = "0007_company_board_validator.py"
 COMPANIES_NOT_FETCHED_REVISION = "0008_run_companies_not_fetched"
 COMPANIES_NOT_FETCHED_REVISION_FILE = "0008_run_companies_not_fetched.py"
+SOURCE_SLUG_UNIQUE_REVISION = "0009_company_source_slug_unique"
+SOURCE_SLUG_UNIQUE_REVISION_FILE = "0009_company_source_slug_unique.py"
 THE_REVISION_FILES = (
     BASELINE_REVISION_FILE,
     PARSED_FIELDS_REVISION_FILE,
@@ -99,8 +102,9 @@ THE_REVISION_FILES = (
     RUN_MATCHES_EMAILED_REVISION_FILE,
     BOARD_VALIDATOR_REVISION_FILE,
     COMPANIES_NOT_FETCHED_REVISION_FILE,
+    SOURCE_SLUG_UNIQUE_REVISION_FILE,
 )
-HEAD_REVISION = COMPANIES_NOT_FETCHED_REVISION
+HEAD_REVISION = SOURCE_SLUG_UNIQUE_REVISION
 
 # Alembic's own bookkeeping table: one row per applied revision. It is not one of
 # the five the models declare, and `alembic current` reads it.
@@ -455,23 +459,34 @@ def _run_column_values(engine: Engine, column: str) -> list[object]:
         ]
 
 
-def _store_company_rows_before_this_revision(engine: Engine, *slugs: str) -> None:
+def _store_company_rows_before_this_revision(
+    engine: Engine, *slugs: str, source: str = "greenhouse"
+) -> None:
     """Insert company rows with only the columns this schema has always had.
 
     SQL rather than the model, for the reason `_store_a_match_row_before_this_revision`
     gives: the model declares the two columns this case is about to add, so an
     INSERT naming them would fail on the schema that predates the revision -- which
-    is the schema these rows are written into.
+    is the schema these rows are written into. `source` is the caller's, so one
+    slug can be written on two of them.
     """
     with engine.begin() as connection:
         for slug in slugs:
             connection.execute(
                 text(
                     "INSERT INTO company (name, slug, source, is_active, created_at)"
-                    " VALUES (:name, :slug, 'greenhouse', TRUE, '2026-01-01 00:00:00')"
+                    " VALUES (:name, :slug, :source, TRUE, '2026-01-01 00:00:00')"
                 ),
-                {"name": slug.capitalize(), "slug": slug},
+                {"name": slug.capitalize(), "slug": slug, "source": source},
             )
+
+
+def _company_unique_constraints(engine: Engine) -> list[list[str]]:
+    """Every unique constraint `company` carries, by its columns, as the engine reports them."""
+    return [
+        constraint["column_names"]
+        for constraint in inspect(engine).get_unique_constraints("company")
+    ]
 
 
 def _company_rows_before_the_columns(engine: Engine) -> list[tuple[object, ...]]:
@@ -646,6 +661,7 @@ def test_the_migrated_schema_renders_the_five_tables_for_both_dialects(database:
 
 
 def test_the_migrated_schema_refuses_a_duplicate_company_slug(database: Engine) -> None:
+    """The key is the pair: a second row of the same `(source, slug)` is refused."""
     _migrate(database)
 
     with db.session_scope() as session:
@@ -655,7 +671,24 @@ def test_the_migrated_schema_refuses_a_duplicate_company_slug(database: Engine) 
         with db.session_scope() as session:
             session.add(Company(name="Acme Again", slug="acme"))
 
-    _assert_the_engine_named_what_it_refused(refusal.value, "company.slug", "company_slug_key")
+    _assert_the_engine_named_what_it_refused(
+        refusal.value, "company.source, company.slug", "uq_company_source_slug"
+    )
+
+
+def test_the_migrated_schema_holds_the_same_slug_on_two_sources(database: Engine) -> None:
+    """The widened key's other half: the same board slug is one row per source."""
+    _migrate(database)
+
+    with db.session_scope() as session:
+        session.add(Company(name="Acme", slug="acme", source="greenhouse"))
+        session.add(Company(name="Acme on Lever", slug="acme", source="lever"))
+
+    with db.session_scope() as session:
+        assert [
+            (company.slug, company.source)
+            for company in session.scalars(select(Company).order_by(Company.id))
+        ] == [("acme", "greenhouse"), ("acme", "lever")]
 
 
 def test_the_migrated_schema_holds_the_source_column_and_its_check(database: Engine) -> None:
@@ -955,6 +988,88 @@ def test_the_unfetched_company_count_is_added_null_with_no_backfill(database: En
 
     assert "companies_not_fetched" not in _reflected_columns(database, "run")
     assert _run_rows_before_the_column(database) == before
+
+
+def test_the_widened_key_is_swapped_in_on_a_database_that_predates_it(database: Engine) -> None:
+    """#57's key: a database at #56 gains the pair, and no row or other rule moves.
+
+    The fixture's database is rebuilt at #56 -- the schema before this revision --
+    and one row goes in under the narrow key that is still in place. `upgrade
+    head` swaps the key inside a rebuild on SQLite: the old `UNIQUE (slug)` is
+    gone, exactly one constraint over `["source", "slug"]` is there, the eight
+    columns and the source check are the ones 0008 left, and the row is byte for
+    byte what it was. The widened key then accepts the same slug on the other
+    source and still refuses a second row of one pair.
+    """
+    Base.metadata.drop_all(database)
+    command.upgrade(_config(), COMPANIES_NOT_FETCHED_REVISION)
+    _store_company_rows_before_this_revision(database, "acme")
+    before = _company_rows_before_the_columns(database)
+    columns = _reflected_columns(database, "company")
+    assert len(before) == 1  # the assertions below are about a row that exists
+    assert _company_unique_constraints(database) == [["slug"]]
+
+    command.upgrade(_config(), HEAD_REVISION)
+
+    assert _company_unique_constraints(database) == [["source", "slug"]]
+    assert _reflected_columns(database, "company") == columns
+    assert {
+        check["name"] for check in inspect(database).get_check_constraints("company")
+    } == {"ck_company_source_values"}
+    assert _company_rows_before_the_columns(database) == before
+    with db.session_scope() as session:
+        session.add(Company(name="Acme on Lever", slug="acme", source="lever"))
+    with pytest.raises(IntegrityError) as refusal:
+        with db.session_scope() as session:
+            session.add(Company(name="Acme Again", slug="acme"))
+    _assert_the_engine_named_what_it_refused(
+        refusal.value, "company.source, company.slug", "uq_company_source_slug"
+    )
+
+
+def test_the_downgrade_restores_the_slug_only_key_and_leaves_every_row(database: Engine) -> None:
+    """#57's downgrade on data the narrower key can hold: `UNIQUE (slug)` back, rows as they were."""
+    Base.metadata.drop_all(database)
+    command.upgrade(_config(), HEAD_REVISION)
+    _store_company_rows_before_this_revision(database, "acme", "globex")
+    before = _company_rows_before_the_columns(database)
+    assert len(before) == 2
+
+    command.downgrade(_config(), COMPANIES_NOT_FETCHED_REVISION)
+
+    assert _company_unique_constraints(database) == [["slug"]]
+    assert _company_rows_before_the_columns(database) == before
+    with pytest.raises(IntegrityError) as refusal:
+        with db.session_scope() as session:
+            session.add(Company(name="Acme on Lever", slug="acme", source="lever"))
+    _assert_the_engine_named_what_it_refused(refusal.value, "company.slug", "company_slug_key")
+
+
+def test_the_downgrade_refuses_before_any_ddl_when_a_slug_lives_on_two_sources(
+    database: Engine,
+) -> None:
+    """`UNIQUE (slug)` cannot hold two rows sharing a slug, so the downgrade says so first.
+
+    A batch rebuild that tried fails *after* creating `_alembic_tmp_company`, and
+    leaves that stray table behind. The pre-check raises `RuntimeError` naming the
+    slugs before any DDL: the widened key is still there, every row is unchanged
+    and no temp table appears.
+    """
+    Base.metadata.drop_all(database)
+    command.upgrade(_config(), HEAD_REVISION)
+    _store_company_rows_before_this_revision(database, "acme", source="greenhouse")
+    _store_company_rows_before_this_revision(database, "acme", source="lever")
+    before = _company_rows_before_the_columns(database)
+    assert len(before) == 2
+
+    with pytest.raises(RuntimeError) as refusal:
+        command.downgrade(_config(), COMPANIES_NOT_FETCHED_REVISION)
+
+    assert "acme" in str(refusal.value)  # the refusal names what it could not narrow
+    assert _company_unique_constraints(database) == [["source", "slug"]]
+    assert _company_rows_before_the_columns(database) == before
+    assert "_alembic_tmp_company" not in inspect(database).get_table_names()
+    assert _applied_revisions(database) == [HEAD_REVISION]
 
 
 def test_the_validator_columns_are_added_null_with_no_backfill(database: Engine) -> None:

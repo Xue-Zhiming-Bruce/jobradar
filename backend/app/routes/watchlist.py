@@ -9,12 +9,16 @@ active state, `PATCH /watchlist/{id}` renames one and switches whether its board
 is polled, and `DELETE /watchlist/{id}` removes one.
 
 `PATCH` is the one route here that asks no board, and it writes nothing but a
-label and a boolean: the board a company points at -- its `slug` and its
-`source` -- is not editable on this path, because a posting is identified by
-`(company_id, external_id)` (#6) and a new slug would strand the rows the old
-board left behind; that rule is #60's to state. `is_active: false` is the poll's
-switch and not a deletion: it takes the company out of `app.services.pipeline`'s
-walk and leaves the row, its postings and their matches exactly as they were.
+label and a boolean. A company's `source` is fixed once written: a body naming it
+answers `422` with the rule spelled out below and writes nothing, because a
+posting is identified by `(company_id, external_id)` (#6), `posting` carries no
+source, so one board's payload would decide the other board's rows -- the way to
+move a company is to add the same slug on the other source (which this route's
+`POST` accepts) and then deactivate or delete this one. The board `slug` is not
+editable on this path either, refused as an unknown field, and that rule is #60's
+to state. `is_active: false` is the poll's switch and not a deletion: it takes the
+company out of `app.services.pipeline`'s walk and leaves the row, its postings and
+their matches exactly as they were.
 
 The probe is a validity check and nothing more. #6 is where a board's postings
 are stored and deduped, and #9 is where the tick calls the source for real; this
@@ -91,12 +95,12 @@ class CompanyUpdate(BaseModel):
     rather than read as one: whether a board is polled is a state and not a
     truthy string.
 
-    The board is not here, and refusing it is the point: `extra="forbid"` -- the
-    `ResumeActivation`/`MatchVerdict` precedent -- makes `slug` and `source` a
-    `422` rather than a write this route ignores, because the postings stored
-    under the old slug would be stranded by a new one (#60). Nothing clears a
-    field either: `name` is a `NOT NULL` column and `is_active` is the whole of
-    "is it polled".
+    `source` is declared here and `null` means "not supplied", the way `name`
+    does -- a body naming only `source` is a body that names a field, so the
+    validator below lets it through and the *route* answers the rule it breaks,
+    in words an `extra="forbid"` refusal cannot carry. `slug` stays refused as
+    an unknown field (#60 owns the slug rule), and nothing clears a field:
+    `name` is a `NOT NULL` column and `is_active` is the whole of "is it polled".
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -106,6 +110,7 @@ class CompanyUpdate(BaseModel):
     # the `422` this route owes. `test_openapi_contract.py` holds the two together.
     name: str | None = Field(default=None, max_length=255)
     is_active: Literal[True, False] | None = None
+    source: Literal["greenhouse", "lever"] | None = None
 
     @field_validator("name")
     @classmethod
@@ -131,9 +136,14 @@ class CompanyUpdate(BaseModel):
 
     @model_validator(mode="after")
     def _names_a_field(self) -> "CompanyUpdate":
-        """Refuse a body naming neither field, so no `200` reports a write that did not happen."""
-        if self.name is None and self.is_active is None:
-            raise ValueError("must carry a name, an is_active, or both")
+        """Refuse a body naming no field, so no `200` reports a write that did not happen.
+
+        `source` counts as a named field even though the route refuses to write
+        it: the refusal is the route's to state, with the rule attached, and this
+        validator would otherwise answer a pydantic message instead.
+        """
+        if self.name is None and self.is_active is None and self.source is None:
+            raise ValueError("must carry a name, an is_active, a source, or a combination")
         return self
 
 
@@ -159,13 +169,21 @@ class WatchedCompany(BaseModel):
 # handle without having to try them out. Each dict is what the route that
 # answers it declares, so the contract stays a list of real answers.
 NOT_FOUND_RESPONSE = {404: {"description": "No board goes by that slug, or no company has that id"}}
-DUPLICATE_RESPONSE = {409: {"description": "The slug is already on the watchlist"}}
+DUPLICATE_RESPONSE = {409: {"description": "That slug is already watched on that source"}}
 UNUSABLE_REQUEST_RESPONSE = {
     422: {"description": "The body, or the path, is not something this route can use"}
 }
 UNREADABLE_BOARD_RESPONSE = {
     502: {"description": "The board could not be read: it is down, slow or malformed"}
 }
+
+# The one rule this route states in its own words: a company's source is fixed.
+# A `409` is reserved for "that pair is already watched" on `POST`, and
+# `extra="forbid"` answers pydantic's generic message, which cannot say why.
+SOURCE_IS_FIXED = (
+    "A watched company's source cannot be changed: add the same slug on the other"
+    " source, then deactivate or delete this one"
+)
 
 CREATE_RESPONSES = (
     NOT_FOUND_RESPONSE
@@ -271,7 +289,8 @@ def add_company(
             return _watched(company)  # read before the commit expires it
     except IntegrityError as duplicate:
         raise HTTPException(
-            status_code=409, detail=f"The slug '{company.slug}' is already watched"
+            status_code=409,
+            detail=f"The slug '{company.slug}' is already watched on {company.source}",
         ) from duplicate
 
 
@@ -287,15 +306,18 @@ def update_company(id: int, body: CompanyUpdate) -> WatchedCompany:
 
     The id is a path parameter and an `int`: a value that is not one never reaches
     this function and is refused by the path's own validation as `422`, and an id
-    that finds no row is a `404` that writes nothing. No board is asked on this
-    path -- neither `slug` nor `source` is editable here -- so this route answers
-    no `409` and no `502` either.
+    that finds no row is a `404` that writes nothing. A body naming `source` is
+    refused first and in full: `SOURCE_IS_FIXED` says what is wrong and what to do
+    instead, and neither the row nor any other table is touched. No board is asked
+    on this path, so this route answers no `409` and no `502` either.
 
     `is_active: false` takes the company out of the tick's walk and is not a
     deletion: the row, its postings and their matches stay untouched, and
     `GET /watchlist` keeps listing the company as inactive. Sending the same body
     again is the same answer twice, and no request here creates a row.
     """
+    if body.source is not None:
+        raise HTTPException(status_code=422, detail=SOURCE_IS_FIXED)
     with db.session_scope() as session:
         company = session.get(Company, id)
         if company is None:

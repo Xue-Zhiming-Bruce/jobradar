@@ -352,6 +352,7 @@ def _deletes_sent_by(engine: Engine, action: Callable[[], None]) -> list[str]:
 
 
 def test_a_duplicate_company_slug_is_refused_by_the_database(engine: Engine) -> None:
+    """The key is the pair `(source, slug)`, and a second row of one pair is refused."""
     with db.session_scope() as session:
         session.add(Company(name="Acme", slug="acme"))
 
@@ -359,9 +360,24 @@ def test_a_duplicate_company_slug_is_refused_by_the_database(engine: Engine) -> 
         with db.session_scope() as session:
             session.add(Company(name="Acme Again", slug="acme"))
 
-    _assert_the_engine_named_what_it_refused(refusal.value, "company.slug", "company_slug_key")
+    _assert_the_engine_named_what_it_refused(
+        refusal.value, "company.source, company.slug", "uq_company_source_slug"
+    )
     with db.session_scope() as session:
         assert [company.slug for company in session.scalars(select(Company))] == ["acme"]
+
+
+def test_the_same_slug_on_another_source_is_a_different_company(engine: Engine) -> None:
+    """The widened key's other half: one board slug is watchable on two boards at once."""
+    with db.session_scope() as session:
+        session.add(Company(name="Acme", slug="acme", source="greenhouse"))
+        session.add(Company(name="Acme on Lever", slug="acme", source="lever"))
+
+    with db.session_scope() as session:
+        assert [
+            (company.slug, company.source)
+            for company in session.scalars(select(Company).order_by(Company.id))
+        ] == [("acme", "greenhouse"), ("acme", "lever")]
 
 
 def test_a_duplicate_posting_key_is_refused_by_the_database(engine: Engine) -> None:
@@ -429,7 +445,9 @@ def test_two_slugs_that_normalise_to_one_spelling_collide_in_the_database(
         with db.session_scope() as session:
             session.add(Company(name="Acme Again", slug="  ACME  "))
 
-    _assert_the_engine_named_what_it_refused(refusal.value, "company.slug", "company_slug_key")
+    _assert_the_engine_named_what_it_refused(
+        refusal.value, "company.source, company.slug", "uq_company_source_slug"
+    )
 
 
 def test_uniqueness_alone_cannot_bind_the_two_spellings_of_a_slug(engine: Engine) -> None:

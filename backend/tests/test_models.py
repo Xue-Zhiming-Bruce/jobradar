@@ -398,9 +398,9 @@ def test_the_dedupe_keys_are_declared_as_unique_constraints() -> None:
         for table in Base.metadata.sorted_tables
     }
 
-    assert Company.__table__.c.slug.unique is True
+    assert Company.__table__.c.slug.unique is not True  # the key is the pair below
     assert Match.__table__.c.posting_id.unique is True
-    assert unique_constraints["company"] == [["slug"]]
+    assert unique_constraints["company"] == [["source", "slug"]]
     assert unique_constraints["posting"] == [["company_id", "external_id"]]
     assert unique_constraints["match"] == [["posting_id"]]
 

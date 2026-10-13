@@ -37,7 +37,7 @@ from app import db
 from app.main import app
 from app.matching.scorer import FakeScorer, MatchResult
 from app.models import Company, Match, Posting, Run
-from app.routes.watchlist import get_source, update_company
+from app.routes.watchlist import SOURCE_IS_FIXED, get_source, update_company
 from app.services import resume
 from app.services.pipeline import run_pipeline
 from app.sources import SOURCES
@@ -133,6 +133,34 @@ class BoardSource:
     ) -> BoardPostings:
         self.calls.append(slug)
         return BoardPostings(self.boards[slug], None, None)
+
+
+class ValidatorSource:
+    """A walk fake that keeps the validator each call carried and answers with one of its own.
+
+    `BoardSource` records the slug only. This one records the whole
+    `(slug, etag, last_modified)` triple, so a run that handed one board the other
+    row's stored validator -- two companies sharing a slug on two sources -- fails
+    here instead of passing as a board nobody could tell apart.
+    """
+
+    def __init__(
+        self,
+        postings: list[SourcePosting],
+        *,
+        etag: str | None,
+        last_modified: str | None,
+    ) -> None:
+        self.postings = postings
+        self.etag = etag
+        self.last_modified = last_modified
+        self.calls: list[tuple[str, str | None, str | None]] = []
+
+    def __call__(
+        self, slug: str, *, etag: str | None = None, last_modified: str | None = None
+    ) -> BoardPostings:
+        self.calls.append((slug, etag, last_modified))
+        return BoardPostings(self.postings, self.etag, self.last_modified)
 
 
 @pytest.fixture(autouse=True)
@@ -401,7 +429,8 @@ def test_a_second_post_of_a_watched_slug_is_refused_with_409(
 
     message = refusal(add(client, "Acme Again", "acme"), 409)
 
-    assert "acme" in message  # the refusal names the slug, so it is fixable
+    assert "acme" in message  # the refusal names the pair, so it is fixable
+    assert "greenhouse" in message
     assert companies() == [
         {
             "id": 1,
@@ -451,6 +480,39 @@ def test_the_listed_source_is_what_each_row_stores(
         "lever",
         "greenhouse",
     ]
+
+
+def test_the_same_slug_on_two_sources_is_two_watchlist_rows(
+    client: TestClient, sources: dict[str, FakeSource]
+) -> None:
+    """One board slug, two sources: both rows are watched, each probed on its own adapter.
+
+    The only duplicate left is a pair already watched: re-posting either pair is
+    the `409`, and neither row the two accepted requests wrote moves.
+    """
+    bodies = {
+        "greenhouse": {"name": "Acme Inc", "slug": "acme", "source": "greenhouse"},
+        "lever": {"name": "Acme on Lever", "slug": "acme", "source": "lever"},
+    }
+
+    first = client.post("/watchlist", json=bodies["greenhouse"])
+    second = client.post("/watchlist", json=bodies["lever"])
+
+    assert (first.status_code, second.status_code) == (201, 201), second.text
+    assert sources["greenhouse"].slugs == ["acme"]
+    assert sources["lever"].slugs == ["acme"]  # each row probed through its own adapter
+    listed = client.get("/watchlist").json()
+    assert [(row["slug"], row["source"]) for row in listed] == [
+        ("acme", "greenhouse"),
+        ("acme", "lever"),
+    ]
+    assert listed == companies()
+
+    for source, body in bodies.items():
+        message = refusal(client.post("/watchlist", json={**body, "name": "Again"}), 409)
+        assert "acme" in message and source in message
+
+    assert listed == companies()
 
 
 @pytest.mark.parametrize("named", ["workday", "ashby", "Lever", "LEVER", "greenhouse "])
@@ -777,17 +839,17 @@ def test_the_same_rename_twice_answers_the_same_body_and_leaves_one_row(
     assert len(companies()) == 1
 
 
-# The board is not editable here, and this route asks no board.
+# The board is not editable here, and this route asks no board. `source` has its
+# own case below: the route answers that rule in words, `extra="forbid"` this one.
 
 _UNEDITABLE_BODIES = [
     pytest.param({"slug": "other"}, id="a slug on its own"),
-    pytest.param({"source": "lever"}, id="a source on its own"),
     pytest.param({"name": "Acme Corporation", "slug": "other"}, id="a rename with a slug"),
 ]
 
 
 @pytest.mark.parametrize("body", _UNEDITABLE_BODIES)
-def test_the_board_is_not_editable_here_and_no_board_is_asked(
+def test_the_board_slug_is_not_editable_here_and_no_board_is_asked(
     engine_client: TestClient, source: FakeSource, body: object
 ) -> None:
     company_id = watch("Acme Inc", "acme")
@@ -798,6 +860,52 @@ def test_the_board_is_not_editable_here_and_no_board_is_asked(
     refusal(response, 422)
     assert rows(Company, COMPANY_COLUMNS) == before
     assert source.slugs == []  # no re-probe, so no 409 and no 502 either
+
+
+# The source is fixed once written: the route, not pydantic, states the rule.
+
+_SOURCE_CHANGE_BODIES = [
+    pytest.param({"name": "Acme Corporation", "source": "lever"}, id="a rename with a source"),
+    pytest.param({"source": "lever"}, id="a source on its own"),
+    pytest.param({"is_active": False, "source": "greenhouse"}, id="a poll switch with a source"),
+]
+
+
+@pytest.mark.parametrize("body", _SOURCE_CHANGE_BODIES)
+def test_a_body_naming_a_source_is_422_with_the_rule_and_writes_nothing(
+    engine_client: TestClient, source: FakeSource, body: object
+) -> None:
+    """The row, its postings and their matches are what they were, and no board is asked."""
+    company_id = watch("Acme Inc", "acme")
+    seed_posting(company_id)
+    before = (
+        rows(Company, COMPANY_COLUMNS),
+        rows(Posting, POSTING_COLUMNS),
+        rows(Match, MATCH_COLUMNS),
+    )
+
+    response = engine_client.patch(f"/watchlist/{company_id}", json=body)
+
+    assert refusal(response, 422) == SOURCE_IS_FIXED
+    assert (
+        rows(Company, COMPANY_COLUMNS),
+        rows(Posting, POSTING_COLUMNS),
+        rows(Match, MATCH_COLUMNS),
+    ) == before
+    assert source.slugs == []
+
+
+def test_a_null_source_is_not_a_source_change_and_the_rename_stands(
+    client: TestClient,
+) -> None:
+    """`null` means "not supplied", the way it does for `name`: the body is an ordinary rename."""
+    company_id = watch("Acme Inc", "acme")
+
+    response = client.patch(f"/watchlist/{company_id}", json={"source": None, "name": "Acme"})
+
+    assert response.status_code == 200, response.text
+    assert (response.json()["name"], response.json()["source"]) == ("Acme", "greenhouse")
+    assert response.json() == companies()[0]
 
 
 # The poll switch: the same route for both values, and the list keeps showing the row.
@@ -929,6 +1037,58 @@ def test_reactivating_a_company_puts_its_board_back_in_the_walk_in_id_order(
     run_pipeline(new_run(), sources={"greenhouse": source}, scorer=FakeScorer(a_result()))
 
     assert source.calls == ["acme", "globex"]  # both, in ascending id order
+
+
+def test_a_run_fetches_two_rows_that_share_a_slug_once_each_on_their_own_source(
+    engine_client: TestClient,
+) -> None:
+    """The walk reads each row's stored source: one slug, two boards, two rows.
+
+    Each board is called exactly once with `"acme"` and never the other, each
+    company's postings land under its own `company_id`, and each board's answer is
+    stored on the row it was fetched for -- so the second run hands each board its
+    own row's validator and never the other's.
+    """
+    greenhouse_id = watch("Acme Inc", "acme", source="greenhouse")
+    lever_id = watch("Acme on Lever", "acme", source="lever")
+    resume.record_active_resume(
+        "synthetic-resume.txt", resume.TEXT_PLAIN, RESUME_TEXT, Path("/tmp/synthetic-resume.txt")
+    )
+    lever_postings = [
+        SourcePosting(
+            external_id="lever-1",
+            title="Backend Engineer",
+            location=None,
+            url="https://example.test/board/2",
+            description="Synthetic text written for this test.",
+        )
+    ]
+    greenhouse = ValidatorSource(
+        POSTINGS, etag="greenhouse-etag", last_modified="greenhouse-last"
+    )
+    lever = ValidatorSource(lever_postings, etag="lever-etag", last_modified="lever-last")
+    sources = {"greenhouse": greenhouse, "lever": lever}
+
+    run_pipeline(new_run(), sources=sources, scorer=FakeScorer(a_result()))
+
+    assert greenhouse.calls == [("acme", None, None)]
+    assert lever.calls == [("acme", None, None)]
+    assert [
+        (row["company_id"], row["external_id"]) for row in rows(Posting, POSTING_COLUMNS)
+    ] == [(greenhouse_id, "8172510"), (lever_id, "lever-1")]
+
+    run_pipeline(new_run(), sources=sources, scorer=FakeScorer(a_result()))
+
+    assert greenhouse.calls == [("acme", None, None), ("acme", "greenhouse-etag", "greenhouse-last")]
+    assert lever.calls == [("acme", None, None), ("acme", "lever-etag", "lever-last")]
+    with db.session_scope() as session:
+        assert [
+            (company.id, company.etag, company.last_modified)
+            for company in session.scalars(select(Company).order_by(Company.id))
+        ] == [
+            (greenhouse_id, "greenhouse-etag", "greenhouse-last"),
+            (lever_id, "lever-etag", "lever-last"),
+        ]
 
 
 # A body this route cannot use: refused before any write, and nothing written.

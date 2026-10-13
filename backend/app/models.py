@@ -118,16 +118,20 @@ class Company(Base):
     __tablename__ = "company"
     # The vocabulary `source` accepts, as a named check the database enforces --
     # the same statement on both engines, no dialect enum. A value outside it,
-    # `workday` say, is an `IntegrityError` and not a row.
+    # `workday` say, is an `IntegrityError` and not a row. And the key, named so
+    # both engines can drop and create it by that one spelling: a slug is one
+    # company *per source*, so the same board can be watched on Greenhouse and
+    # on Lever at once while a second row of the same pair is refused.
     __table_args__ = (
         CheckConstraint(
             "source IN ('greenhouse', 'lever')", name="ck_company_source_values"
         ),
+        UniqueConstraint("source", "slug", name="uq_company_source_slug"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255))
-    slug: Mapped[str] = mapped_column(String(255), unique=True)
+    slug: Mapped[str] = mapped_column(String(255))
     # Which adapter fetches this board -- one of `app.sources.SOURCES`. Defaulted
     # for the ORM so a row added without a source is Greenhouse, which is what
     # every row written before the column existed was.
@@ -150,9 +154,10 @@ class Company(Base):
         `Acme` and `acme` as two different values, so `UNIQUE` over the raw
         column would happily store them side by side. No `COLLATE` clause and
         no expression index is used here either, which leaves normalisation as
-        the only thing that can make the one-row-per-slug rule real: the value
-        is trimmed and lower-cased on the way in, so `"  Acme  "` is stored as
-        `"acme"` and the second company collides with the first.
+        the only thing that can make the one-row-per-source-and-slug rule real:
+        the value is trimmed and lower-cased on the way in, so `"  Acme  "` is
+        stored as `"acme"` and the second company of that source collides with
+        the first.
         """
         return value.strip().lower()
 
