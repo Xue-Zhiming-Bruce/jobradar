@@ -472,11 +472,14 @@ names the local command that stands in for every job it runs, so the pipeline ca
 be reproduced without GitHub Actions.
 
 - `ci.yml` runs on every push and every pull request, in four jobs: `backend`
-  (`uv sync && uv run pytest`, with the step `Fail on a committed secret, resume
-  or database file` running `uv run pytest tests/test_committed_data_guard.py`
-  before the suite), `frontend` (`npm ci && npm run build && npm test`),
-  `integration` (`uv run pytest -m integration` against a `postgres:17` service
-  container holding the same throwaway credentials as the local server) and
+  (`uv sync && uv run pytest` as one pass over both engines, against its own
+  `postgres:17` service container and with `TEST_DATABASE_URL` naming that
+  container, with the step `Fail on a committed secret, resume or database file`
+  running `uv run pytest tests/test_committed_data_guard.py` before the suite,
+  and the run failing on a summary that skipped anything), `frontend`
+  (`npm ci && npm run build && npm test`), `integration`
+  (`uv run pytest -m integration` against a `postgres:17` service
+  container holding the same throwaway credentials as the local server), and
   `contract` (regenerate `backend/openapi.json`, then fail on a diff). It has no
   deploy step; deploying a green `main` is #45.
 - `tick.yml` calls `POST /internal/tick` once a day, taking the secret from the
