@@ -53,11 +53,14 @@ before and after the run; the tables are emptied before and after it, so
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 5 x 20 | 100 | 0.2 s | 100 | 100 | 100 | 0 -> 100 | 0 -> 100 |
 | 10 x 50 | 500 | 0.9 s | 500 | 500 | 500 | 0 -> 500 | 0 -> 500 |
+| 10 x 50, repeated | 500 | 1.2 s | 500 | 500 | 500 | 0 -> 500 | 0 -> 500 |
 | 20 x 50 | 1000 | 1.7 s | 1000 | 1000 | 1000 | 0 -> 1000 | 0 -> 1000 |
 | 40 x 50 | 2000 | 3.3 s | 2000 | 2000 | 2000 | 0 -> 2000 | 0 -> 2000 |
 
-Every run ended `succeeded`, and the four runs above are the four runs that were
-performed -- no value here is extrapolated.
+Every run ended `succeeded`, and the runs above are the runs that were
+performed -- no value here is extrapolated. The two `10 x 50` runs are the same
+command on the same server, and they printed 0.9 s and 1.2 s: one laptop varies by
+a third between runs, so the per-posting cost below is a range and not a curve.
 
 Two properties of these runs are the setup's and not the app's. `matches_created`
 equals `postings_seen` because the fake model returns one result at 85 for every
@@ -68,24 +71,24 @@ run sends one message carrying every qualifying match. The script reads only
 call, so a shell that exports any of them yields different counts in those three
 columns for the same scale -- the wall time is the number this note reads.
 
-The cost is linear in the postings: 500 postings took 0.9 s and 2000 took 3.3 s,
-which is 1.8 ms and 1.65 ms per posting -- the row's insert, the prefilter, the
-`match` write, the two `run` counter updates and the digest's own select, write
-and markup, per posting. Call it 1.7 ms of app-side work per posting.
+The cost is linear in the postings: 500 postings took 0.9 s and 1.2 s, 2000 took
+3.3 s -- between 1.6 ms and 2.4 ms per posting, the row's insert, the prefilter,
+the `match` write, the two `run` counter updates and the digest's own select,
+write and markup. Call it a millisecond or two of app-side work per posting.
 
 ## What the numbers mean for the three constants
 
-**`SCORER_MAX_POSTINGS` (50).** 50 postings at the measured 1.7 ms each is about
-0.09 s of app work, so the pipeline is not why the cap exists: the cap bounds
-*model calls*, and one model call costs what this benchmark deliberately does not
-measure. What the cap is worth is the worst case it stops: at
-`MODEL_TIMEOUT_SECONDS` (30 s) per call, 50 postings is 1500 s -- 25 minutes -- of
-hung model time before the run ends, and with `LLM_FALLBACK_MODEL` set each model
-gets its own `SCORER_MAX_ATTEMPTS` budget, so the same run can reach 2 x 50 x 30 s
-= 3000 s. 50 is therefore a bound on the model's worst case and not on the tick's
-own work, which at that scale is 0.09 s; whether it is a bound the tick can live
-with in wall time is decided entirely by the model's real per-call latency, which
-is not in this measurement.
+**`SCORER_MAX_POSTINGS` (50).** 50 postings at the measured millisecond or two
+each is about 0.1 s of app work, so the pipeline is not why the cap exists: the
+cap bounds *model calls*, and one model call costs what this benchmark
+deliberately does not measure. What the cap is worth is the worst case it stops:
+at `MODEL_TIMEOUT_SECONDS` (30 s) per call, 50 postings is 1500 s -- 25 minutes --
+of hung model time before the run ends, and with `LLM_FALLBACK_MODEL` set each
+model gets its own `SCORER_MAX_ATTEMPTS` budget, so the same run can reach
+2 x 50 x 30 s = 3000 s. 50 is therefore a bound on the model's worst case and not
+on the tick's own work, which at that scale is 0.1 s; whether it is a bound the
+tick can live with in wall time is decided entirely by the model's real per-call
+latency, which is not in this measurement.
 
 **The tick's HTTP budget.** The design answers `202` immediately because the
 request must never wait for the run: the benchmark measures the run itself
@@ -99,8 +102,8 @@ finishes as `failed` any row still `running`. So a run that outlives its process
 (a restart or a redeploy mid-run) is reaped as failed and its matches go out with
 the next successful run: the run's horizon is the process's lifetime, not a
 timeout the platform applies. At the measured app-side cost that horizon would
-need about 35 000 postings in one run to be reached (see below); the model is what
-makes a run long, not the pipeline.
+need at least 25 000 postings in one run to be reached (see below); the model is
+what makes a run long, not the pipeline.
 
 **`MODEL_TIMEOUT_SECONDS` and `SMTP_TIMEOUT_SECONDS` (30 s each, per call).** One
 run makes at most `SCORER_MAX_POSTINGS` model calls -- 50 by default, plus a
@@ -120,14 +123,14 @@ The stated budget to measure against is the deployment's own: the caller's 60 s
 budget that a *run* has to fit inside is the process lifetime before a restart
 reaps it as failed -- the reap has no time horizon of its own.
 
-At the measured 1.7 ms per posting, the app's own work reaches 60 s only at about
-35 000 postings in one run: 700 companies with 50-posting boards, or 50 companies
-with 700-posting boards. That is 70 times the default watchlist this benchmark was
-asked about, and 700 times `SCORER_MAX_POSTINGS`, so in practice the cap is what
-stops a run growing, not the pipeline's throughput: a run scoring 50 postings
-spends about 0.09 s in the app. Nothing here says the system is fast; it says the
-app-side cost per posting is 1.7 ms, and it names the scale at which that alone
-would matter.
+At the measured 1.6-2.4 ms per posting, the app's own work reaches 60 s only at
+between 25 000 and 36 000 postings in one run: 500 companies with 50-posting
+boards at the slow end and 720 at the fast end. That is 50 to 70 times the default
+watchlist this benchmark was asked about, and 500 to 720 times
+`SCORER_MAX_POSTINGS`, so in practice the cap is what stops a run growing, not the
+pipeline's throughput: a run scoring 50 postings spends about 0.1 s in the app.
+Nothing here says the system is fast; it says the app-side cost per posting is a
+millisecond or two, and it names the scale at which that alone would matter.
 
 The constant that has to move first is `SCORER_MAX_POSTINGS`, because it is the
 only one of the three that bounds the number of *calls* a run makes -- the two
@@ -156,5 +159,5 @@ this task's: the scorer's configuration is #32's and the digest's constant is
   none.
 - **The deployment's machine.** These are one laptop's numbers, with the app and
   PostgreSQL sharing a CPU and a disk over the loopback; a deployed run on other
-  hardware will differ, and the shape (1.7 ms per posting) is the part worth
-  carrying over.
+  hardware will differ, and the shape (a millisecond or two per posting) is the
+  part worth carrying over.
