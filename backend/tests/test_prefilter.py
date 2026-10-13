@@ -11,10 +11,14 @@ Every rule case asserts the whole decision -- the `reasons` tuple, or the exact
 string that reached `match.reason` -- rather than a boolean, so a decision taken
 for some other reason fails here. The recording cases ask for the shared `engine`
 fixture of `tests/conftest.py`, so each of them runs on SQLite and on PostgreSQL.
+The cases that land a rejection on a row a score already occupies drive the
+other writer, `scorer.record_score`, and the digest's own `send_digest`: one row
+has two writers, and neither may rely on the other's column list.
 """
 
 import ast
 import inspect
+import json
 import socket
 import subprocess
 import sys
@@ -43,7 +47,9 @@ from app.matching.prefilter import (
     seniority_terms,
     title_terms,
 )
+from app.matching.scorer import MatchResult, record_score
 from app.models import Company, Match, Posting, Run
+from app.services.digest import DIGEST_MIN_SCORE, FakeMailer, send_digest
 from app.sources.base import SourcePosting
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
@@ -585,6 +591,166 @@ def test_a_decision_that_passed_is_refused_and_leaves_no_row(engine: Engine) -> 
 
     assert str(posting_id) in str(raised.value)
     assert _matches() == []
+
+
+# A rejection landing on the row a score already occupies: nothing of the score
+# stays but the values that are not the score's, and both writers stay in their lane.
+
+SCORE_REASON = "Fits the backend work."
+SCORE_GAPS = ["No Kubernetes.", "No Go."]
+NOTIFIED_AT = datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
+
+
+def _score_and_save(posting_id: int, *, state: str = "saved") -> None:
+    """Give one posting the scored row #8 writes, then the verdict and marker the owner and #10 write.
+
+    The score is `record_score`'s own write, so the reason and the stored `gaps`
+    are the shapes that writer produces, and nothing here copies its column list.
+    The verdict and the marker are one session's, the way `PATCH /matches/{id}`
+    and `send_digest` write them.
+    """
+    record_score(posting_id, MatchResult(score=91, reason=SCORE_REASON, gaps=list(SCORE_GAPS)))
+    with db.session_scope() as session:
+        row = session.scalar(select(Match).where(Match.posting_id == posting_id))
+        row.state = state
+        row.notified_at = NOTIFIED_AT
+
+
+def test_a_rejection_over_a_scored_row_leaves_only_the_rejection(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole row, every column: the score's gap list goes with the score, nothing else moves."""
+    posting_id = _one_stored_posting()
+    _score_and_save(posting_id)
+    monkeypatch.setenv(PREFILTER_TITLE_TERMS, "intern")
+    before = _matches()[0]
+    assert (before["score"], before["gaps"], before["outcome"]) == (
+        91,
+        json.dumps(SCORE_GAPS),
+        "scored",
+    )
+
+    record_rejection(posting_id, prefilter(_posting(title="Intern Backend Engineer")))
+
+    rows = _matches()
+    assert rows == [
+        {
+            **before,
+            "score": 0,
+            "reason": "Prefiltered out: title term 'intern'",
+            "gaps": None,
+            "outcome": "rejected",
+        }
+    ]
+    stored = rows[0]
+    assert stored["created_at"] == before["created_at"]
+    assert stored["notified_at"] == before["notified_at"] == NOTIFIED_AT
+    assert stored["state"] == "saved"
+
+
+@pytest.mark.parametrize("state", ["saved", "dismissed"])
+def test_a_rejection_leaves_the_verdict_the_owner_recorded_alone(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    """`state` is the owner's verdict on a posting they looked at, not the prefilter's to reset."""
+    posting_id = _one_stored_posting()
+    _score_and_save(posting_id, state=state)
+    monkeypatch.setenv(PREFILTER_TITLE_TERMS, "intern")
+
+    record_rejection(posting_id, prefilter(_posting(title="Intern Backend Engineer")))
+
+    stored = _matches()[0]
+    assert (stored["state"], stored["outcome"]) == (state, "rejected")
+
+
+@pytest.mark.parametrize("scored_first", [True, False], ids=["was scored", "was never scored"])
+def test_a_second_rejection_replaces_the_reason_and_leaves_no_gaps(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, scored_first: bool
+) -> None:
+    """One row, whatever it carried: the new clauses, and `gaps` NULL either way."""
+    posting_id = _one_stored_posting()
+    if scored_first:
+        _score_and_save(posting_id)
+    monkeypatch.setenv(PREFILTER_TITLE_TERMS, "intern")
+    record_rejection(posting_id, prefilter(_posting(title="Intern Backend Engineer")))
+    first = _matches()[0]
+
+    monkeypatch.setenv(PREFILTER_TITLE_TERMS, "junior")
+    record_rejection(posting_id, prefilter(_posting(title="Junior Backend Engineer")))
+
+    rows = _matches()
+    assert len(rows) == 1
+    assert rows[0]["id"] == first["id"]
+    assert rows[0]["created_at"] == first["created_at"]
+    assert rows[0]["gaps"] is None
+    assert rows[0]["reason"] == "Prefiltered out: title term 'junior'"
+    assert rows[0]["outcome"] == "rejected"
+
+
+def test_a_row_a_digest_already_notified_is_not_emailed_again(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#10's own rule, pinned here: neither a rejection nor a re-score un-sends an email."""
+    posting_id = _one_stored_posting()
+    _score_and_save(posting_id)
+    monkeypatch.setenv(PREFILTER_TITLE_TERMS, "intern")
+    record_rejection(posting_id, prefilter(_posting(title="Intern Backend Engineer")))
+    record_score(posting_id, MatchResult(score=91, reason=SCORE_REASON, gaps=list(SCORE_GAPS)))
+    monkeypatch.setenv(DIGEST_MIN_SCORE, "70")
+    mailer = FakeMailer()
+
+    send_digest(mailer)
+
+    stored = _matches()[0]
+    assert (stored["outcome"], stored["score"], stored["notified_at"]) == (
+        "scored",
+        91,
+        NOTIFIED_AT,
+    )
+    assert mailer.sent == []
+
+
+def test_the_round_trip_score_rejection_score_leaves_the_one_row(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All nine columns at each step, so neither writer can rely on the other's column list."""
+    posting_id = _one_stored_posting()
+    _score_and_save(posting_id)
+    monkeypatch.setenv(PREFILTER_TITLE_TERMS, "intern")
+    scored = _matches()[0]
+    assert (scored["score"], scored["gaps"], scored["outcome"], scored["state"]) == (
+        91,
+        json.dumps(SCORE_GAPS),
+        "scored",
+        "saved",
+    )
+
+    record_rejection(posting_id, prefilter(_posting(title="Intern Backend Engineer")))
+
+    rejected = _matches()
+    assert rejected == [
+        {
+            **scored,
+            "score": 0,
+            "reason": "Prefiltered out: title term 'intern'",
+            "gaps": None,
+            "outcome": "rejected",
+        }
+    ]
+    assert rejected[0]["state"] == "saved"
+
+    record_score(posting_id, MatchResult(score=70, reason="Fits now.", gaps=["No on-call."]))
+
+    assert _matches() == [
+        {
+            **rejected[0],
+            "score": 70,
+            "reason": "Fits now.",
+            "gaps": json.dumps(["No on-call."]),
+            "outcome": "scored",
+        }
+    ]
+    assert _matches()[0]["state"] == "saved"
 
 
 # The seam itself, and what this module is not allowed to reach.
