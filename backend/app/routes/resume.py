@@ -21,7 +21,13 @@ request payloads and the text is the row's.
 Three more routes read and change what the uploads left behind: `GET /resume`
 lists every stored resume newest first, `PATCH /resume/{id}` makes an older one
 the active resume and answers with it, and `DELETE /resume/{id}` removes one --
-row and stored file together. The row work behind them is `app.services.resume`'s
+row and stored file together. A fourth, `GET /resume/{id}/file`, answers with the
+file itself: Starlette's `FileResponse` streams the bytes from the path the row
+names, under that row's own media type and filename, and they never pass through
+a variable here, a log line or an error body. The filename header is the
+framework's own construction of the stored name -- an RFC 5987 `filename*` when
+it is not plain ASCII -- so a space, a quote, a non-ASCII character or a CR/LF in
+it cannot inject or split a header. The row work behind them is `app.services.resume`'s
 the way `record_active_resume` and `active_resume_text` already are; what stays
 here is the HTTP shape, the `responses=` dicts and one renderer, `ResumeSummary`
 with `resume_summary(row)`, shared by the list and the activate answer so the two
@@ -49,6 +55,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
 
 from app.matching.resume_fields import LlmResumeParser, ResumeFieldParser, ResumeParseError
@@ -337,6 +344,71 @@ def delete_resume(id: int) -> None:
     """
     if not resume_service.delete_resume(id):
         raise HTTPException(status_code=404, detail=f"There is no resume with id {id}")
+
+
+# The answer and the refusals the download names in the contract: the body is the
+# stored file's bytes, so the `200` declares a binary media type instead of the
+# JSON every other answer here carries, and the two ways the file is not there
+# are named rather than left to be discovered.
+FILE_RESPONSES = {
+    200: {
+        "description": "The stored file, byte for byte, as an attachment",
+        "content": {
+            "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
+        },
+    },
+    404: {
+        "description": (
+            "No resume has that id, or the file its stored path names is not in the "
+            "uploads directory"
+        )
+    },
+    422: {"description": "The path value is not a resume id"},
+}
+
+
+@router.get(
+    "/resume/{id}/file",
+    response_class=FileResponse,
+    tags=["resume"],
+    summary="Download the stored file of one resume",
+    responses=FILE_RESPONSES,
+)
+def download_resume_file(id: int) -> FileResponse:
+    """Answer with the file that resume's row names, as an attachment under the row's own type.
+
+    The id is a path parameter and an `int`, refused by the path's own validation
+    as `422` when it is not one, and an id that finds no row is a `404` naming it.
+    A row whose stored path is not a file inside the app's uploads directory -- a
+    path no writer here produces -- is refused before anything is opened, by the
+    delete's own containment rule, `app.services.resume.stored_file`; a file that
+    was stored and has since gone is a `404` as well, never the `500` a missing
+    file would otherwise be, and its detail says the stored file is missing.
+
+    The bytes belong to the response and never to this function: `FileResponse`
+    streams them from the path, so no line here holds them or names them, and the
+    log line names the resume's id and the file's size -- all a download is to
+    this app. The media type and the filename are the row's own, and the answer's
+    `content-type` is that value exactly rather than one the framework appends a
+    charset to, because the row's media type is the one #3 validated on the way
+    in.
+    """
+    row = resume_service.resume_row(id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"There is no resume with id {id}")
+
+    path = resume_service.stored_file(row.stored_path)
+    if path is None or not path.is_file():
+        raise HTTPException(
+            status_code=404, detail=f"The stored file for resume {id} is missing"
+        )
+
+    logger.info("Served resume %s: %s bytes", id, path.stat().st_size)
+    return FileResponse(
+        path,
+        headers={"content-type": row.content_type},
+        filename=row.filename,
+    )
 
 
 # The refusals the parse answers with, named in the contract the way the rest of

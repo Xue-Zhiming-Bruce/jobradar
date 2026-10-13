@@ -56,6 +56,7 @@ def test_contract_lists_every_registered_path_in_registration_order() -> None:
         "/healthz",
         "/resume",
         "/resume/{id}",
+        "/resume/{id}/file",
         "/resume/parse",
         "/watchlist",
         "/watchlist/{id}",
@@ -123,6 +124,28 @@ def test_contract_describes_the_resume_history_a_client_reads_and_changes() -> N
         (parameter,) = route["parameters"]
         assert parameter["in"] == "path"
         assert parameter["schema"]["type"] == "integer"
+
+
+def test_contract_describes_the_stored_file_a_client_downloads() -> None:
+    contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    downloaded = contract["paths"]["/resume/{id}/file"]["get"]
+
+    # The bytes are the body, so the `200` declares a binary media type: the
+    # JSON every other answer in this family carries would be a lie here, and a
+    # client that generated a parser from it would decode a resume as JSON.
+    served = downloaded["responses"]["200"]["content"]
+    assert set(served) == {"application/octet-stream"}
+    assert served["application/octet-stream"]["schema"]["type"] == "string"
+
+    # Every status this route answers, and no other: the file that was served,
+    # the id that has no row (or whose file is not in the uploads directory),
+    # and the path value that is not an id -- refused by the path's own
+    # validation, which is why the parameter is an integer here.
+    assert set(downloaded["responses"]) == {"200", "404", "422"}
+    (parameter,) = downloaded["parameters"]
+    assert parameter["name"] == "id"
+    assert parameter["in"] == "path"
+    assert parameter["schema"]["type"] == "integer"
 
 
 def test_contract_describes_the_watchlist_routes() -> None:

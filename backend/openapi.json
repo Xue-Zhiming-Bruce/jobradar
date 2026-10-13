@@ -177,6 +177,46 @@
         }
       }
     },
+    "/resume/{id}/file": {
+      "get": {
+        "tags": [
+          "resume"
+        ],
+        "summary": "Download the stored file of one resume",
+        "description": "Answer with the file that resume's row names, as an attachment under the row's own type.\n\nThe id is a path parameter and an `int`, refused by the path's own validation\nas `422` when it is not one, and an id that finds no row is a `404` naming it.\nA row whose stored path is not a file inside the app's uploads directory -- a\npath no writer here produces -- is refused before anything is opened, by the\ndelete's own containment rule, `app.services.resume.stored_file`; a file that\nwas stored and has since gone is a `404` as well, never the `500` a missing\nfile would otherwise be, and its detail says the stored file is missing.\n\nThe bytes belong to the response and never to this function: `FileResponse`\nstreams them from the path, so no line here holds them or names them, and the\nlog line names the resume's id and the file's size -- all a download is to\nthis app. The media type and the filename are the row's own, and the answer's\n`content-type` is that value exactly rather than one the framework appends a\ncharset to, because the row's media type is the one #3 validated on the way\nin.",
+        "operationId": "download_resume_file_resume__id__file_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The stored file, byte for byte, as an attachment",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No resume has that id, or the file its stored path names is not in the uploads directory"
+          },
+          "422": {
+            "description": "The path value is not a resume id"
+          }
+        }
+      }
+    },
     "/resume/parse": {
       "post": {
         "tags": [

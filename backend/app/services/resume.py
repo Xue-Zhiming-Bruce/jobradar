@@ -1,6 +1,9 @@
 """Reading a resume out of an upload, reading back the active one, and writing the file
 where the client cannot reach, plus the history the upload supersedes: list it,
 make an older row active again, and delete one -- row and stored file together.
+`resume_row` is the reader `GET /resume/{id}/file` asks for the one row it serves,
+and `stored_file` is the containment rule both that route and the delete turn a
+row's `stored_path` into a file with.
 
 `POST /resume` is the one endpoint that takes a file, and this module is where
 that file is judged: the declared media type and the bytes both have to name a
@@ -355,6 +358,25 @@ def record_parsed_fields(resume_id: int, parsed: str) -> None:
         row.parsed_fields = parsed
 
 
+def resume_row(resume_id: int) -> Resume | None:
+    """The row that id names, detached before the commit expires it, or `None` when none has it.
+
+    One `session_scope()` per call -- one unit of work, committed and closed
+    before this returns -- and one row: `GET /resume/{id}/file` reads the three
+    values its answer is built from, the filename and media type its headers
+    carry and the path whose file is served. The row is detached before the
+    commit expires it, the way `resume_rows` detaches its own and for the same
+    reason: the answer is built after this session is closed. The row carries
+    the resume's text like every other row does, so nothing here logs it or
+    returns it to a client.
+    """
+    with db.session_scope() as session:
+        row = session.get(Resume, resume_id)
+        if row is not None:
+            session.expunge(row)
+        return row
+
+
 def resume_rows() -> list[Resume]:
     """Every stored resume row, newest first, and `[]` when there are none.
 
@@ -419,17 +441,31 @@ def delete_resume(resume_id: int) -> bool:
         return True
 
 
-def _remove_stored_file(stored_path: str) -> None:
-    """Unlink the file that path names, when it is inside `uploads_dir()` and still there.
+def stored_file(stored_path: str) -> Path | None:
+    """The file that path names, resolved, when it is inside `uploads_dir()`; `None` when it is not.
 
-    A file already gone does not block the delete: the row is the record and the
-    file is derived from it. A path that does not resolve inside the uploads
-    directory is never unlinked -- `save_upload` writes nothing else, so such a
-    value is not a file this app put there, and removing it would turn a delete
-    into deleting whatever path a row happens to hold. The row still goes.
+    The one place a row's `stored_path` becomes a file, for the two routes that
+    do it: `DELETE /resume/{id}` unlinks it and `GET /resume/{id}/file` serves
+    it, and neither may touch a path `save_upload` did not write. A path that
+    resolves outside the uploads directory is therefore `None` here, and the
+    caller neither opens nor removes it -- so a row whose path was tampered with
+    is a refusal and never a read of, or a delete of, whatever it points at.
+    Resolution comes first, so a symbolic link inside the directory that leads
+    out of it is refused the same way the delete has always refused one.
     """
     path = Path(stored_path).resolve()
-    if not path.is_relative_to(uploads_dir().resolve()):
+    return path if path.is_relative_to(uploads_dir().resolve()) else None
+
+
+def _remove_stored_file(stored_path: str) -> None:
+    """Unlink the file that path names, when `stored_file` says it is one of ours and it is there.
+
+    A file already gone does not block the delete: the row is the record and the
+    file is derived from it. A path `stored_file` refuses is never unlinked at
+    all. The row still goes.
+    """
+    path = stored_file(stored_path)
+    if path is None:
         return
     try:
         path.unlink()
