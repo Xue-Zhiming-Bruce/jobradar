@@ -128,6 +128,10 @@ def _board_without(field: str) -> list:
     return payload
 
 
+def _no_wait(seconds: float) -> None:
+    """The retry waits, injected: the waits themselves are `test_source_hardening.py`'s business."""
+
+
 def _client_serving(
     body: bytes, requests: list[httpx2.Request], *, slug: str = SLUG, status: int = 200
 ) -> httpx2.Client:
@@ -302,7 +306,7 @@ def test_a_slow_board_is_a_typed_timeout_and_the_request_carries_the_timeout(
         raise error
 
     with pytest.raises(SourceError) as raised:
-        fetch(SLUG, client=httpx2.Client(transport=httpx2.MockTransport(handle)))
+        fetch(SLUG, client=httpx2.Client(transport=httpx2.MockTransport(handle)), sleep=_no_wait)
 
     assert type(raised.value) is SourceTimeout
     assert requests[0].extensions["timeout"]["connect"] == REQUEST_TIMEOUT_SECONDS
@@ -315,7 +319,7 @@ def test_a_refusal_from_the_source_is_board_unavailable(status: int) -> None:
     body = b"<html><body>Nope, and this text is not repeated anywhere</body></html>"
 
     with pytest.raises(SourceError) as raised:
-        fetch(SLUG, client=_client_serving(body, [], status=status))
+        fetch(SLUG, client=_client_serving(body, [], status=status), sleep=_no_wait)
 
     assert type(raised.value) is BoardUnavailable
     assert str(status) in str(raised.value)
@@ -327,7 +331,7 @@ def test_a_board_that_cannot_be_reached_is_board_unavailable_too() -> None:
         raise httpx2.ConnectError("no route to host")
 
     with pytest.raises(SourceError) as raised:
-        fetch(SLUG, client=httpx2.Client(transport=httpx2.MockTransport(handle)))
+        fetch(SLUG, client=httpx2.Client(transport=httpx2.MockTransport(handle)), sleep=_no_wait)
 
     assert type(raised.value) is BoardUnavailable
     assert "no route to host" not in str(raised.value)

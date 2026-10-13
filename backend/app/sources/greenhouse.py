@@ -14,11 +14,11 @@ from the payload rather than rebuilt from the slug: a board's `absolute_url`
 links to the company's own site as often as to `boards.greenhouse.io`, so a URL
 synthesised from the slug would be wrong. `app.sources.base` holds what this
 adapter and every other one share: `SourcePosting`, the error family, the slug
-gate, the timeout and the html-to-text helper. No other module may know these
-keys.
+gate, `fetch_body` -- the one request, with its timeout, bounded retries and body
+cap -- and the html-to-text helper. No other module may know these keys.
 
-Every way a board can fail comes back as one of four `SourceError`s rather than
-a crash or an `httpx2` exception, and no case raises the family's own parent:
+Every way a board can fail comes back as a `SourceError` rather than a crash or an
+`httpx2` exception, and no case raises the family's own parent:
 
 - `UnknownSlug` -- the value cannot name a board, or no such board exists. A
   `404` decides that, and its body is never read: the body the source sends for
@@ -30,26 +30,22 @@ a crash or an `httpx2` exception, and no case raises the family's own parent:
 - `MalformedPayload` -- the board answered `2xx` with something that is not a
   list of jobs.
 - `SourceTimeout` -- the board did not answer within `REQUEST_TIMEOUT_SECONDS`,
-  so a slow board cannot hold a tick of #9 open.
+  so a slow board cannot hold a tick of #9 open, and the retry's own waits are
+  bounded the same way.
+- `OversizedPayload` -- the answer passed `MAX_BODY_BYTES` and was refused while
+  it was still arriving.
 
 Importing this module builds nothing -- no client, no socket, no environment read
 -- so `uvicorn` and the tests pay nothing for it.
 """
 
 import json
+import time
+from collections.abc import Callable
 
 import httpx2
 
-from app.sources.base import (
-    REQUEST_TIMEOUT_SECONDS,
-    BoardUnavailable,
-    MalformedPayload,
-    SourcePosting,
-    SourceTimeout,
-    UnknownSlug,
-    html_to_text,
-    require_slug,
-)
+from app.sources.base import MalformedPayload, SourcePosting, fetch_body, html_to_text
 
 BOARD_URL = "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
 
@@ -58,32 +54,26 @@ BOARD_URL = "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
 CONTENT_PARAMETER = {"content": "true"}
 
 
-def fetch(slug: str, *, client: httpx2.Client | None = None) -> list[SourcePosting]:
+def fetch(
+    slug: str,
+    *,
+    client: httpx2.Client | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> list[SourcePosting]:
     """Every posting on the board `slug` names, or a `SourceError` saying why not.
 
-    One synchronous request, over `client` when one is injected and over a client
-    built here otherwise. A value that cannot be a slug makes no request at all.
+    The one request, its timeout, its bounded retries and the body cap are
+    `base.fetch_body`'s -- this adapter knows only what the answer means. A value
+    that cannot be a slug makes no request at all.
     """
-    require_slug(slug)
-    if client is None:
-        client = httpx2.Client(timeout=REQUEST_TIMEOUT_SECONDS)
-    try:
-        response = client.get(
-            BOARD_URL.format(slug=slug),
-            params=CONTENT_PARAMETER,
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
-    except httpx2.TimeoutException as error:
-        raise SourceTimeout(f"The board '{slug}' did not answer in time") from error
-    except httpx2.HTTPError as error:  # no answer at all: a refused or broken connection
-        raise BoardUnavailable(f"The board '{slug}' could not be reached") from error
-    if response.status_code == 404:
-        raise UnknownSlug(f"There is no Greenhouse board named '{slug}'")
-    if not response.is_success:
-        raise BoardUnavailable(
-            f"The board '{slug}' refused to answer: HTTP {response.status_code}"
-        )
-    return _postings(response.text)
+    body = fetch_body(
+        slug,
+        BOARD_URL.format(slug=slug),
+        params=CONTENT_PARAMETER,
+        client=client,
+        sleep=sleep,
+    )
+    return _postings(body)
 
 
 def _postings(body: str) -> list[SourcePosting]:

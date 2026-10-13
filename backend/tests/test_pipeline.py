@@ -27,12 +27,13 @@ import inspect
 import json
 import logging
 import socket
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
 
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -63,9 +64,14 @@ from app.services import pipeline as pipeline_module
 from app.services import resume
 from app.services.ingest import IngestResult
 from app.services.pipeline import NO_ACTIVE_RESUME, run_pipeline
+from app.sources import greenhouse
 from app.sources.base import (
+    MAX_BODY_BYTES,
+    BoardShrunk,
     BoardUnavailable,
     MalformedPayload,
+    OversizedPayload,
+    Source,
     SourceError,
     SourcePosting,
     SourceTimeout,
@@ -1057,3 +1063,227 @@ def test_the_pipeline_writes_no_row_of_its_own_but_the_runs_counts() -> None:
     assert "session.add(" not in PIPELINE_SOURCE
     assert "session.delete(" not in PIPELINE_SOURCE
     assert ".commit(" not in PIPELINE_SOURCE
+
+
+# The shrink guard: a board that lists far fewer postings than the company has open.
+
+# A string a board's body carries that must reach no column of the run's row.
+PAYLOAD_SENTINEL = "PAYLOAD-SENTINEL-TEXT-THAT-MUST-NOT-BE-ECHOED"
+
+# An over-cap body's chunk size, so an over-cap body is written in a few chunks here.
+OVER_CAP_CHUNK_BYTES = MAX_BODY_BYTES // 4 + 1
+
+
+def _open_postings(company_id: int, count: int) -> None:
+    """`count` stored postings of one company, all still open, so the guard has a count to read."""
+    for index in range(count):
+        _stored_posting(company_id, external_id=f"open-{index}")
+
+
+def _open_count(company_id: int) -> int:
+    """How many of that company's postings are open, read here rather than by the module under test."""
+    with db.session_scope() as session:
+        return session.scalar(
+            select(func.count())
+            .select_from(Posting)
+            .where(Posting.company_id == company_id, Posting.closed_at.is_(None))
+        )
+
+
+def _tick(client: TestClient, sources: Mapping[str, Source]) -> dict[str, Any]:
+    """One tick whose work is this run's walk over those sources, and the row it left.
+
+    The provider is replaced for the length of the request, the way the tick cases
+    above replace it: the row's lifecycle stays `_run`'s, which is what makes the
+    row readable for what the walk did to it.
+    """
+    app.dependency_overrides[get_pipeline] = lambda: partial(
+        run_pipeline, sources=sources, scorer=FakeScorer(_result())
+    )
+    try:
+        response = client.post("/internal/tick", headers={TICK_SECRET_HEADER: TICK_SECRET})
+    finally:
+        app.dependency_overrides.pop(get_pipeline, None)
+    return _run_row(response.json()["id"])
+
+
+def test_a_refused_board_is_never_handed_to_ingest(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard sits before the ingest: a refused payload reaches no `posting` row at all."""
+    company = _company("acme")
+    _open_postings(company, 4)
+    calls: list[int] = []
+
+    def recording_ingest(company_id: int, postings: list[SourcePosting]) -> IngestResult:
+        calls.append(company_id)
+        return IngestResult(created_ids=[], reopened_ids=[])
+
+    monkeypatch.setattr(pipeline_module, "ingest_postings", recording_ingest)
+    _active_resume()
+    run = _run()
+
+    with pytest.raises(BoardShrunk) as raised:
+        run_pipeline(
+            run, sources={"greenhouse": FakeSource({"acme": []})}, scorer=FakeScorer(_result())
+        )
+
+    assert calls == []  # the ingest was not called for the refused company
+    assert type(raised.value) is BoardShrunk
+    assert "acme" in str(raised.value)
+    assert "0" in str(raised.value) and "4" in str(raised.value)  # both numbers, and no payload
+    assert _open_count(company) == 4
+    assert _rows(Posting) == 4
+    assert _run_row(run)["postings_seen"] == 0  # a refused board is counted by nobody
+
+
+# The ratio and the floor: what the guard refuses, and the boards it must leave alone. The
+# listed postings are the company's own external ids, so an allowed board closes its own rows.
+_SHRINK_CASES = [
+    pytest.param(3, 0, "succeeded", 3, id="three open, an empty board: all three close"),
+    pytest.param(6, 5, "succeeded", 1, id="six open, five listed: one closes"),
+    pytest.param(6, 3, "succeeded", 3, id="six open, exactly half listed: allowed"),
+    pytest.param(0, 0, "succeeded", 0, id="no postings at all, an empty board: nothing happens"),
+    pytest.param(20, 10, "succeeded", 10, id="twenty open, ten listed: allowed"),
+    pytest.param(4, 0, "failed", 0, id="four open, an empty board: refused"),
+    pytest.param(4, 1, "failed", 0, id="four open, one listed: refused"),
+    pytest.param(20, 9, "failed", 0, id="twenty open, nine listed: refused"),
+]
+
+
+@pytest.mark.parametrize("open_count, listed, outcome, closed", _SHRINK_CASES)
+def test_the_guard_matrix(
+    engine: Engine,
+    client: TestClient,
+    inline_starter: None,
+    open_count: int,
+    listed: int,
+    outcome: str,
+    closed: int,
+) -> None:
+    """The same fixtures from both sides: a genuine board is still the truth, a shrunken one is not."""
+    company = _company("acme")
+    _open_postings(company, open_count)
+    payload = [_posting(f"open-{index}") for index in range(listed)]
+    _active_resume()
+
+    row = _tick(client, {"greenhouse": FakeSource({"acme": payload})})
+
+    assert row["status"] == outcome
+    assert _rows(Posting) == open_count  # nothing inserted and nothing deleted, either way
+    assert _open_count(company) == open_count - closed
+    if outcome == "failed":
+        assert (row["postings_seen"], row["matches_created"]) == (0, 0)
+        assert "acme" in row["error"]
+        assert str(open_count) in row["error"] and str(listed) in row["error"]
+    else:
+        assert row["error"] is None
+        # Nothing listed is new -- every posting the board named is one already stored --
+        # so `created_ids` is empty and the run matches nothing.
+        assert (row["postings_seen"], row["matches_created"]) == (listed, 0)
+
+
+def test_a_second_run_over_the_same_refused_board_is_refused_again(engine: Engine) -> None:
+    """No column, table or file holds a history: the same refusal, the same rows still open."""
+    company = _company("acme")
+    _open_postings(company, 4)
+    _active_resume()
+    source = FakeSource({"acme": []})
+    refusals: list[str] = []
+
+    for _ in range(2):
+        with pytest.raises(BoardShrunk) as raised:
+            run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+        assert type(raised.value) is BoardShrunk
+        refusals.append(str(raised.value))
+        assert _open_count(company) == 4
+        assert _rows(Posting) == 4
+
+    assert refusals[0] == refusals[1]  # the same numbers, read from the same rows
+    assert [column.name for column in Posting.__table__.columns] == list(POSTING_COLUMNS)
+
+
+def test_a_refused_board_keeps_what_the_earlier_companies_earned(
+    engine: Engine, client: TestClient, inline_starter: None
+) -> None:
+    """#34's rule: the walk stops on the refusal, the earlier companies keep their rows and counts."""
+    trusted = _company("acme")
+    refused = _company("beta")
+    _open_postings(refused, 4)
+    _active_resume()
+    source = FakeSource({"acme": [_posting("1"), _posting("2"), _posting("3")], "beta": []})
+
+    row = _tick(client, {"greenhouse": source})
+
+    assert row["status"] == "failed"
+    assert "beta" in row["error"]
+    assert (row["postings_seen"], row["matches_created"]) == (3, 3)  # the refused board's 0 is not here
+    assert set(_postings_of(trusted)) == {"1", "2", "3"}
+    assert len(_matches()) == 3
+    assert _open_count(refused) == 4
+    assert _rows(Posting) == 7  # the three the run stored, and the four left as they were
+
+
+class _OverCapStream(httpx2.SyncByteStream):
+    """A body over the cap, arriving in chunks whose first one carries the sentinel."""
+
+    def __init__(self, first: bytes) -> None:
+        self.chunks = [first + b"x" * (OVER_CAP_CHUNK_BYTES - len(first))] * 6
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield from self.chunks
+
+
+def _board(*answers: httpx2.Response | Exception) -> Callable[[str], list[SourcePosting]]:
+    """The real Greenhouse adapter over a transport serving that script, and never waiting.
+
+    The last answer is served for every later request, so "every attempt" is
+    written once. The adapter is the one the app ships rather than this module's
+    fake, because the text a payload carries has to exist for a leak to be visible.
+    """
+    requests: list[httpx2.Request] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        answer = answers[min(len(requests), len(answers)) - 1]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    client = httpx2.Client(transport=httpx2.MockTransport(handle))
+    return lambda slug: greenhouse.fetch(slug, client=client, sleep=lambda seconds: None)
+
+
+FAILED_BOARD_ANSWERS = [
+    pytest.param(
+        lambda: httpx2.Response(503, text=f"<html><body>{PAYLOAD_SENTINEL}</body></html>"),
+        "HTTP 503",
+        id="a board that refused every attempt",
+    ),
+    pytest.param(
+        lambda: httpx2.Response(200, stream=_OverCapStream(PAYLOAD_SENTINEL.encode())),
+        str(MAX_BODY_BYTES),
+        id="a body over the cap",
+    ),
+]
+
+
+@pytest.mark.parametrize("answer, expected", FAILED_BOARD_ANSWERS)
+def test_a_failed_board_puts_no_payload_text_on_the_run_row(
+    engine: Engine,
+    client: TestClient,
+    inline_starter: None,
+    answer: Callable[[], httpx2.Response],
+    expected: str,
+) -> None:
+    """The row's `error` is the pipeline's own text, and a client reads it back: never the body's."""
+    _company("acme")
+    _active_resume()
+
+    row = _tick(client, {"greenhouse": _board(answer())})
+
+    assert row["status"] == "failed"
+    assert "acme" in row["error"]
+    assert expected in row["error"]  # the typed refusal reached the row, and not a traceback
+    assert PAYLOAD_SENTINEL not in row["error"]
+    assert _rows(Posting) == 0

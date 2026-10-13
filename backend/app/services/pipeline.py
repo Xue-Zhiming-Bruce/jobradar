@@ -14,6 +14,10 @@ ascending `company.id` order:
 - `sources[company.source](company.slug)`, once per company, through the adapter
   the row names and with the slug the row stores -- never a value rebuilt from
   the company's name and never another company's adapter;
+- `_refuse_shrunk_board`, which refuses that list when it names fewer than half
+  the postings the company already has open, and at least
+  `SHRINK_GUARD_MIN_OPEN_POSTINGS` of them are open: a `BoardShrunk`, raised before
+  the ingest, so a refused board closes nothing and counts nothing;
 - `ingest.ingest_postings(company_id, postings)` for the list that board
   returned, so every `posting` row -- the insert, the update in place, the close
   and the reopen -- is #6's, and this module writes no `posting` column;
@@ -54,12 +58,18 @@ Three things are deliberately not done here:
   postings and matches the earlier companies earned stay written and the counts
   keep them, so a failed run costs a retry. Skipping the company or keeping going
   would be a silent miss, and a per-company column is the migration path #21
-  owns. Retries, backoff and an empty-board guard are #54's.
+  owns. Retries and backoff are #54's, and live in `app.sources.base`.
+- a board that lists far fewer postings than the company has open is refused the
+  same way, as `BoardShrunk`: the guard reads `posting.closed_at`, adds no column
+  and stores no history, so a board that genuinely shrank stays refused until the
+  owner deactivates the company (#29). The price -- the companies after it are not
+  fetched and the day's digest does not go out -- is #34's deliberate choice
+  against a silent miss, and the escape is #59.
 """
 
 from collections.abc import Mapping
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app import db
 from app.matching.prefilter import prefilter, record_rejection
@@ -67,12 +77,17 @@ from app.matching.scorer import MatchScorer, record_score
 from app.models import Company, Posting, Run
 from app.services import resume
 from app.services.ingest import ingest_postings
-from app.sources.base import Source, SourceError, SourcePosting
+from app.sources.base import BoardShrunk, Source, SourceError, SourcePosting
 
 # The one failure this module raises of its own, and the message a run row keeps:
 # a run with nothing to score against would otherwise fetch and store postings it
 # can never match.
 NO_ACTIVE_RESUME = "No active resume: upload one before a run can score postings"
+
+# How many of a company's postings have to be open before its board's answer is
+# held to the ratio below. Under this many, a board is free to close everything it
+# has: a company with three postings is a company whose board just changed.
+SHRINK_GUARD_MIN_OPEN_POSTINGS = 4
 
 
 def run_pipeline(
@@ -96,6 +111,7 @@ def run_pipeline(
 
     for company_id, slug, source in _active_companies():
         postings = _fetched(sources[source], slug)
+        _refuse_shrunk_board(company_id, slug, postings)
         _add_counts(run_id, postings_seen=len(postings))
         created_ids = ingest_postings(company_id, postings).created_ids
         for posting_id, posting in _stored_postings(created_ids):
@@ -138,6 +154,37 @@ def _fetched(source: Source, slug: str) -> list[SourcePosting]:
         raise SourceError(
             f"The board for company '{slug}' could not be fetched: {error}"
         ) from error
+
+
+def _refuse_shrunk_board(company_id: int, slug: str, postings: list[SourcePosting]) -> None:
+    """Refuse a board that listed far fewer postings than the company has open.
+
+    A ratio rather than an absolute count, and the walk's rule rather than an
+    adapter's: one adapter sees a payload and cannot know what was stored before
+    it. Fewer than half of the company's open postings, with at least
+    `SHRINK_GUARD_MIN_OPEN_POSTINGS` of them open, is a `BoardShrunk` raised before
+    `ingest_postings` is called -- so a refused board closes nothing, is counted by
+    nobody, and reaches the run's row as a failed board. Integer arithmetic, so
+    exactly half is allowed: a company that closes half its postings is a board's
+    ordinary business. The message names the company's slug and both numbers, and
+    nothing from the payload.
+    """
+    open_count = _open_postings(company_id)
+    if open_count >= SHRINK_GUARD_MIN_OPEN_POSTINGS and len(postings) * 2 < open_count:
+        raise BoardShrunk(
+            f"The board for company '{slug}' listed {len(postings)} postings, but"
+            f" {open_count} of its postings are open: refusing to close them"
+        )
+
+
+def _open_postings(company_id: int) -> int:
+    """How many postings of that company are open, read in one query."""
+    with db.session_scope() as session:
+        return session.scalar(
+            select(func.count())
+            .select_from(Posting)
+            .where(Posting.company_id == company_id, Posting.closed_at.is_(None))
+        )
 
 
 def _stored_postings(created_ids: list[int]) -> list[tuple[int, SourcePosting]]:
