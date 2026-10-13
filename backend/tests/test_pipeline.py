@@ -1864,6 +1864,235 @@ def test_the_next_run_with_room_fetches_the_rest_and_closes_nothing_of_it(
     )
 
 
+# The rotation (#71): a run starts at the least recently attempted company, so the
+# budget that stops the walk leaves a different head for the next run. The order is
+# derived from the `run_company` rows the walk writes -- one per attempt, whatever
+# the answer -- so there is no cursor to keep in step: a company added, deactivated,
+# reactivated or deleted needs nothing reset.
+
+
+def test_a_budget_of_one_rotates_the_head_of_the_walk_each_run(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run 1 asks `acme` and run 2 asks `beta`, not `acme` again, and both rows say 2 left."""
+    for slug in THREE_BOARDS:
+        _company(slug)
+    source = FakeSource(THREE_BOARDS)
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, "1")
+    first = _run()
+
+    run_pipeline(first, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme"]
+    second = _run()
+
+    run_pipeline(second, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme", "beta"]  # the head moved, and `acme` was not asked twice
+    assert _run_row(first)["companies_not_fetched"] == 2
+    assert _run_row(second)["companies_not_fetched"] == 2  # the bound's arithmetic, unmoved
+
+
+def test_five_boards_under_a_budget_of_two_are_all_asked_within_three_runs(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Five runs of two boards each, in the rotation's exact order: nobody starves.
+
+    Never-attempted companies first by `company.id`, then the least recently
+    attempted, so every company is asked at least once in any three consecutive
+    runs -- `ceil(5 / 2)` -- and no company is asked twice before every other has
+    been asked once. It takes the `engine` fixture, so the order is asserted on
+    SQLite and on PostgreSQL: the `NULLS FIRST` the query states explicitly is
+    what puts a never-attempted company first on both, the two engines sort a
+    `NULL` in opposite places by default.
+    """
+    slugs = ("acme", "beta", "globex", "initech", "umbrella")
+    for slug in slugs:
+        _company(slug)
+    source = FakeSource({slug: [_posting(slug)] for slug in slugs})
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, "2")
+    rounds: list[list[str]] = []
+
+    for _ in range(5):
+        source.calls.clear()
+        run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+        rounds.append(list(source.calls))
+
+    assert rounds == [
+        ["acme", "beta"],
+        ["globex", "initech"],
+        ["umbrella", "acme"],
+        ["beta", "globex"],
+        ["initech", "umbrella"],
+    ]
+    for start in range(3):
+        assert {slug for group in rounds[start : start + 3] for slug in group} == set(slugs)
+
+
+def test_a_board_that_failed_counts_as_asked_and_does_not_hold_the_only_unit(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three dead boards under a budget of 1: `acme`, `beta`, `globex`, one per run."""
+    for slug in THREE_BOARDS:
+        _company(slug)
+    source = FakeSource(
+        failing={
+            slug: BoardUnavailable(f"The board '{slug}' refused to answer: HTTP 503")
+            for slug in THREE_BOARDS
+        }
+    )
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, "1")
+    runs = [_run() for _ in range(3)]
+
+    for run_id in runs:
+        run_pipeline(run_id, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme", "beta", "globex"]  # a failure is an attempt, so the walk moves on
+    assert [[entry["slug"] for entry in _company_outcomes(run_id)] for run_id in runs] == [
+        ["acme"],
+        ["beta"],
+        ["globex"],
+    ]  # and each left the `'failed'` row the order is derived from
+
+
+def test_a_board_that_answered_304_counts_as_asked_the_same_way(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three boards answering `304` under a budget of 1 rotate exactly as the failed ones do."""
+    for slug in THREE_BOARDS:
+        _company(slug)
+    source = FakeSource(not_modified=THREE_BOARDS)
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, "1")
+    runs = [_run() for _ in range(3)]
+
+    for run_id in runs:
+        run_pipeline(run_id, sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme", "beta", "globex"]
+    assert [entry["outcome"] for run_id in runs for entry in _company_outcomes(run_id)] == [
+        "not_modified",
+        "not_modified",
+        "not_modified",
+    ]
+
+
+def test_a_company_added_after_earlier_runs_is_asked_first(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It has no `run_company` row, so nothing says it was attempted and the walk starts at it."""
+    _company("acme")
+    _company("beta")
+    source = FakeSource({"acme": [_posting("1")], "beta": [_posting("2")]})
+    _active_resume()
+
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme", "beta"]
+    _company("globex")
+    source.boards["globex"] = [_posting("3")]
+    source.calls.clear()
+
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["globex", "acme", "beta"]  # the newcomer, then the two that were asked
+
+
+def test_a_deactivated_company_leaves_the_walk_and_its_old_rows_disturb_nothing(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `acme` stopped the walk resumes among the rest: `beta` now, `globex` next."""
+    companies = [_company(slug) for slug in THREE_BOARDS]
+    source = FakeSource(THREE_BOARDS)
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, "1")
+
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme"]
+    with db.session_scope() as session:
+        session.get(Company, companies[0]).is_active = False
+
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme", "beta", "globex"]  # its row is no part of the order
+
+
+def test_a_deleted_company_takes_its_attempt_rows_with_it_and_leaves_no_cursor(
+    engine: Engine,
+) -> None:
+    """The cascade takes `globex`'s rows: the two that stay rotate on, and nothing names it."""
+    companies = [_company(slug) for slug in THREE_BOARDS]
+    source = FakeSource(THREE_BOARDS)
+    _active_resume()
+
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme", "beta", "globex"]
+    with db.session_scope() as session:
+        session.delete(session.get(Company, companies[2]))
+
+    assert _rows(RunCompany) == 2  # its own rows went with it
+    source.calls.clear()
+
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme", "beta"]
+
+
+def test_a_company_whose_attempt_rows_are_gone_is_a_never_attempted_company_again(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pruned row, or a database from before revision 0010: nothing says when it was asked."""
+    for slug in THREE_BOARDS:
+        _company(slug)
+    source = FakeSource(THREE_BOARDS)
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, "2")
+
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme", "beta"]
+    with db.session_scope() as session:
+        for row in session.scalars(select(RunCompany)):
+            session.delete(row)
+
+    monkeypatch.delenv(RUN_REQUEST_BUDGET_VARIABLE)
+    source.calls.clear()
+
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme", "beta", "globex"]  # the order a fresh watchlist gets
+
+
+def test_a_budget_of_zero_writes_no_row_so_the_next_run_starts_where_that_one_would(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing was attempted, so nothing moved: the run after it still leads with `beta`."""
+    for slug in THREE_BOARDS:
+        _company(slug)
+    source = FakeSource(THREE_BOARDS)
+    _active_resume()
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, "1")
+
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+    monkeypatch.setenv(RUN_REQUEST_BUDGET_VARIABLE, "0")
+
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme"]  # nothing asked
+    assert _rows(RunCompany) == 1  # and no row written, so the order is what it was
+    monkeypatch.delenv(RUN_REQUEST_BUDGET_VARIABLE)
+
+    run_pipeline(_run(), sources={"greenhouse": source}, scorer=FakeScorer(_result()))
+
+    assert source.calls == ["acme", "beta", "globex", "acme"]
+
+
 def test_the_walk_waits_the_interval_between_calls_and_none_before_the_first(
     engine: Engine, monkeypatch: pytest.MonkeyPatch, waits: list[float]
 ) -> None:
