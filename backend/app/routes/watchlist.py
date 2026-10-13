@@ -70,14 +70,21 @@ class CompanyCreate(BaseModel):
 
     `name` and `slug` are required strings, and a string that carries nothing but
     whitespace is refused as well: the name labels a row a person reads, and the
-    slug is what the source is asked about. `source` is optional and means
-    Greenhouse when it is absent, so a client that sends `{name, slug}` keeps
-    working; a value outside the two known names -- a case variant included -- is
-    a `422` from this model, before any request is made. The values are left
-    exactly as they were sent; normalising the slug is `app.models.Company`'s.
+    slug is what the source is asked about. `name` is refused when it is longer
+    than the 255 characters `company.name` holds or carries a control character
+    (a NUL included) -- the column's own refusals, answered here as the `422`
+    this route owes instead of the `500` PostgreSQL's driver answers. `source` is
+    optional and means Greenhouse when it is absent, so a client that sends
+    `{name, slug}` keeps working; a value outside the two known names -- a case
+    variant included -- is a `422` from this model, before any request is made.
+    The values are left exactly as they were sent; normalising the slug is
+    `app.models.Company`'s.
     """
 
-    name: str
+    # 255 is `company.name`'s own `String(255)`, and the bound belongs here: the
+    # column's refusal is a driver error, which on PostgreSQL is a `500` and not
+    # the `422` this route owes. `test_openapi_contract.py` holds the two together.
+    name: str = Field(max_length=255)
     slug: str
     source: Literal["greenhouse", "lever"] = "greenhouse"
 
@@ -87,6 +94,20 @@ class CompanyCreate(BaseModel):
         """Refuse a blank value as a body this route cannot use, before the source is asked."""
         if not value.strip():
             raise ValueError("must not be blank")
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def _no_control_characters(cls, value: str) -> str:
+        """Refuse a label carrying a control character, a NUL included.
+
+        PostgreSQL stores no NUL in a text column: it answers that write with a
+        driver error, which is a `500` and not the `422` this route owes. No
+        other control character belongs in a label a person reads either, and
+        refusing them here keeps both engines answering a body the same way.
+        """
+        if any(unicodedata.category(char) == "Cc" for char in value):
+            raise ValueError("must not carry a control character")
         return value
 
 

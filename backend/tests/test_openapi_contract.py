@@ -183,6 +183,13 @@ def test_contract_describes_the_watchlist_routes() -> None:
     assert created["requestBody"]["required"] is True
     body_ref = created["requestBody"]["content"]["application/json"]["schema"]["$ref"]
     assert schemas[body_ref.rsplit("/", 1)[-1]]["required"] == ["name", "slug"]
+    # The added name is bounded by the column it lands in -- 255, the length of
+    # `company.name` -- so a longer one is the `422` here and not the `500` the
+    # driver answers on PostgreSQL.
+    assert (
+        schemas[body_ref.rsplit("/", 1)[-1]]["properties"]["name"]["maxLength"]
+        == Company.__table__.c.name.type.length
+    )
     assert set(created["responses"]) == {"201", "404", "409", "422", "502"}
     assert "source" in created["responses"]["409"]["description"]  # the pair, not the slug
     assert "slug" in created["responses"]["409"]["description"]

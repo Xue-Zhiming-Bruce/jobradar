@@ -721,6 +721,66 @@ def test_a_request_carrying_no_body_at_all_is_422(client: TestClient, source: Fa
     assert companies() == []
 
 
+# The bounds the `company.name` column itself imposes: refused by the request
+# model as the `422` this route owes, so both engines answer the same body the
+# same way. PostgreSQL is where the column refuses, so these ask for
+# `engine_client` and run on both engines.
+
+
+def _refusal_messages(response: Response) -> list[str]:
+    """Every message a pydantic `422` answered with, so a case can name the rule it broke."""
+    assert response.status_code == 422, response.text
+    return [error["msg"] for error in response.json()["detail"]]
+
+
+@pytest.mark.parametrize(
+    "length", [256, 300], ids=["one over the column", "far over the column"]
+)
+def test_a_name_the_column_cannot_hold_is_422_and_creates_no_row(
+    engine_client: TestClient, sources: dict[str, FakeSource], length: int
+) -> None:
+    response = engine_client.post("/watchlist", json={"name": "A" * length, "slug": "acme"})
+
+    assert any("at most 255 characters" in message for message in _refusal_messages(response))
+    assert sources["greenhouse"].slugs == []
+    assert sources["lever"].slugs == []
+    assert companies() == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("Ac\x00me", id="a name carrying a NUL"),
+        pytest.param("Ac\x01me", id="a name carrying a control character"),
+    ],
+)
+def test_a_name_carrying_a_control_character_is_422_and_creates_no_row(
+    engine_client: TestClient, sources: dict[str, FakeSource], name: str
+) -> None:
+    response = engine_client.post("/watchlist", json={"name": name, "slug": "acme"})
+
+    assert any(
+        "must not carry a control character" in message for message in _refusal_messages(response)
+    )
+    assert sources["greenhouse"].slugs == []
+    assert sources["lever"].slugs == []
+    assert companies() == []
+
+
+def test_an_added_name_at_the_column_s_length_is_accepted_and_stored_as_sent(
+    engine_client: TestClient, sources: dict[str, FakeSource]
+) -> None:
+    """255 characters is what `company.name` holds: PostgreSQL stores it, 256 does not."""
+    name = "A" * 255
+
+    response = engine_client.post("/watchlist", json={"name": name, "slug": "acme"})
+
+    assert response.status_code == 201, response.text
+    assert response.json()["name"] == name
+    assert [row["name"] for row in companies()] == [name]
+    assert sources["greenhouse"].slugs == ["acme"]
+
+
 # DELETE: exactly that company, and a clear 404 when there is none.
 
 

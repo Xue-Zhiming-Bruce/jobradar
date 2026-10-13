@@ -653,6 +653,7 @@
         "properties": {
           "name": {
             "type": "string",
+            "maxLength": 255,
             "title": "Name"
           },
           "slug": {
@@ -675,7 +676,7 @@
           "slug"
         ],
         "title": "CompanyCreate",
-        "description": "Body of an addition: the name to show, the board slug to poll, and its source.\n\n`name` and `slug` are required strings, and a string that carries nothing but\nwhitespace is refused as well: the name labels a row a person reads, and the\nslug is what the source is asked about. `source` is optional and means\nGreenhouse when it is absent, so a client that sends `{name, slug}` keeps\nworking; a value outside the two known names -- a case variant included -- is\na `422` from this model, before any request is made. The values are left\nexactly as they were sent; normalising the slug is `app.models.Company`'s."
+        "description": "Body of an addition: the name to show, the board slug to poll, and its source.\n\n`name` and `slug` are required strings, and a string that carries nothing but\nwhitespace is refused as well: the name labels a row a person reads, and the\nslug is what the source is asked about. `name` is refused when it is longer\nthan the 255 characters `company.name` holds or carries a control character\n(a NUL included) -- the column's own refusals, answered here as the `422`\nthis route owes instead of the `500` PostgreSQL's driver answers. `source` is\noptional and means Greenhouse when it is absent, so a client that sends\n`{name, slug}` keeps working; a value outside the two known names -- a case\nvariant included -- is a `422` from this model, before any request is made.\nThe values are left exactly as they were sent; normalising the slug is\n`app.models.Company`'s."
       },
       "CompanyUpdate": {
         "properties": {
