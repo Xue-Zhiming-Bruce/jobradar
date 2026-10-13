@@ -47,6 +47,7 @@ from xml.etree import ElementTree
 from PIL import Image
 from pypdf import PdfReader
 from sqlalchemy import select, update
+from sqlalchemy.orm import load_only
 
 from app import db
 from app.models import Resume
@@ -364,14 +365,20 @@ def resume_row(resume_id: int) -> Resume | None:
     One `session_scope()` per call -- one unit of work, committed and closed
     before this returns -- and one row: `GET /resume/{id}/file` reads the three
     values its answer is built from, the filename and media type its headers
-    carry and the path whose file is served. The row is detached before the
-    commit expires it, the way `resume_rows` detaches its own and for the same
-    reason: the answer is built after this session is closed. The row carries
-    the resume's text like every other row does, so nothing here logs it or
-    returns it to a client.
+    carry and the path whose file is served. Only those columns are loaded: a
+    resume's text is user data, and a read that does not need it must not select
+    it (SQLAlchemy logs a statement's rows and parameters at DEBUG). The row is
+    detached before the commit expires it, the way `resume_rows` detaches its own
+    and for the same reason: the answer is built after this session is closed.
     """
     with db.session_scope() as session:
-        row = session.get(Resume, resume_id)
+        row = session.get(
+            Resume,
+            resume_id,
+            options=[
+                load_only(Resume.id, Resume.filename, Resume.content_type, Resume.stored_path)
+            ],
+        )
         if row is not None:
             session.expunge(row)
         return row
@@ -383,14 +390,26 @@ def resume_rows() -> list[Resume]:
     One `session_scope()` per call, and the order is `uploaded_at` descending
     with the id descending under it -- the shape `app.routes.matches` lists with:
     two uploads committed in the same instant still have one order, newest row
-    first. The rows are detached before the commit, which would otherwise expire
-    every attribute: the caller renders them, and a renderer that reads an
-    expired row outside its session gets an error instead of a value.
+    first. Only the five columns the list renders are loaded -- a resume's text
+    is user data and this read does not need it -- and the rows are detached
+    before the commit, which would otherwise expire every attribute: the caller
+    renders them, and a renderer that reads an expired row outside its session
+    gets an error instead of a value.
     """
     with db.session_scope() as session:
         rows = list(
             session.scalars(
-                select(Resume).order_by(Resume.uploaded_at.desc(), Resume.id.desc())
+                select(Resume)
+                .options(
+                    load_only(
+                        Resume.id,
+                        Resume.filename,
+                        Resume.content_type,
+                        Resume.uploaded_at,
+                        Resume.is_active,
+                    )
+                )
+                .order_by(Resume.uploaded_at.desc(), Resume.id.desc())
             )
         )
         session.expunge_all()
@@ -412,7 +431,19 @@ def activate_resume(resume_id: int) -> Resume | None:
     `resume_rows` gives: its renderer reads it outside this session.
     """
     with db.session_scope() as session:
-        target = session.get(Resume, resume_id)
+        target = session.get(
+            Resume,
+            resume_id,
+            options=[
+                load_only(
+                    Resume.id,
+                    Resume.filename,
+                    Resume.content_type,
+                    Resume.uploaded_at,
+                    Resume.is_active,
+                )
+            ],
+        )
         if target is None:
             return None
         session.execute(update(Resume).where(Resume.is_active.is_(True)).values(is_active=False))
@@ -433,7 +464,9 @@ def delete_resume(resume_id: int) -> bool:
     all, which is the state `pipeline.NO_ACTIVE_RESUME` already covers.
     """
     with db.session_scope() as session:
-        resume = session.get(Resume, resume_id)
+        resume = session.get(
+            Resume, resume_id, options=[load_only(Resume.id, Resume.stored_path)]
+        )
         if resume is None:
             return False
         _remove_stored_file(resume.stored_path)

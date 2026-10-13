@@ -392,9 +392,13 @@ def test_a_delete_whose_unlink_fails_leaves_the_row_and_its_text(
         with pytest.raises(OSError):
             resume.delete_resume(stored)
 
-    assert [(row.id, row.text) for row in resume.resume_rows()] == [
-        (stored, RESUME_TEXT_SENTINEL)
+    # The list no longer carries a resume's text (it is user data, and the list
+    # does not need it), so the stored text is read through the one reader that
+    # does: the assertion is unchanged, only the handle is.
+    assert [(row.id, row.filename) for row in resume.resume_rows()] == [
+        (stored, "resume.txt")
     ]
+    assert resume.active_resume_text() == RESUME_TEXT_SENTINEL
     assert path.is_file()  # and nothing was removed from disk either
 
     path.unlink()  # the file is gone by the retry, which the missing-file case above covers
