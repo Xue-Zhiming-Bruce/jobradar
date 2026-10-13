@@ -7,6 +7,7 @@ import {
   getRun,
   listMatches,
   listWatchlist,
+  rematch,
   removeCompany,
   setMatchState,
   startTick,
@@ -94,6 +95,7 @@ describe('the wire is decoded into the UI', () => {
           postings_seen: 12,
           matches_created: 4,
           companies_not_fetched: 3,
+          postings_not_rematched: 2,
           company_outcomes: [
             { company_id: 1, slug: 'acme', outcome: 'fetched', error: null },
             {
@@ -116,6 +118,7 @@ describe('the wire is decoded into the UI', () => {
       postingsSeen: 12,
       matchesCreated: 4,
       companiesNotFetched: 3,
+      postingsNotRematched: 2,
       companyOutcomes: [
         { companyId: 1, slug: 'acme', outcome: 'fetched', error: null },
         {
@@ -271,6 +274,7 @@ describe('the wire is decoded into the UI', () => {
             postings_seen: 0,
             matches_created: 0,
             companies_not_fetched: null,
+            postings_not_rematched: null,
             company_outcomes: [],
           },
           { status: 202 },
@@ -287,9 +291,50 @@ describe('the wire is decoded into the UI', () => {
       postingsSeen: 0,
       matchesCreated: 0,
       companiesNotFetched: null,
+      postingsNotRematched: null,
       companyOutcomes: [],
     })
     expect(requests).toHaveLength(1)
+    expect(requests[0].headers.has('x-tick-secret')).toBe(false)
+  })
+
+  it('rematch posts to /internal/rematch, sends no secret, and decodes the new field', async () => {
+    const requests: Request[] = []
+    server.use(
+      http.post('/internal/rematch', ({ request }) => {
+        requests.push(request)
+        return HttpResponse.json(
+          {
+            id: 9,
+            status: 'running',
+            started_at: '2026-05-01T10:00:00+00:00',
+            finished_at: null,
+            error: null,
+            postings_seen: 0,
+            matches_created: 0,
+            companies_not_fetched: null,
+            postings_not_rematched: 7,
+            company_outcomes: [],
+          },
+          { status: 202 },
+        )
+      }),
+    )
+
+    expect(await rematch()).toEqual({
+      id: 9,
+      status: 'running',
+      started_at: '2026-05-01T10:00:00+00:00',
+      finished_at: null,
+      error: null,
+      postingsSeen: 0,
+      matchesCreated: 0,
+      companiesNotFetched: null,
+      postingsNotRematched: 7,
+      companyOutcomes: [],
+    })
+    expect(requests).toHaveLength(1)
+    expect(new URL(requests[0].url).pathname).toBe('/internal/rematch')
     expect(requests[0].headers.has('x-tick-secret')).toBe(false)
   })
 })
@@ -359,6 +404,7 @@ describe('a 204 is empty and a non-2xx is an error', () => {
     ['listMatches', (): Promise<unknown> => listMatches()],
     ['setMatchState', (): Promise<unknown> => setMatchState(9, 'saved')],
     ['startTick', (): Promise<unknown> => startTick()],
+    ['rematch', (): Promise<unknown> => rematch()],
     ['getRun', (): Promise<unknown> => getRun(9)],
   ])('%s rejects rather than returning the error body as data', async (_name, call) => {
     server.use(
@@ -368,6 +414,7 @@ describe('a 204 is empty and a non-2xx is an error', () => {
       http.all('/matches', rejecting(500)),
       http.all('/matches/:id', rejecting(500)),
       http.all('/internal/tick', rejecting(500)),
+      http.all('/internal/rematch', rejecting(500)),
       http.all('/runs/:id', rejecting(500)),
     )
 
