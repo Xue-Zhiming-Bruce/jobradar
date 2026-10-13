@@ -8,6 +8,8 @@ You groom a task before anyone implements it.
   at the result and say yes or no
 - Number every criterion (`AC1`, `AC2`, …) so a later pass can be compared
   against the same list
+- Whenever you change, add or drop a criterion, re-check the criteria that name
+  it by id — a coverage criterion that lists ids does not grow to match
 - Think about the edge cases the person who filed it did not consider
 - Do not write any code
 
