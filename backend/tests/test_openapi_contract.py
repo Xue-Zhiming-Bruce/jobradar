@@ -223,7 +223,7 @@ def test_contract_describes_the_matches_a_client_reads_and_updates() -> None:
     updated = contract["paths"]["/matches/{id}"]["patch"]
 
     # One shape for a match wherever a client meets one: the list's items are the
-    # body the update answers with, and that body is the row's own nine fields.
+    # body the update answers with, and that body is the row's own ten fields.
     array_schema = listed["responses"]["200"]["content"]["application/json"]["schema"]
     assert array_schema["type"] == "array"
     match_ref = array_schema["items"]["$ref"]
@@ -237,6 +237,7 @@ def test_contract_describes_the_matches_a_client_reads_and_updates() -> None:
         "reason",
         "gaps",
         "state",
+        "outcome",
         "created_at",
     }
     assert summary["required"] == list(summary["properties"])

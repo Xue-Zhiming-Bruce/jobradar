@@ -632,6 +632,10 @@
             "type": "string",
             "title": "State"
           },
+          "outcome": {
+            "type": "string",
+            "title": "Outcome"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -648,10 +652,11 @@
           "reason",
           "gaps",
           "state",
+          "outcome",
           "created_at"
         ],
         "title": "MatchSummary",
-        "description": "One `match` row as this API renders it: the row, plus the names it points at.\n\nThe same body both routes carry, so a client reads one shape for a match\nwherever it meets one. Nine fields and no tenth: `notified_at` stays on the\nrow, because when an alert went out is the digest's business and not the\nscreen's, and nothing here is computed -- `score`, `reason` and `state` are\nthe row's own, `gaps` is the list #8 stored as JSON text, and `id` is what\n`PATCH /matches/{id}` takes."
+        "description": "One `match` row as this API renders it: the row, plus the names it points at.\n\nThe same body both routes carry, so a client reads one shape for a match\nwherever it meets one. Ten fields and no eleventh: `notified_at` stays on the\nrow, because when an alert went out is the digest's business and not the\nscreen's, and nothing here is computed -- `score`, `reason`, `state` and\n`outcome` are the row's own, `gaps` is the list #8 stored as JSON text, and\n`id` is what `PATCH /matches/{id}` takes."
       },
       "MatchVerdict": {
         "properties": {

@@ -7,16 +7,18 @@ behind and `git status --short` stays empty.
 
 What the read must not do is as much the point as what it says: it applies no
 filter, so a prefiltered and a not-scored row are in it exactly as they were
-stored (`_is_a_non_score` is #10's rule, and whether #12's screen hides them is
-#12's decision), it decodes the `gaps` JSON text rather than serving the column,
-and it answers a row no writer in this app produces with `[]` instead of a `500`.
+stored, each carrying the row's own `outcome` -- keeping them out of an email is
+#10's rule (`digest` selects `outcome = 'scored'`), and whether #12's screen hides
+them is #12's decision, taken now on the column rather than on the reason's text
+-- it decodes the `gaps` JSON text rather than serving the column, and it answers
+a row no writer in this app produces with `[]` instead of a `500`.
 What the write must not do is move anything but `state`: the snapshot cases below
-compare `id`, `score`, `reason`, `gaps`, `created_at` and `notified_at` across a
-verdict, each of them carrying a distinctive non-default value first, so a write
-that touched any of them fails here rather than quietly re-opening or re-alerting
-a match. The matches are stored through the app's own writer, `record_score`,
-where the row's shape matters; the rest are seeded straight through the app's own
-session, and every stored value is synthetic.
+compare `id`, `score`, `reason`, `gaps`, `outcome`, `created_at` and `notified_at`
+across a verdict, each of them carrying a distinctive non-default value first, so
+a write that touched any of them fails here rather than quietly re-opening or
+re-alerting a match. The matches are stored through the app's own writer,
+`record_score`, where the row's shape matters; the rest are seeded straight
+through the app's own session, and every stored value is synthetic.
 """
 
 import json
@@ -40,7 +42,7 @@ from app.models import Company, Match, Posting, Resume
 from app.routes.internal import TICK_SECRET_VARIABLE
 from app.routes.matches import MatchSummary
 
-# The nine fields of a match, and therefore the whole body both routes may answer
+# The ten fields of a match, and therefore the whole body both routes may answer
 # with. A field that is not here is a field the route invented.
 MATCH_FIELDS = {
     "id",
@@ -51,12 +53,14 @@ MATCH_FIELDS = {
     "reason",
     "gaps",
     "state",
+    "outcome",
     "created_at",
 }
 
 # The columns a verdict must leave exactly as they were. `state` is deliberately
-# not one of them: it is the one column the endpoint writes.
-UNAFFECTED_COLUMNS = ("id", "score", "reason", "gaps", "created_at", "notified_at")
+# not one of them: it is the one column the endpoint writes. `outcome` is one of
+# them, and the case that writes a not-scored row gives it a distinctive value.
+UNAFFECTED_COLUMNS = ("id", "score", "reason", "gaps", "outcome", "created_at", "notified_at")
 
 # Values that must not reach the wire: the tick's shared secret, a resume's text
 # and the database URL. The resume text is really stored by that test, so its
@@ -119,13 +123,15 @@ def seed_match(
     reason: str = REASON,
     stored_gaps: str | None = "[]",
     state: str = "new",
+    outcome: str = "scored",
     created_at: datetime | None = None,
     notified_at: datetime | None = None,
 ) -> int:
     """One `match` row written straight through the app's own session, and its id.
 
     `stored_gaps` is the raw column, so a case can put text there that no writer
-    in this app produces and prove the read survives it.
+    in this app produces and prove the read survives it. `outcome` is the row's
+    own marker, defaulted to the value a scored row carries.
     """
     with db.session_scope() as session:
         match = Match(
@@ -134,6 +140,7 @@ def seed_match(
             reason=reason,
             gaps=stored_gaps,
             state=state,
+            outcome=outcome,
             created_at=created_at,
             notified_at=notified_at,
         )
@@ -187,13 +194,14 @@ def row_values(match_id: int) -> dict[str, Any]:
             "reason": match.reason,
             "gaps": json.loads(match.gaps) if match.gaps else [],
             "state": match.state,
+            "outcome": match.outcome,
             "created_at": match.created_at,
             "notified_at": match.notified_at,
         }
 
 
 def snapshot(match_id: int) -> dict[str, Any]:
-    """The six columns a verdict must leave alone, read from the row itself."""
+    """The seven columns a verdict must leave alone, read from the row itself."""
     values = row_values(match_id)
     return {column: values[column] for column in UNAFFECTED_COLUMNS}
 
@@ -235,7 +243,7 @@ def test_an_empty_match_table_reads_as_an_empty_list(client: TestClient) -> None
 
 
 def test_every_field_of_the_body_is_a_stored_value(client: TestClient) -> None:
-    """The nine fields come from the three rows, and from nothing else."""
+    """The ten fields come from the three rows, and from nothing else."""
     company_id = seed_company()
     posting_id = seed_posting(company_id)
     record_score(posting_id, MatchResult(score=87, reason=REASON, gaps=["Rust", "Kubernetes"]))
@@ -254,6 +262,7 @@ def test_every_field_of_the_body_is_a_stored_value(client: TestClient) -> None:
     assert body["reason"] == REASON == stored["reason"]
     assert body["gaps"] == ["Rust", "Kubernetes"] == stored["gaps"]
     assert body["state"] == "saved" == stored["state"]
+    assert body["outcome"] == "scored" == stored["outcome"]
     assert datetime.fromisoformat(body["created_at"]) == EARLY == stored["created_at"]
 
     # The id in that body is the one the verdict route takes.
@@ -301,6 +310,7 @@ def test_the_list_is_newest_first_and_the_id_breaks_a_tie(client: TestClient) ->
 def test_a_prefiltered_and_a_not_scored_row_are_listed_exactly_as_stored(
     client: TestClient,
 ) -> None:
+    """The read tells them apart by the row's `outcome`, without parsing the reason."""
     company_id = seed_company()
     rejection = REJECTION_REASON_PREFIX + "title term 'intern'"
     not_scored = NOT_SCORED_PREFIX + "the model call failed"
@@ -308,6 +318,7 @@ def test_a_prefiltered_and_a_not_scored_row_are_listed_exactly_as_stored(
         seed_posting(company_id, external_id="1"),
         score=0,
         reason=rejection,
+        outcome="rejected",
         created_at=EARLY,
     )
     seed_match(
@@ -320,13 +331,14 @@ def test_a_prefiltered_and_a_not_scored_row_are_listed_exactly_as_stored(
         seed_posting(company_id, external_id="3"),
         score=0,
         reason=not_scored,
+        outcome="not_scored",
         created_at=LATE,
     )
 
-    assert [(body["score"], body["reason"]) for body in matches(client)] == [
-        (0, not_scored),
-        (88, REASON),
-        (0, rejection),
+    assert [(body["score"], body["outcome"], body["reason"]) for body in matches(client)] == [
+        (0, "not_scored", not_scored),
+        (88, "scored", REASON),
+        (0, "rejected", rejection),
     ]
 
 
@@ -429,6 +441,31 @@ def test_the_same_verdict_twice_is_one_write_s_worth_of_change(client: TestClien
     assert snapshot(match_id) == before
     assert match_count() == 1, "a second verdict must not add a match row"
     assert match_id_of(posting_id) == match_id
+
+
+def test_a_verdict_leaves_a_not_scored_row_and_its_outcome_alone(client: TestClient) -> None:
+    """`outcome` is the row's own value, and a verdict writes `state` and nothing else.
+
+    The row is written by the real writer, so the value the read serves is #8's
+    own reading of its result rather than a shape this test invented, and it is
+    distinctive: the snapshot below cannot pass by both sides being `'scored'`.
+    """
+    posting_id = seed_posting(seed_company())
+    record_score(
+        posting_id,
+        MatchResult(score=0, reason=NOT_SCORED_PREFIX + "the model call failed", gaps=[]),
+    )
+    match_id = match_id_of(posting_id)
+    before = snapshot(match_id)
+    assert before["outcome"] == "not_scored"
+
+    responded = verdict(client, match_id, "dismissed")
+
+    assert responded.status_code == 200
+    assert responded.json()["state"] == "dismissed"
+    assert responded.json()["outcome"] == "not_scored"
+    assert matches(client)[0]["outcome"] == "not_scored"
+    assert snapshot(match_id) == before
 
 
 def test_a_verdict_on_an_id_with_no_match_is_404_and_writes_nothing(client: TestClient) -> None:

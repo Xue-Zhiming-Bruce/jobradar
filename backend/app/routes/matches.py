@@ -3,28 +3,29 @@
 `GET /matches` is the read #12's matches screen and #17's "list matches" tool both
 need: every `match` row, unfiltered, newest first, rendered as the `MatchSummary`
 below -- the company's name, the posting's title and url, and the match's own
-score, reason, gaps, state and `created_at`. `PATCH /matches/{id}` records the
-owner's `saved` or `dismissed` verdict on one of them and answers with the body
-the read answers with, so the two routes cannot drift apart: one `MatchSummary`
-model and one `match_summary()` renderer, the `RunSummary` + `run_summary`
-pattern of `app.routes.runs`.
+score, outcome, reason, gaps, state and `created_at`. `PATCH /matches/{id}`
+records the owner's `saved` or `dismissed` verdict on one of them and answers with
+the body the read answers with, so the two routes cannot drift apart: one
+`MatchSummary` model and one `match_summary()` renderer, the `RunSummary` +
+`run_summary` pattern of `app.routes.runs`.
 
 Three things decide the shape of this module. The list is every row and applies
-no filter: a prefiltered posting (`score = 0`, a reason beginning
-`prefilter.REJECTION_REASON_PREFIX`) and a not-scored one (`scorer.NOT_SCORED_PREFIX`)
-are in it exactly as they were stored, because keeping them out of an email is
-#10's rule (`digest._is_a_non_score`) and whether the screen hides them is #12's
-decision -- taken on the body it now has. `gaps` is stored as JSON text (#8's
-`record_score` writes `json.dumps(result.gaps)`), so it is decoded here and a row
-no writer in this app produces -- NULL, text that is not JSON, JSON that is not a
-list of strings -- renders `[]` rather than the raw column or a `500`: a read
-endpoint stays up on a row it does not recognise. And the write is the owner's
-verdict alone: the request model accepts `saved` and `dismissed` and nothing
-else, so `"new"` is refused `422` -- "new again" is not in `_docs/plan.md` -- and
+no filter: a prefiltered posting and a not-scored one are in it exactly as they
+were stored, and each body carries the row's own `outcome` (#30's column), so
+#12 can hide or label one without parsing `reason` -- keeping a row out of an
+email is #10's rule (`digest` selects `outcome = 'scored'`) and whether the
+screen hides them is #12's decision, taken on this body. `gaps` is stored as
+JSON text (#8's `record_score` writes `json.dumps(result.gaps)`), so it is decoded
+here and a row no writer in this app produces -- NULL, text that is not JSON,
+JSON that is not a list of strings -- renders `[]` rather than the raw column or
+a `500`: a read endpoint stays up on a row it does not recognise. And the write
+is the owner's verdict alone: the request model accepts `saved` and `dismissed`
+and nothing else, so `"new"` is refused `422` -- "new again" is not in
+`_docs/plan.md` -- and
 no refused value reaches the `state` column, whose own vocabulary
 (`new`/`saved`/`dismissed`, `ck_match_state_values`) is unchanged. The write
-touches `state` and nothing else: `notified_at` is left alone, so this endpoint
-cannot change which matches #10's digest alerts on.
+touches `state` and nothing else: `notified_at` and `outcome` are left alone, so
+this endpoint cannot change which matches #10's digest alerts on.
 
 No secret is required, because browsing one's own matches is what the browser
 does and this app has no accounts (`_docs/plan.md`). The body carries what the
@@ -50,11 +51,11 @@ class MatchSummary(BaseModel):
     """One `match` row as this API renders it: the row, plus the names it points at.
 
     The same body both routes carry, so a client reads one shape for a match
-    wherever it meets one. Nine fields and no tenth: `notified_at` stays on the
+    wherever it meets one. Ten fields and no eleventh: `notified_at` stays on the
     row, because when an alert went out is the digest's business and not the
-    screen's, and nothing here is computed -- `score`, `reason` and `state` are
-    the row's own, `gaps` is the list #8 stored as JSON text, and `id` is what
-    `PATCH /matches/{id}` takes.
+    screen's, and nothing here is computed -- `score`, `reason`, `state` and
+    `outcome` are the row's own, `gaps` is the list #8 stored as JSON text, and
+    `id` is what `PATCH /matches/{id}` takes.
     """
 
     id: int
@@ -65,6 +66,10 @@ class MatchSummary(BaseModel):
     reason: str
     gaps: list[str]
     state: str
+    # The row's own marker of which situation it records -- `'scored'`,
+    # `'rejected'` or `'not_scored'` -- rendered verbatim: #12 hides or labels a
+    # non-scored row on this field rather than by parsing `reason`.
+    outcome: str
     created_at: datetime
 
 
@@ -112,6 +117,7 @@ def match_summary(match: Match) -> MatchSummary:
         reason=match.reason,
         gaps=_gaps(match.gaps),
         state=match.state,
+        outcome=match.outcome,
         created_at=match.created_at,
     )
 

@@ -12,7 +12,7 @@ foreign keys -- are pinned here as declared, and refused by the engines in
 `tests/test_engine_parity.py`.
 """
 
-import re
+import ast
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -192,17 +192,35 @@ def test_no_app_module_names_a_dialect() -> None:
     assert naming_a_dialect == []
 
 
-def test_the_two_writers_are_the_only_modules_that_assign_an_outcome() -> None:
-    """One writer per state: only the prefilter and the scorer decide an outcome.
+def _assigns_the_outcome_column(source: str) -> bool:
+    """Whether this module writes a `match` row's outcome: `row.outcome = ...` or `Match(outcome=...)`.
 
-    `outcome=` and `.outcome =` are assignments; a module that merely compares
-    the column -- `Match.outcome != 'scored'`, say -- is neither, which keeps
-    this a test about who writes the marker rather than about who mentions it.
+    Those two spellings and no others, because the fact is who *writes* the
+    column: rendering it into a response (`MatchSummary(outcome=...)`), comparing
+    it (`Match.outcome != 'scored'`) and declaring it in the model are none of
+    them writes.
     """
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Match":
+            if any(keyword.arg == "outcome" for keyword in node.keywords):
+                return True
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            targets = []
+        if any(getattr(target, "attr", None) == "outcome" for target in targets):
+            return True
+    return False
+
+
+def test_the_two_writers_are_the_only_modules_that_assign_an_outcome() -> None:
+    """One writer per state: only the prefilter and the scorer decide an outcome."""
     assigning = sorted(
         path.relative_to(APP_ROOT).as_posix()
         for path in APP_ROOT.rglob("*.py")
-        if re.search(r"\boutcome\s*=(?!=)", path.read_text(encoding="utf-8"))
+        if _assigns_the_outcome_column(path.read_text(encoding="utf-8"))
     )
 
     assert assigning == ["matching/prefilter.py", "matching/scorer.py"]

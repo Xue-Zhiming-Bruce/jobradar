@@ -39,7 +39,8 @@ export const runSucceeded = {
 // One row per state, newest first, so a test can tell all three treatments apart:
 // a `new` row is worth a verdict, a `saved` or `dismissed` one already has it.
 // The score-0 row is a real row the screen shows like any other -- `#12` filters
-// neither on score nor on the reason's prefix.
+// neither on score nor on the reason's prefix. `outcome` is the row's own marker,
+// which the contract requires since `#30`: the score-0 row is a rejection.
 export const matches = [
   {
     id: 1,
@@ -50,6 +51,7 @@ export const matches = [
     reason: 'Python and FastAPI line up with this role',
     gaps: ['No Kubernetes', 'No Go'],
     state: 'new',
+    outcome: 'scored',
     created_at: '2026-05-03T09:00:00+00:00',
   },
   {
@@ -61,6 +63,7 @@ export const matches = [
     reason: 'ETL work and Postgres match the listing',
     gaps: ['No Spark'],
     state: 'saved',
+    outcome: 'scored',
     created_at: '2026-05-02T09:00:00+00:00',
   },
   {
@@ -72,6 +75,7 @@ export const matches = [
     reason: 'On-call overlap, nothing else',
     gaps: [],
     state: 'dismissed',
+    outcome: 'scored',
     created_at: '2026-05-01T09:00:00+00:00',
   },
   {
@@ -83,6 +87,7 @@ export const matches = [
     reason: 'Prefiltered out: senior title',
     gaps: [],
     state: 'new',
+    outcome: 'rejected',
     created_at: '2026-04-30T09:00:00+00:00',
   },
 ]
