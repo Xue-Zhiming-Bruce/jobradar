@@ -58,6 +58,7 @@ from app.matching.scorer import (
     FakeScorer,
     MatchResult,
     ScorerConfigurationError,
+    max_postings,
 )
 from app.models import Company, Match, Posting, Run, RunCompany
 from app.routes.internal import TICK_SECRET_HEADER, get_pipeline, get_rematch, get_run_starter
@@ -72,6 +73,8 @@ from app.services.pipeline import (
     RUN_REQUEST_BUDGET_VARIABLE,
     RUN_REQUEST_INTERVAL_SECONDS_VARIABLE,
     _postings_to_rematch,
+    _record_not_rematched,
+    _rematch_cursor,
     rematch_stored_postings,
     run_pipeline,
 )
@@ -134,6 +137,7 @@ RUN_COLUMNS = (
     "matches_created",
     "companies_not_fetched",
     "postings_not_rematched",
+    "rematch_cursor",
 )
 MATCH_COLUMNS = (
     "id",
@@ -2410,6 +2414,176 @@ def test_the_candidate_read_has_no_company_filter(engine: Engine) -> None:
     candidates = [posting_id for posting_id, _ in _postings_to_rematch()]
 
     assert open_postings in candidates
+
+
+def test_the_candidate_read_starts_at_the_cursor_and_drops_every_id_below_it(
+    engine: Engine,
+) -> None:
+    """A cursor is a start position: the same list, minus every id below it."""
+    company = _company("acme")
+    posting_ids = [_stored_posting(company, external_id=name) for name in ("a", "b", "c", "d")]
+
+    assert [posting_id for posting_id, _ in _postings_to_rematch()] == posting_ids
+    assert [
+        posting_id for posting_id, _ in _postings_to_rematch(posting_ids[2])
+    ] == posting_ids[2:]
+    assert [
+        posting_id for posting_id, _ in _postings_to_rematch(posting_ids[0])
+    ] == posting_ids  # the oldest id is the same as no cursor at all
+    assert _postings_to_rematch(posting_ids[-1] + 1) == []  # past the last id, nothing is left
+
+
+def test_the_cursor_is_the_newest_re_match_and_no_tick_or_running_row(engine: Engine) -> None:
+    """The newest row whose `postings_not_rematched` is not NULL holds the position.
+
+    The marker is what a re-match writes and a tick leaves NULL, so one statement --
+    `run.id` descending, one row -- passes over a tick and the press in progress,
+    which is claimed with both columns NULL. A completed pass clears the position.
+    """
+    _run()  # the press in progress, before any re-match has run
+    assert _rematch_cursor() is None
+
+    older = _run()
+    _record_not_rematched(older, 2, cursor=7)
+    assert _rematch_cursor() == 7
+
+    _run()  # a tick writes no side of either column, and is passed over
+    assert _rematch_cursor() == 7
+
+    newest = _run()
+    _record_not_rematched(newest, 1, cursor=3)  # a later press, an earlier position (the wrap)
+    assert _rematch_cursor() == 3  # the newest re-match wins, not the greatest cursor
+
+    completed = _run()
+    _record_not_rematched(completed, 0, cursor=None)  # it decided every candidate it found
+    assert _rematch_cursor() is None
+
+
+def test_a_cap_of_zero_leaves_the_cursor_at_the_first_candidate(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`SCORER_MAX_POSTINGS=0` decides nothing, so the press cannot advance until the lever moves."""
+    monkeypatch.setenv(SCORER_MAX_POSTINGS, "0")
+    company = _company("acme")
+    first = _stored_posting(company, external_id="a")
+    _stored_posting(company, external_id="b")
+    _active_resume()
+    run = _run()
+
+    rematch_stored_postings(run, scorer=FakeScorer(_result()))
+
+    row = _run_row(run)
+    assert (row["matches_created"], row["postings_not_rematched"]) == (0, 2)
+    assert row["rematch_cursor"] == first  # nothing was decided, so the start does not move
+
+
+def test_a_cap_smaller_than_the_set_reaches_every_posting_in_ceil_n_over_cap_presses(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#76's promise: a capped press resumes, so `ceil(n / cap)` presses sweep every posting.
+
+    Five postings and the constant `max_postings()` cap: the presses decide consecutive
+    chunks with the cursor at the next chunk's head, the last press leaves NULL, and the
+    press after it wraps to the oldest -- so no posting is decided twice within the window.
+    """
+    monkeypatch.setenv(SCORER_MAX_POSTINGS, "2")
+    cap = max_postings()
+    company = _company("acme")
+    posting_ids = [_stored_posting(company, external_id=f"p{index}") for index in range(5)]
+    by_external = {f"p{index}": posting_id for index, posting_id in enumerate(posting_ids)}
+    _active_resume()
+    presses = -(-len(posting_ids) // cap)  # ceil(n / cap)
+
+    decided: list[list[int]] = []
+    cursors: list[int | None] = []
+    counts: list[int] = []
+    for _ in range(presses):
+        scorer = FakeScorer(_result())
+        run = _run()
+        rematch_stored_postings(run, scorer=scorer)
+        decided.append([by_external[call[0].external_id] for call in scorer.calls])
+        row = _run_row(run)
+        assert row["matches_created"] == len(scorer.calls)
+        cursors.append(row["rematch_cursor"])
+        counts.append(row["postings_not_rematched"])
+
+    assert decided == [posting_ids[start : start + cap] for start in range(0, len(posting_ids), cap)]
+    assert [posting_id for chunk in decided for posting_id in chunk] == posting_ids  # none twice
+    assert cursors == [posting_ids[cap::cap][index] for index in range(presses - 1)] + [None]
+    assert counts == [len(posting_ids) - cap * press for press in range(1, presses)] + [0]
+
+    wrapping = FakeScorer(_result())
+    wrap_run = _run()
+    rematch_stored_postings(wrap_run, scorer=wrapping)
+    assert [call[0].external_id for call in wrapping.calls] == ["p0", "p1"]  # the wrap
+
+
+def test_a_rule_changed_between_presses_reaches_the_whole_set_through_the_wrap(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A prefilter rule set after press 1 is applied to ids 1-2 by the press after the wrap."""
+    monkeypatch.setenv(SCORER_MAX_POSTINGS, "2")
+    company = _company("acme")
+    posting_ids = [
+        _stored_posting(company, external_id=f"p{index}", title="Backend Engineer")
+        for index in range(4)
+    ]
+    _active_resume()
+
+    first = FakeScorer(_result())
+    first_run = _run()
+    rematch_stored_postings(first_run, scorer=first)
+    assert [call[0].external_id for call in first.calls] == ["p0", "p1"]
+    assert _run_row(first_run)["rematch_cursor"] == posting_ids[2]
+
+    monkeypatch.setenv(PREFILTER_SENIORITY_TERMS, "engineer")  # a rule changed between presses
+
+    second = FakeScorer(_result())
+    second_run = _run()
+    rematch_stored_postings(second_run, scorer=second)
+    assert second.calls == []  # the changed rule rejects before the model is reached
+    assert _run_row(second_run)["rematch_cursor"] is None  # the pass left nothing behind it
+    assert _match_of(posting_ids[2])["outcome"] == "rejected"  # press 2 decided ids 3-4
+    assert _match_of(posting_ids[3])["outcome"] == "rejected"
+    assert _match_of(posting_ids[0])["outcome"] == "scored"  # and left ids 1-2 alone
+
+    third = FakeScorer(_result())
+    third_run = _run()
+    rematch_stored_postings(third_run, scorer=third)
+    assert third.calls == []
+    assert _match_of(posting_ids[0])["outcome"] == "rejected"  # the wrap carries the rule to 1-2
+    assert _match_of(posting_ids[1])["outcome"] == "rejected"
+
+
+def test_a_posting_reopened_behind_the_cursor_is_decided_by_the_press_after_the_wrap(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reopen (#6) behind the cursor grows the set, and the wrap reaches it -- it is not lost."""
+    monkeypatch.setenv(SCORER_MAX_POSTINGS, "2")
+    company = _company("acme")
+    reopened = _stored_posting(company, external_id="r", closed_at=NOTIFIED_AT)  # closed at seed
+    openers = [_stored_posting(company, external_id=name) for name in ("a", "b", "c")]
+    _active_resume()
+
+    first = FakeScorer(_result())
+    first_run = _run()
+    rematch_stored_postings(first_run, scorer=first)
+    assert [call[0].external_id for call in first.calls] == ["a", "b"]  # r is closed, so no candidate
+    assert _run_row(first_run)["rematch_cursor"] == openers[2]
+
+    with db.session_scope() as session:  # #6's reopen: the board lists it again
+        session.get(Posting, reopened).closed_at = None
+
+    second = FakeScorer(_result())
+    second_run = _run()
+    rematch_stored_postings(second_run, scorer=second)
+    assert [call[0].external_id for call in second.calls] == ["c"]  # the tail, then nothing
+    assert _run_row(second_run)["rematch_cursor"] is None
+
+    third = FakeScorer(_result())
+    third_run = _run()
+    rematch_stored_postings(third_run, scorer=third)
+    assert "r" in [call[0].external_id for call in third.calls]  # the wrap reaches the reopen
 
 
 def test_the_re_match_asks_no_board_and_writes_no_company_posting_or_validator(

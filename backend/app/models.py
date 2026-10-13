@@ -274,6 +274,15 @@ class Run(Base):
     # `services.pipeline._record_not_rematched`, the one place that knows the cap
     # stopped the offers; #9 writes neither side.
     postings_not_rematched: Mapped[int | None] = mapped_column(Integer)
+    # Where the next re-match starts: the `posting.id` of the first candidate the
+    # last press did not decide. NULL is "no press stopped here" -- a tick wrote no
+    # position, a row predates this column, or the newest press decided every
+    # candidate it found -- and a positive value is the `posting.id` the next press
+    # must decide first. Nullable with no default of either kind, so a row a tick
+    # wrote reads NULL rather than claiming a position it never held. Written by
+    # `services.pipeline._record_not_rematched` beside the count, in the same unit
+    # of work; #9 writes neither side.
+    rematch_cursor: Mapped[int | None] = mapped_column(Integer)
 
 
 class RunCompany(Base):
