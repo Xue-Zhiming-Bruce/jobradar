@@ -406,6 +406,51 @@ def test_a_scan_with_no_page_images_answers_nothing_without_a_request(
 # The window: one request per `OCR_MAX_IMAGES` page images, answers joined in page order.
 
 
+def test_a_scan_past_the_scan_cap_is_refused_before_any_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap counts the whole scan, and it is checked before a window is built."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    reader = LlmResumeOcr(client=_serving([], requests))
+
+    with pytest.raises(resume_service.ResumeTooManyPages) as raised:
+        reader.read(
+            APPLICATION_PDF, _distinct_pages(resume_service.OCR_MAX_SCAN_IMAGES + 1)
+        )
+
+    assert raised.value.status_code == 413
+    assert str(raised.value) == (
+        f"Resume scan has {resume_service.OCR_MAX_SCAN_IMAGES + 1} page images: "
+        f"the scan limit is {resume_service.OCR_MAX_SCAN_IMAGES} page images"
+    )
+    assert requests == []
+
+
+def test_a_scan_past_the_scan_cap_with_no_key_is_still_the_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The key is checked first: an unkeyed deployment answers `503` whatever the upload holds."""
+    requests: list[httpx2.Request] = []
+    decoded: list[Image.Image] = []
+    encode = resume_service._png_page
+
+    def counted(image: Image.Image) -> bytes:
+        decoded.append(image)
+        return encode(image)
+
+    monkeypatch.setattr(resume_service, "_png_page", counted)
+    reader = LlmResumeOcr(client=_serving([], requests))
+
+    with pytest.raises(ScorerConfigurationError):
+        reader.read(
+            APPLICATION_PDF, _distinct_pages(resume_service.OCR_MAX_SCAN_IMAGES + 3)
+        )
+
+    assert decoded == []
+    assert requests == []
+
+
 def test_a_scan_at_the_cap_makes_one_request_with_every_page(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -600,6 +645,110 @@ def test_the_log_line_names_the_counts_and_the_media_type_and_nothing_else(
     assert first_page not in line
     assert "data:image" not in line
     assert THE_KEY not in line
+
+
+# The scan's budget: the clock is read once, and no attempt outspends it.
+
+
+def _clock(monkeypatch: pytest.MonkeyPatch, *readings: float) -> list[float]:
+    """A `time.monotonic` that answers `readings` in turn, then repeats the last forever.
+
+    The budget is a wall clock, so no case here waits it out: the reader's own
+    `time.monotonic` is replaced, and the readings are chosen to put one of its
+    checks before, exactly at, or past the deadline of the scan being read.
+    """
+    calls: list[float] = []
+
+    def now() -> float:
+        value = readings[min(len(calls), len(readings) - 1)]
+        calls.append(value)
+        return value
+
+    monkeypatch.setattr(resume_ocr_module.time, "monotonic", now)
+    return calls
+
+
+def test_the_scan_budget_is_a_declared_constant() -> None:
+    """60 s, and the 90 s one upload is bounded to: the last attempt starts inside it."""
+    assert resume_ocr_module.OCR_SCAN_TIMEOUT_SECONDS == 60.0
+    assert resume_ocr_module.OCR_SCAN_TIMEOUT_SECONDS + MODEL_TIMEOUT_SECONDS == 90.0
+
+
+def test_a_scan_exactly_at_the_budget_still_sends_its_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rule is `>`, as `max_upload_bytes` reads: the budget refused is the one passed."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    _clock(monkeypatch, 0.0, resume_ocr_module.OCR_SCAN_TIMEOUT_SECONDS)
+    reader = LlmResumeOcr(client=_serving([_response(_answer({"text": SCAN_TEXT}))], requests))
+
+    assert reader.read(IMAGE_PNG, _scan_png()) == SCAN_TEXT
+    assert len(requests) == 1
+
+
+def test_a_scan_past_the_budget_makes_no_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spent budget is a `ResumeOcrError` before the first window is sent."""
+    key = "key-sentinel-7f4c1d9ab38e"
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, key)
+    _clock(monkeypatch, 0.0, resume_ocr_module.OCR_SCAN_TIMEOUT_SECONDS + 0.001)
+    reader = LlmResumeOcr(client=_serving([], requests))
+
+    with pytest.raises(ResumeOcrError) as raised:
+        reader.read(IMAGE_PNG, _scan_png())
+
+    assert requests == []
+    message = str(raised.value)
+    assert message == "the scan spent its 60 second budget after 0 of 1 windows"
+    assert key not in message
+
+
+def test_a_later_window_past_the_budget_is_never_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The clock is the scan's own: the windows already read buy the next one no time."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    _clock(monkeypatch, 0.0, 0.0, 0.0, resume_ocr_module.OCR_SCAN_TIMEOUT_SECONDS + 1.0)
+    reader = LlmResumeOcr(client=_serving([_response(_answer({"text": SCAN_TEXT}))], requests))
+
+    with pytest.raises(ResumeOcrError) as raised:
+        reader.read(APPLICATION_PDF, _distinct_pages(resume_service.OCR_MAX_IMAGES + 1))
+
+    assert len(requests) == 1, "the first window was read, the second was never sent"
+    assert str(raised.value) == "the scan spent its 60 second budget after 1 of 2 windows"
+
+
+def test_a_retry_past_the_budget_is_never_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A malformed answer costs an attempt, and that attempt is checked like the first."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    _clock(
+        monkeypatch, 0.0, 0.0, 0.0, resume_ocr_module.OCR_SCAN_TIMEOUT_SECONDS + 1.0
+    )
+    reader = LlmResumeOcr(client=_serving([_response("junk")], requests))
+
+    with pytest.raises(ResumeOcrError) as raised:
+        reader.read(IMAGE_PNG, _scan_png())
+
+    assert len(requests) == 1, "the second attempt would have outspent the budget"
+    assert str(raised.value) == "the scan spent its 60 second budget after 0 of 1 windows"
+
+
+def test_the_clock_is_taken_before_the_scan_is_decoded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The decoding is the scan's own work: a slow one spends the budget it runs inside."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    reads = _clock(monkeypatch, 0.0)
+    decode = resume_service.scan_images
+
+    def counted(content_type: str, data: bytes) -> list[bytes]:
+        assert reads, "the budget was bound only after the scan was decoded"
+        return decode(content_type, data)
+
+    monkeypatch.setattr(resume_service, "scan_images", counted)
+
+    assert LlmResumeOcr(client=_serving([], requests)).read(IMAGE_PNG, _scan_png()) == SCAN_TEXT
+    assert len(requests) == 1
 
 
 # The prompt: one file beside this module, read on every scan.

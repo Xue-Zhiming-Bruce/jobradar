@@ -38,8 +38,8 @@ The page images are user data and `LLM_API_KEY` is a credential, so neither reac
 a message or a log line: every failure this module raises is one of the scorer's
 own wordings, this module's own wording for a scan over its time budget, plus at
 most a status code, the one log line it writes names the media type, the byte
-count, the number of page images and the number of requests
-and never a pixel of the scan, and the key is read through `scorer.api_key()`.
+count, the number of page images and the number of requests and never a pixel of
+the scan, and the key is read through `scorer.api_key()`.
 Nothing here reads `os.environ`, and no byte of the scan is written to a file: the
 images are request payloads and nothing else.
 """
@@ -230,9 +230,12 @@ def _spent_budget(deadline: float, window_index: int, window_count: int) -> str 
     One wording for both places an attempt is checked -- a window's first try and
     each retry -- so a failure names the same budget and the same window counts
     however late in a scan it happens: how many windows were read whole, and how
-    many the scan holds. No page image, byte or text of the scan is in it.
+    many the scan holds. No page image, byte or text of the scan is in it. The
+    rule is `>`, as the byte limit's `len(data) > limit` reads: an attempt is
+    refused once the deadline is passed, and an instant exactly on it still has
+    its attempt sent.
     """
-    if time.monotonic() < deadline:
+    if time.monotonic() <= deadline:
         return None
     return (
         f"the scan spent its {OCR_SCAN_TIMEOUT_SECONDS:g} second budget after "
