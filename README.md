@@ -121,7 +121,9 @@ It exits 0 when both services are healthy; the app is then on
 serves both, so there is one origin, no CORS and no second service.
 
 - `api` — the API and the frontend's build in one image, published `8000:8000`.
-  Healthcheck: `GET /healthz`, read with the image's own Python.
+  Healthcheck: `GET /healthz`, read with the image's own Python. It runs as a
+  non-root user of its own (`USER jobradar`, uid 10001), so a request that could
+  write a file is not a request that can rewrite the image.
 - `db` — PostgreSQL 17. It publishes **no** host port, so nothing outside the
   compose network reaches it. Healthcheck: `pg_isready`.
 
@@ -145,6 +147,13 @@ Both survive `docker compose restart api`, and both still hold after
 `docker compose down` followed by `docker compose up -d --wait`: the resume file
 and the row naming it are there afterwards, which is why the upload directory is
 a volume of its own.
+
+The uploads volume has one owner, and it is the container's user: the image owns
+`/data/uploads` as uid 10001 and Docker gives a **fresh** named volume the owner
+of the image directory it covers. A volume created by an image from before the
+non-root user is root-owned, so the app cannot write to it — `docker compose down
+-v` once (or `docker volume rm jobradar-uploads`) recreates it as uid 10001's and
+nothing else about the volume changes.
 
 The Postgres password in `compose.yaml` is a **local throwaway**, safe to commit
 only because `db` publishes no host port — its only power is over a database on
@@ -209,8 +218,13 @@ its run row reads `failed` with the missing variable named.
 The UI enters the image in an earlier stage of `backend/Dockerfile`, which runs
 the frontend's own `npm ci && npm run build` and copies the result into the
 runtime stage; `compose.yaml` builds that with the repository root as the build
-context. There is no committed `frontend/dist`, no mount and no second container,
-so deleting the host build changes nothing:
+context. Node exists in that stage and in no other: the runtime stage is
+`python:3.12-slim` plus `uv` and the app, and `docker compose exec api
+sh -c 'command -v node'` prints nothing. Neither does that stage's size grow —
+the image reports the same megabytes on `docker image ls` as the one built before
+the non-root user, which costs a few kilobytes and nothing else. There is no
+committed `frontend/dist`, no mount and no second container, so deleting the host
+build changes nothing:
 
     rm -rf frontend/dist
     docker compose up --build --wait
@@ -224,6 +238,14 @@ with `404` instead of the API's `405`, because a mount at `/` matches every path
 before a partial match can be reported. Every documented answer is unchanged:
 the paths in `backend/openapi.json` answer their own methods, and no path returns
 HTML.
+
+Another detail is a path in neither the contract nor the build: `/no/such/path`
+is the mount's own `404` — `{"detail":"Not Found"}`, the same shape an unknown
+API path gets — and not an unhandled error or the page. There is no client-side
+router in the UI, so a deep link has no `index.html` to fall back to; the mount
+answers `index.html` only for paths that name a file it holds (`/` among them),
+and `backend/tests/test_static_ui.py` asserts that, so adding a router later is a
+red test rather than a surprise in a browser.
 
 The image must hold source and the built page and nothing else. `ls -a` is not
 enough to prove that — it lists the top level only — so this check is recursive
@@ -241,6 +263,23 @@ governs this build because the context is the repository. That file is not
 `__pycache__/` excludes the root directory only and lets `app/__pycache__/` into
 the image. Every pattern that has to match at any depth carries the `**/` prefix,
 and `uv run pytest` asserts exactly that.
+
+### Caching the assets
+
+The mount sets `cache-control` from the path, because Vite's build is what makes
+one answer correct for each. Every file under `assets/` carries a hash of its own
+contents in its name (`index-B6OjL1iC.js`), so a new build never reuses an old
+name: those are served `public, max-age=31536000, immutable` and the browser
+keeps them for a year without asking. `index.html` names the current build's
+hashes and has none of its own, so it is served `no-cache` — stored, but
+revalidated on every load — because a cached page pointing at hashes the new
+build does not have is a broken page:
+
+    curl -si http://localhost:8000/ | grep -i cache-control
+    curl -si http://localhost:8000/assets/<hashed file> | grep -i cache-control
+
+No other path is affected: a path the API answers carries no `cache-control`,
+mount or not, and the mount never answers one of those.
 
 ## Backend
 
