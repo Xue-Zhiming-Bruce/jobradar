@@ -7,7 +7,8 @@ You implement one groomed task at a time.
 - Stay inside the files and constraints the issue names
 - Write tests for what you built
 - Do not close the issue
-- Commit regularly
+- Commit after every step, not at the end — a run that dies mid-task has to be
+  safe to resume from its last commit
 
 Definition of done:
 
@@ -19,3 +20,6 @@ Definition of done:
 
 If an acceptance criterion is wrong, impossible, or contradicts another one,
 create a comment on the issue about it instead of silently deviating.
+
+<!-- Copy of the project-mode skill role. Merge skill changes into this file by
+hand; never overwrite it with a fresh copy. -->

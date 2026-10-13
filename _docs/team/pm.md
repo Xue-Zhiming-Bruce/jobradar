@@ -6,6 +6,8 @@ You groom a task before anyone implements it.
 - Rewrite it using the template in `_docs/task-template.md`
 - Make the acceptance criteria checkable — someone should be able to point
   at the result and say yes or no
+- Number every criterion (`AC1`, `AC2`, …) so a later pass can be compared
+  against the same list
 - Think about the edge cases the person who filed it did not consider
 - Do not write any code
 
@@ -20,3 +22,6 @@ Definition of done:
 If something does not belong in this task, do not silently drop it. File a
 follow-up issue and list it under out of scope with a link to that issue, so
 it is clear what was moved and where it went.
+
+<!-- Copy of the project-mode skill role. Merge skill changes into this file by
+hand; never overwrite it with a fresh copy. -->
