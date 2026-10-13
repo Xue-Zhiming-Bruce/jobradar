@@ -500,16 +500,21 @@ keeps the loopback demo below working on a machine that runs one.
 | --- | --- | --- |
 | `add_company` | `name: string`, `slug: string` (both required) | the app's `201` body: `id`, `name`, `slug`, `is_active` |
 | `list_watchlist` | none | every company, ascending id, active or not: `id`, `name`, `slug`, `is_active` |
-| `list_matches` | none | every match row, newest first, unfiltered: `id`, `company_name`, `title`, `url`, `score`, `reason`, `gaps`, `state`, `created_at` |
+| `list_matches` | `min_score: integer`, `state: string` (`"new"`, `"saved"` or `"dismissed"`), `company_id: integer`, `limit: integer` (all four optional) | the app's rows the filters leave, newest first: `id`, `company_name`, `title`, `url`, `score`, `reason`, `gaps`, `state`, `outcome`, `created_at` |
 | `trigger_run` | none | the app's `202` body: `id`, `status`, `started_at`, `finished_at`, `error`, `postings_seen`, `matches_created` |
 | `get_run` | `run_id: integer` (required) | that run's row, the same seven fields |
 | `remove_company` | `company_id: integer` (required) | a confirmation this tool builds: `id`, `removed` — the route answers `204` with no body |
 | `set_match_state` | `match_id: integer`, `state: string` (`"saved"` or `"dismissed"`, both required) | the app's `200` body: the written row, the same fields `list_matches` renders |
 
 Each tool returns the app's own response body, field for field and name for name:
-nothing is filtered, renamed or derived here. `list_matches` has no filter of its
-own, so a prefiltered row (`score` 0) and an unscored one come back exactly as
-stored — keeping either out of a digest or a screen is the app's business. A list
+nothing is filtered, renamed or derived here. `list_matches` applies no filter of
+its own: with no argument it answers every row, so a prefiltered one (`score` 0)
+and an unscored one come back exactly as stored — keeping either out of a digest
+or a screen is the app's business. Its four optional arguments are the route's own
+query parameters and only the ones it was given are sent: `min_score` is a floor
+on the score, `state` is one value of the column's vocabulary (`"new"`, `"saved"`
+or `"dismissed"`), `company_id` narrows to one company's postings, and `limit` is
+the newest N (at most 200). A list
 is rendered as one JSON block per row, because that is how the SDK renders a
 returned list; anything else is one JSON block. Every failure a client can see is
 a tool error (`isError`) carrying the app's own `detail` text, never a hang, never

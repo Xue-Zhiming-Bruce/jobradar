@@ -46,9 +46,20 @@ def build_server(get_client: Callable[[], httpx2.Client] = new_client) -> MCPSer
         return tools.list_watchlist(get_client())
 
     @server.tool(structured_output=False)
-    def list_matches() -> list[dict[str, Any]]:
-        """List every stored match, newest first, with its score, reason and gaps."""
-        return tools.list_matches(get_client())
+    def list_matches(
+        min_score: int | None = None,
+        state: tools.MatchState | None = None,
+        company_id: int | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """List stored matches, newest first, narrowed by any of the four filters given."""
+        return tools.list_matches(
+            get_client(),
+            min_score=min_score,
+            state=state,
+            company_id=company_id,
+            limit=limit,
+        )
 
     @server.tool(structured_output=False)
     def trigger_run() -> dict[str, Any]:

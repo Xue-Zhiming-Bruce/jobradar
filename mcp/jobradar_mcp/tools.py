@@ -5,9 +5,11 @@ Each tool is one request to an endpoint the app already serves -- `POST
 `GET /runs/{id}`, `DELETE /watchlist/{id}`, `PATCH /matches/{id}` -- and each
 returns the app's own answer, decoded JSON, field for field: nothing is computed,
 filtered, renamed or defaulted here. `add_company` answers the `201` body,
-`list_watchlist` and `list_matches` answer the app's list whole (a prefiltered row
-with score 0 and a not-scored row are in it exactly as stored, because keeping
-either out is the digest's business and the screen's), `trigger_run` answers the
+`list_watchlist` answers the app's list whole and `list_matches` answers the rows
+the filters it was given leave -- with none of them, the app's list whole (a
+prefiltered row with score 0 and a not-scored row are in it exactly as stored,
+because keeping either out is the digest's business and the screen's),
+`trigger_run` answers the
 `202` body and does not wait for the run or poll it, `get_run` answers that run's
 row, and `set_match_state` answers the row its `PATCH` writes. `remove_company` is
 the one tool whose route answers no body at all: its `204` becomes the small
@@ -46,6 +48,12 @@ RUN_PATH = "/runs/{run_id}"
 # tool's, so a third value never reaches the app.
 Verdict = Literal["saved", "dismissed"]
 
+# The three values the read's own `?state=` takes, spelled as the route's
+# `MatchState` spells them: the column's whole vocabulary, `new` included,
+# because a filter is not a verdict and a caller may ask for the rows nobody has
+# judged yet.
+MatchState = Literal["new", "saved", "dismissed"]
+
 # The header the app checks, spelled as `app.routes.internal.TICK_SECRET_HEADER`
 # spells it. The app reads the value itself from `TICK_SECRET`.
 TICK_SECRET_HEADER = "X-Tick-Secret"
@@ -67,9 +75,35 @@ def list_watchlist(client: httpx2.Client) -> list[dict[str, Any]]:
     return _answer_of(client, "GET", WATCHLIST_PATH, expected=200)
 
 
-def list_matches(client: httpx2.Client) -> list[dict[str, Any]]:
-    """Every stored match row, newest first, unfiltered: `GET /matches`."""
-    return _answer_of(client, "GET", MATCHES_PATH, expected=200)
+def list_matches(
+    client: httpx2.Client,
+    min_score: int | None = None,
+    state: MatchState | None = None,
+    company_id: int | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Every stored match row the filters leave, newest first: `GET /matches`.
+
+    No filter means every row, which is what this tool has always answered; each
+    argument is passed on as the route's own query parameter and none of them
+    hides a row here. Only the arguments that were given are sent, so a call with
+    none of them is a request with no query string at all. The route refuses a
+    value outside a parameter's range or vocabulary, and that refusal reaches the
+    caller as the app's own `detail`.
+    """
+    given = {
+        "min_score": min_score,
+        "state": state,
+        "company_id": company_id,
+        "limit": limit,
+    }
+    return _answer_of(
+        client,
+        "GET",
+        MATCHES_PATH,
+        expected=200,
+        params={name: value for name, value in given.items() if value is not None},
+    )
 
 
 def trigger_run(client: httpx2.Client) -> dict[str, Any]:
@@ -120,6 +154,7 @@ def _answer_of(
     *,
     expected: int,
     json_body: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
     has_body: bool = True,
 ) -> Any:
@@ -130,11 +165,14 @@ def _answer_of(
     reached all become one `ToolError` for the client to read. A route that
     answers no body (`DELETE /watchlist/{id}`'s `204`) is asked for none:
     `has_body=False` answers `None`, where decoding an empty body would invent the
-    one failure this module does not have.
+    one failure this module does not have. `params` is what a read's own query
+    string is built from, and a caller passes only the parameters it was given:
+    a `None` here would reach the app as an empty value rather than as an absent
+    one.
     """
     url = f"{base_url()}{path}"
     try:
-        answer = client.request(method, url, json=json_body, headers=headers)
+        answer = client.request(method, url, json=json_body, params=params, headers=headers)
     except httpx2.HTTPError as error:
         raise ToolError(f"{URL_VARIABLE} ({url}) could not be reached") from error
     if answer.status_code != expected:

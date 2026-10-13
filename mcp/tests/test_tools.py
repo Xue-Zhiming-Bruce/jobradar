@@ -12,6 +12,7 @@ import json
 import re
 from itertools import takewhile
 from pathlib import Path
+from typing import Any
 
 import pytest
 from mcp.server.mcpserver import MCPServer
@@ -46,8 +47,35 @@ EXPECTED_INPUT_SCHEMAS = {
         "title": "list_watchlistArguments",
         "type": "object",
     },
+    # The read's own four filters, from `#44`: all optional and none of them
+    # required, the state's vocabulary carried as the enum the route declares, and
+    # no fifth argument.
     "list_matches": {
-        "properties": {},
+        "properties": {
+            "min_score": {
+                "anyOf": [{"type": "integer"}, {"type": "null"}],
+                "default": None,
+                "title": "Min Score",
+            },
+            "state": {
+                "anyOf": [
+                    {"enum": ["new", "saved", "dismissed"], "type": "string"},
+                    {"type": "null"},
+                ],
+                "default": None,
+                "title": "State",
+            },
+            "company_id": {
+                "anyOf": [{"type": "integer"}, {"type": "null"}],
+                "default": None,
+                "title": "Company Id",
+            },
+            "limit": {
+                "anyOf": [{"type": "integer"}, {"type": "null"}],
+                "default": None,
+                "title": "Limit",
+            },
+        },
         "title": "list_matchesArguments",
         "type": "object",
     },
@@ -241,6 +269,52 @@ def test_list_matches_answers_every_row_including_the_prefiltered_and_the_unscor
     assert rows(result) == MATCHES
     assert result.is_error is False
     assert fake_app.sent == [("GET", "/matches")]
+    # No argument means no query string at all: not `?min_score=` and not a value
+    # of `None` sent on as one.
+    assert fake_app.requests[0].url.query == b""
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_query"),
+    [
+        pytest.param({"min_score": 80}, {"min_score": "80"}, id="min-score"),
+        pytest.param({"state": "saved"}, {"state": "saved"}, id="state"),
+        pytest.param({"company_id": 7}, {"company_id": "7"}, id="company-id"),
+        pytest.param({"limit": 5}, {"limit": "5"}, id="limit"),
+    ],
+)
+def test_list_matches_sends_only_the_filter_it_was_given(
+    server: MCPServer,
+    fake_app: FakeApp,
+    arguments: dict[str, Any],
+    expected_query: dict[str, str],
+) -> None:
+    """One `GET /matches`, and the recorded URL carries that parameter and no other."""
+    fake_app.answers("GET", "/matches", body=MATCHES)
+
+    result = call(server, "list_matches", arguments)
+
+    assert rows(result) == MATCHES
+    assert fake_app.sent == [("GET", "/matches")]
+    assert dict(fake_app.requests[0].url.params) == expected_query
+
+
+def test_list_matches_sends_all_four_filters_when_it_is_given_all_four(
+    server: MCPServer, fake_app: FakeApp
+) -> None:
+    fake_app.answers("GET", "/matches", body=MATCHES)
+
+    result = call(
+        server, "list_matches", {"min_score": 80, "state": "saved", "company_id": 7, "limit": 5}
+    )
+
+    assert rows(result) == MATCHES
+    assert dict(fake_app.requests[0].url.params) == {
+        "min_score": "80",
+        "state": "saved",
+        "company_id": "7",
+        "limit": "5",
+    }
 
 
 def test_an_empty_matches_table_is_an_empty_list(server: MCPServer, fake_app: FakeApp) -> None:
