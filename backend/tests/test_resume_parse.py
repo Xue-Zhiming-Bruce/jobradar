@@ -62,6 +62,11 @@ SENTINEL = "SENTINEL-RESUME-LINE: this text must never leave the database."
 UPSTREAM_SENTINEL = "UPSTREAM-SENTINEL-TEXT-THAT-MUST-NOT-BE-ECHOED"
 THE_KEY = "unit-test-key-not-a-real-credential"
 
+# A contact detail the resume's own text carries: personal data this app
+# deliberately does not collect, so none of it may reach a log, an error or a body.
+EMAIL_SENTINEL = "resume-owner-9f2c@example.test"
+PHONE_SENTINEL = "+1-555-0142"
+
 # The fields every parse case uses, and the one answer the prompt asks for when
 # the resume states neither a name nor a skill.
 FIELDS = ResumeFields(name="Ada Lovelace", skills=["Python", "SQL"])
@@ -427,7 +432,7 @@ def test_neither_the_text_nor_the_key_reaches_a_log_an_error_or_a_body(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setenv(LLM_API_KEY, THE_KEY)
-    uploaded = upload(client)
+    uploaded = upload(client, text=f"{SENTINEL}\nContact: {EMAIL_SENTINEL} / {PHONE_SENTINEL}")
     caplog.set_level(logging.DEBUG)
     requests: list[httpx2.Request] = []
 
@@ -447,10 +452,15 @@ def test_neither_the_text_nor_the_key_reaches_a_log_an_error_or_a_body(
         "skills": ["Python", "SQL"],
     }
     assert failed.json() == {"detail": "the model call failed (HTTP 500)"}
+    # The 502's detail names the failure and carries no contact detail.
+    assert EMAIL_SENTINEL not in failed.json()["detail"]
+    assert PHONE_SENTINEL not in failed.json()["detail"]
     assert set(listed.json()[0]) == RESUME_FIELDS
     for response in (failed, listed):
         assert SENTINEL not in response.text
         assert UPSTREAM_SENTINEL not in response.text
+        assert EMAIL_SENTINEL not in response.text
+        assert PHONE_SENTINEL not in response.text
 
     lines = log_lines(caplog.records)
     assert lines, "the capture must be non-vacuous"
@@ -458,6 +468,8 @@ def test_neither_the_text_nor_the_key_reaches_a_log_an_error_or_a_body(
         SENTINEL,
         THE_KEY,
         UPSTREAM_SENTINEL,
+        EMAIL_SENTINEL,
+        PHONE_SENTINEL,
         '{"name": "Ada Lovelace", "skills": ["Python", "SQL"]}',
         "Ada Lovelace",
         "Python",

@@ -148,6 +148,20 @@ def test_contract_describes_the_stored_file_a_client_downloads() -> None:
     assert parameter["schema"]["type"] == "integer"
 
 
+def test_contract_describes_the_parse_body_a_client_reads() -> None:
+    contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    parsed = contract["paths"]["/resume/parse"]["post"]["responses"]["200"]
+
+    # The parse's own answer is the one place a resume becomes fields, and the row
+    # id beside the two fields the prompt asks for is the whole answer: a third
+    # parsed field would have no consumer and fails here.
+    parsed_ref = parsed["content"]["application/json"]["schema"]["$ref"]
+    assert parsed_ref.endswith("ResumeParsed")
+    schema = contract["components"]["schemas"][parsed_ref.rsplit("/", 1)[-1]]
+    assert set(schema["properties"]) == {"id", "name", "skills"}
+    assert schema["required"] == list(schema["properties"])
+
+
 def test_contract_describes_the_watchlist_routes() -> None:
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
     schemas = contract["components"]["schemas"]

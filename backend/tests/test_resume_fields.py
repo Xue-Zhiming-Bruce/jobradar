@@ -17,6 +17,7 @@ message. No case starts a server, sets a real key or reads a real resume.
 import ast
 import inspect
 import json
+import re
 import socket
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -376,6 +377,12 @@ def test_the_template_sits_beside_the_module_and_asks_for_the_two_keys() -> None
         assert f'"{key}"' in template
     assert "null" in template
     assert "[]" in template
+    # Every JSON key the template spells, and no other: a key with no consumer is
+    # what fails here, because a subset check would let a third one slip in.
+    assert set(re.findall(r'"(\w+)":', PARSE_PROMPT_PATH.read_text(encoding="utf-8"))) == {
+        "name",
+        "skills",
+    }
 
 
 def test_the_message_content_is_the_rendered_template_byte_for_byte(
