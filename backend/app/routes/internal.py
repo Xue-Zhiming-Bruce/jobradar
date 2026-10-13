@@ -282,10 +282,10 @@ def _require_admitted_caller(request: Request) -> None:
     """Admit the operator's secret or this instance's own page, and refuse the rest.
 
     The one guard both routes call, so the tick and the re-match cannot disagree
-    about who is admitted. The secret is checked first, through
-    `_require_tick_secret`, and the second admission is the `Origin`/`Host` match
-    above. A caller that offers neither is refused with one `401` naming both ways
-    in. Neither header is stored, logged, echoed or written to a row.
+    about who is admitted. A request whose `Origin`/`Host` match is admitted, and
+    so is one whose secret matches -- `_require_tick_secret` holds that
+    comparison. A caller that offers neither is refused with one `401` naming both
+    ways in. Neither header is stored, logged, echoed or written to a row.
     """
     if _same_origin(request.headers.get(ORIGIN_HEADER), request.headers.get(HOST_HEADER)):
         return
