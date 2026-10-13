@@ -35,6 +35,15 @@ RUN_IN_PROGRESS = {"detail": "A run is already in progress in this process"}
 NO_SUCH_RUN = {"detail": "There is no run with id 9"}
 NO_SUCH_COMPANY = {"detail": "There is no watched company with id 9"}
 NO_SUCH_MATCH = {"detail": "There is no match with id 9"}
+UNUSABLE_SOURCE = {
+    "detail": [
+        {
+            "type": "literal_error",
+            "loc": ["body", "source"],
+            "msg": "Input should be 'greenhouse' or 'lever'",
+        }
+    ]
+}
 UNUSABLE_VERDICT = {
     "detail": [
         {
@@ -76,6 +85,34 @@ def test_a_blank_argument_is_the_apps_422_naming_the_field(server: MCPServer, fa
     assert "name" in str(error)
     assert "must not be blank" in str(error)
     assert "slug" not in str(error)
+
+
+def test_a_source_the_tool_schema_refuses_never_reaches_the_app(
+    server: MCPServer, fake_app: FakeApp
+) -> None:
+    """The schema takes the two boards the contract names: a third is an error with no request."""
+    error = tool_error(
+        server, "add_company", {"name": "Acme", "slug": "acme", "source": "workday"}
+    )
+
+    assert "greenhouse" in str(error) and "lever" in str(error)
+    assert fake_app.requests == []
+
+
+def test_a_source_the_app_refuses_for_another_reason_is_the_apps_own_detail(
+    server: MCPServer, fake_app: FakeApp
+) -> None:
+    """The app's own `422` on `body.source` reaches the caller as that field and message."""
+    fake_app.answers("POST", "/watchlist", status=422, body=UNUSABLE_SOURCE)
+
+    error = tool_error(
+        server, "add_company", {"name": "Acme", "slug": "acme", "source": "lever"}
+    )
+
+    assert "body.source" in str(error)
+    assert "Input should be 'greenhouse' or 'lever'" in str(error)
+    assert "422" in str(error)
+    assert fake_app.sent == [("POST", "/watchlist")]
 
 
 def test_trigger_run_answers_a_refusal_without_reading_as_a_started_run(

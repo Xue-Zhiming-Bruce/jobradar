@@ -42,11 +42,43 @@ describe('the wire is decoded into the UI', () => {
   it('listWatchlist turns is_active into isActive, and changes nothing else', async () => {
     server.use(
       http.get('/watchlist', () =>
+        HttpResponse.json([
+          { id: 1, name: 'Acme', slug: 'acme', is_active: true, source: 'greenhouse' },
+        ]),
+      ),
+    )
+
+    expect(await listWatchlist()).toEqual([
+      { id: 1, name: 'Acme', slug: 'acme', isActive: true, source: 'greenhouse' },
+    ])
+  })
+
+  it('listWatchlist reads a row with no source as the contract\'s own default', async () => {
+    // `source` is not in `WatchedCompany.required`: a row without it is a row the
+    // contract allows, and its declared default is Greenhouse.
+    server.use(
+      http.get('/watchlist', () =>
         HttpResponse.json([{ id: 1, name: 'Acme', slug: 'acme', is_active: true }]),
       ),
     )
 
-    expect(await listWatchlist()).toEqual([{ id: 1, name: 'Acme', slug: 'acme', isActive: true }])
+    expect(await listWatchlist()).toEqual([
+      { id: 1, name: 'Acme', slug: 'acme', isActive: true, source: 'greenhouse' },
+    ])
+  })
+
+  it('listWatchlist keeps a row\'s own lever source as the wire spelled it', async () => {
+    server.use(
+      http.get('/watchlist', () =>
+        HttpResponse.json([
+          { id: 1, name: 'Acme', slug: 'acme', is_active: true, source: 'lever' },
+        ]),
+      ),
+    )
+
+    expect(await listWatchlist()).toEqual([
+      { id: 1, name: 'Acme', slug: 'acme', isActive: true, source: 'lever' },
+    ])
   })
 
   it('getRun turns matches_created into matchesCreated and keeps the ISO timestamps', async () => {

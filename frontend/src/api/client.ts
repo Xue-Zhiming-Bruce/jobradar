@@ -13,12 +13,15 @@ export type WatchedCompany = {
   name: string
   slug: string
   isActive: boolean
+  source: CompanySource
 }
 
 /** Body of an addition: `CompanyCreate` in `backend/openapi.json`. */
 export type CompanyCreate = {
   name: string
   slug: string
+  /** Optional as the contract has it: absent means the contract's own default, Greenhouse. */
+  source?: CompanySource
 }
 
 /** Which resume is now the active one, as the UI reads it. */
@@ -67,6 +70,12 @@ export type Match = {
 /** The two verdicts `PATCH /matches/{id}` accepts: `MatchVerdict` in the contract. */
 export type MatchState = 'saved' | 'dismissed'
 
+/**
+ * The two boards a company can be watched on: `CompanySource` in
+ * `backend/openapi.json`, whose `WatchedCompany.source` default is the first.
+ */
+export type CompanySource = 'greenhouse' | 'lever'
+
 /** A non-2xx answer: `message` is the server's own `detail`, and nothing else. */
 export class ApiError extends Error {
   readonly status: number
@@ -83,6 +92,9 @@ type WireCompany = {
   name: string
   slug: string
   is_active: boolean
+  // Optional: the contract's `required` list is the four fields above, and
+  // `source` is the one property with a declared default.
+  source?: CompanySource
 }
 
 type WireResumeUploaded = {
@@ -120,6 +132,7 @@ const decodeCompany = (wire: WireCompany): WatchedCompany => ({
   name: wire.name,
   slug: wire.slug,
   isActive: wire.is_active,
+  source: wire.source ?? 'greenhouse',
 })
 
 const decodeResume = (wire: WireResumeUploaded): ResumeUploaded => ({

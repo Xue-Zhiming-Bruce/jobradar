@@ -1,11 +1,17 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { addCompany, listWatchlist, removeCompany, type WatchedCompany } from '../api/client'
+import {
+  addCompany,
+  listWatchlist,
+  removeCompany,
+  type CompanySource,
+  type WatchedCompany,
+} from '../api/client'
 
 // Three outcomes a reader can tell apart: not read yet, read and empty, refused.
 const LOADING = 'Loading the watchlist...'
 const EMPTY = 'No watched companies yet.'
 
-/** Adds a company by name and Greenhouse slug, lists the watchlist, removes a row. */
+/** Adds a company by name, board slug and source, lists the watchlist, removes a row. */
 export default function WatchlistScreen() {
   // `null` is "not read yet", so loading is not the same screen as empty.
   const [companies, setCompanies] = useState<WatchedCompany[] | null>(null)
@@ -14,6 +20,7 @@ export default function WatchlistScreen() {
   const [formError, setFormError] = useState<string | null>(null)
   const [name, setName] = useState('')
   const [slug, setSlug] = useState('')
+  const [source, setSource] = useState<CompanySource>('greenhouse')
 
   useEffect(() => {
     listWatchlist().then(setCompanies, (failure: unknown) => {
@@ -25,10 +32,11 @@ export default function WatchlistScreen() {
     event.preventDefault()
     setFormError(null)
     try {
-      const added = await addCompany({ name, slug })
+      const added = await addCompany({ name, slug, source })
       setCompanies((rows) => [...(rows ?? []), added])
       setName('')
       setSlug('')
+      setSource('greenhouse')
     } catch (failure) {
       setFormError(failure instanceof Error ? failure.message : String(failure))
     }
@@ -52,8 +60,18 @@ export default function WatchlistScreen() {
           <input value={name} onChange={(event) => setName(event.target.value)} />
         </label>
         <label>
-          Greenhouse slug
+          Board slug
           <input value={slug} onChange={(event) => setSlug(event.target.value)} />
+        </label>
+        <label>
+          Source
+          <select
+            value={source}
+            onChange={(event) => setSource(event.target.value as CompanySource)}
+          >
+            <option value="greenhouse">Greenhouse</option>
+            <option value="lever">Lever</option>
+          </select>
         </label>
         <button type="submit">Add company</button>
       </form>
@@ -71,6 +89,7 @@ export default function WatchlistScreen() {
               <span>
                 {company.name} ({company.slug})
               </span>
+              <span>{company.source}</span>
               <button type="button" onClick={() => remove(company.id)}>
                 Remove
               </button>

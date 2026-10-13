@@ -36,9 +36,9 @@ def build_server(get_client: Callable[[], httpx2.Client] = new_client) -> MCPSer
     server: MCPServer = MCPServer("jobradar")
 
     @server.tool(structured_output=False)
-    def add_company(name: str, slug: str) -> dict[str, Any]:
-        """Add a company to the watchlist by name and its Greenhouse board slug."""
-        return tools.add_company(get_client(), name, slug)
+    def add_company(name: str, slug: str, source: tools.Source | None = None) -> dict[str, Any]:
+        """Add a company to the watchlist by name, its board slug and that board's source."""
+        return tools.add_company(get_client(), name, slug, source=source)
 
     @server.tool(structured_output=False)
     def list_watchlist() -> list[dict[str, Any]]:

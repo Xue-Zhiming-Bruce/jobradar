@@ -54,20 +54,29 @@ Verdict = Literal["saved", "dismissed"]
 # judged yet.
 MatchState = Literal["new", "saved", "dismissed"]
 
+# The two boards a company can be watched on, spelled as `CompanyCreate.source`
+# spells them. This is the whole vocabulary of the argument; the default a caller
+# omits is `CompanyCreate.source`'s own, and is not copied here.
+Source = Literal["greenhouse", "lever"]
+
 # The header the app checks, spelled as `app.routes.internal.TICK_SECRET_HEADER`
 # spells it. The app reads the value itself from `TICK_SECRET`.
 TICK_SECRET_HEADER = "X-Tick-Secret"
 
 
-def add_company(client: httpx2.Client, name: str, slug: str) -> dict[str, Any]:
-    """Add one company to the watchlist: `POST /watchlist`, and its `201` body."""
-    return _answer_of(
-        client,
-        "POST",
-        WATCHLIST_PATH,
-        expected=201,
-        json_body={"name": name, "slug": slug},
-    )
+def add_company(
+    client: httpx2.Client, name: str, slug: str, source: Source | None = None
+) -> dict[str, Any]:
+    """Add one company to the watchlist: `POST /watchlist`, and its `201` body.
+
+    `source` reaches the body only when it was given, so a call that names none
+    sends `{"name", "slug"}` exactly as it always has and the app stores the
+    board its own `CompanyCreate.source` defaults to.
+    """
+    body: dict[str, Any] = {"name": name, "slug": slug}
+    if source is not None:
+        body["source"] = source
+    return _answer_of(client, "POST", WATCHLIST_PATH, expected=201, json_body=body)
 
 
 def list_watchlist(client: httpx2.Client) -> list[dict[str, Any]]:

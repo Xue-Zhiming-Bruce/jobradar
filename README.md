@@ -516,8 +516,8 @@ keeps the loopback demo below working on a machine that runs one.
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `add_company` | `name: string`, `slug: string` (both required) | the app's `201` body: `id`, `name`, `slug`, `is_active` |
-| `list_watchlist` | none | every company, ascending id, active or not: `id`, `name`, `slug`, `is_active` |
+| `add_company` | `name: string`, `slug: string` (both required), `source: string` (`"greenhouse"` or `"lever"`, optional — Greenhouse when absent) | the app's `201` body: `id`, `name`, `slug`, `is_active`, `source` |
+| `list_watchlist` | none | every company, ascending id, active or not: `id`, `name`, `slug`, `is_active`, `source` |
 | `list_matches` | `min_score: integer`, `state: string` (`"new"`, `"saved"` or `"dismissed"`), `company_id: integer`, `limit: integer` (all four optional) | the app's rows the filters leave, newest first: `id`, `company_name`, `title`, `url`, `score`, `reason`, `gaps`, `state`, `outcome`, `created_at` |
 | `trigger_run` | none | the app's `202` body: `id`, `status`, `started_at`, `finished_at`, `error`, `postings_seen`, `matches_created` |
 | `get_run` | `run_id: integer` (required) | that run's row, the same seven fields |

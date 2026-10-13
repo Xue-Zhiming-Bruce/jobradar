@@ -5,7 +5,12 @@ import { companies, matches, resumeUploaded, runSummary, runSucceeded } from './
 export const handlers = [
   http.get('/watchlist', () => HttpResponse.json(companies)),
 
-  http.post('/watchlist', () => HttpResponse.json(companies[0], { status: 201 })),
+  // The submitted fields echo back over the placeholder row, so `npm run dev`
+  // shows the company that was just added, on the board it was added to.
+  http.post('/watchlist', async ({ request }) => {
+    const body = (await request.json()) as Record<string, unknown>
+    return HttpResponse.json({ ...companies[0], ...body }, { status: 201 })
+  }),
 
   http.delete('/watchlist/:id', () => new HttpResponse(null, { status: 204 })),
 

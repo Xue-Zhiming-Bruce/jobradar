@@ -37,6 +37,16 @@ EXPECTED_INPUT_SCHEMAS = {
         "properties": {
             "name": {"title": "Name", "type": "string"},
             "slug": {"title": "Slug", "type": "string"},
+            # The board's own two names, optional: the default a caller omits is
+            # the route's, so the tool sends no `source` unless one was given.
+            "source": {
+                "anyOf": [
+                    {"enum": ["greenhouse", "lever"], "type": "string"},
+                    {"type": "null"},
+                ],
+                "default": None,
+                "title": "Source",
+            },
         },
         "required": ["name", "slug"],
         "title": "add_companyArguments",
@@ -233,6 +243,25 @@ def test_add_company_sends_the_post_the_app_serves_and_answers_its_201_body(
     request = fake_app.requests[0]
     assert request.headers["content-type"] == "application/json"
     assert json.loads(request.content) == {"name": "Whoever", "slug": "not-the-answer"}
+
+
+def test_add_company_sends_the_source_when_and_only_when_it_was_given(
+    server: MCPServer, fake_app: FakeApp
+) -> None:
+    """`lever` reaches the body as the route spells it, and the answer is still the app's own."""
+    fake_app.answers("POST", "/watchlist", status=201, body=COMPANY)
+
+    result = call(
+        server, "add_company", {"name": "Whoever", "slug": "not-the-answer", "source": "lever"}
+    )
+
+    assert answered(result) == COMPANY
+    assert fake_app.sent == [("POST", "/watchlist")]
+    assert json.loads(fake_app.requests[0].content) == {
+        "name": "Whoever",
+        "slug": "not-the-answer",
+        "source": "lever",
+    }
 
 
 def test_list_watchlist_answers_every_company_the_app_sent_in_order(
