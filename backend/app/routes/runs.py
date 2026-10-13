@@ -17,12 +17,20 @@ the wire either.
 `RunSummary` and `run_summary()` are also what `POST /internal/tick` answers its
 `202` with, so a client that started a run reads the same shape twice and the
 run's two routes cannot drift apart.
+
+A tick's guard is the process's (`app.routes.internal`), so a process that is
+redeployed or killed mid-run leaves its row `running` and finishes nothing. That
+row is reaped here, beside the read, because it is the same row and the same
+module: `reap_stale_runs()` is the one writer of a terminal status on a row no
+process is running, it is called once from `app.main`'s lifespan, and it is not
+a route -- the app finishes those rows while it starts, before it serves.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import update
 
 from app import db
 from app.models import Run
@@ -66,6 +74,46 @@ def run_summary(run: Run) -> RunSummary:
         postings_seen=run.postings_seen,
         matches_created=run.matches_created,
     )
+
+
+# What a reaped row is finished with. One fixed sentence, and it names no
+# resume, no credential and no database URL: `GET /runs/{id}` serves `error`
+# back to a client, and this repository is public.
+REAPED_RUN_ERROR = "The process ended before the run finished"
+
+
+def reap_stale_runs() -> int:
+    """Finish every run row a dead process left in `running`, and answer how many there were.
+
+    One statement in one `db.session_scope()`, written the way
+    `app.services.resume.record_active_resume` retires its previous active row: an
+    `UPDATE` whose `WHERE` names the only rows a reap may touch, so a finished run
+    -- `succeeded` or `failed`, with the `finished_at`, the `error` and the counts
+    it earned -- is not written at all. It is called once, from `app.main`'s
+    lifespan after `init_db()`, before the app serves any request: a tick's guard
+    is the process's, so at startup a `running` row is by definition a row no
+    process is running.
+
+    The row ends `failed` with `REAPED_RUN_ERROR` and `finished_at` in the aware
+    UTC form `models.UTCDateTime` requires. Its counts are left exactly as the
+    dead run wrote them -- they are the record of how far it got -- and no other
+    table is read or written. The row keeps its `id`: nothing is deleted and no
+    row is reused.
+
+    The return value is the `UPDATE`'s row count, which is what a caller -- the
+    lifespan, and the test that starts the app twice -- reads to tell a reap that
+    finished rows from one that found nothing left to finish.
+    """
+    with db.session_scope() as session:
+        return session.execute(
+            update(Run)
+            .where(Run.status == "running")
+            .values(
+                status="failed",
+                finished_at=datetime.now(UTC),
+                error=REAPED_RUN_ERROR,
+            )
+        ).rowcount
 
 
 @router.get(
