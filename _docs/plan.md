@@ -20,10 +20,10 @@ tells you *why* a role fits, so you re-read the same postings repeatedly.
 1. **Resume upload.** `POST /resume` accepts a file, extracts plain text, stores
    it as the active resume. Rejects wrong type/oversized files with a clear
    error. Resume contents are never committed, never logged.
-2. **Watchlist.** Add a company by name plus its Greenhouse slug. List and
-   delete. Duplicate slugs are rejected.
+2. **Watchlist.** Add a company by name, board slug and source, Greenhouse when
+   the source is absent. List and delete. Duplicate slugs are rejected.
 3. **Poll.** `POST /internal/tick` (shared-secret header) walks the watchlist,
-   fetches each company's public Greenhouse job board, normalises postings,
+   fetches each company's public job board, normalises postings,
    and upserts them. Re-running is idempotent: a posting seen before is not
    inserted twice and does not alert twice. The tick starts its work as a
    background task and returns `202` immediately, writing a run row the UI

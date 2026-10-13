@@ -9,13 +9,14 @@ get re-read.
 
 **What it does.** A daily digest of new postings at companies on a watchlist,
 matched against the uploaded resume, with a plain-English reason and the gaps per
-match. A company is added by name and Greenhouse slug; once a day -- or whenever
-the owner presses the in-app **"Run digest now"** button -- the app fetches each
-company's public job board, normalises the postings, and scores the new ones
-against the resume: a score 0-100, why it fits and what is missing. New matches
-above the cutoff are grouped into one email; with nothing above it, no email is
-sent and the run says so. The UI lists the watchlist and the matches with their
-score, reasoning and gaps, and a match can be marked saved or dismissed.
+match. A company is added by name, board slug and source; once a day -- or
+whenever the owner presses the in-app **"Run digest now"** button -- the app
+fetches each company's public job board, normalises the postings, and scores the
+new ones against the resume: a score 0-100, why it fits and what is missing. New
+matches above the cutoff are grouped into one email; with nothing above it, no
+email is sent and the run says so. The UI lists the watchlist and the matches
+with their score, reasoning and gaps, and a match can be marked saved or
+dismissed.
 
 The full plan -- the behaviour spec, the non-goals and the constraints -- is
 `_docs/plan.md`.
@@ -678,10 +679,10 @@ adds the deployed-instance evidence once #16 exists.
 
 Each with what it costs, because a limitation without a consequence is a slogan.
 
-- **Greenhouse is the only source.** LinkedIn and Indeed are excluded on their
-  terms and Workday is not attempted — the reasons are in the next section — and
-  a second adapter is #28. A company without a Greenhouse board cannot be watched
-  at all: not watched badly, not watched.
+- **Greenhouse and Lever are the two sources.** LinkedIn and Indeed are excluded
+  on their terms and Workday is not attempted — the reasons are in the next
+  section. A company whose board is on neither cannot be watched at all: not
+  watched badly, not watched.
 - **One user, no accounts and no sharing.** There is no login and nothing scoped
   to a user: the watchlist, the resume and the matches belong to the instance, so
   two people cannot use one instance without sharing all three.
@@ -705,15 +706,17 @@ Each with what it costs, because a limitation without a consequence is a slogan.
 
 ## Sources deliberately not ingested
 
-**Greenhouse is the one source implemented**: `backend/app/sources/greenhouse.py`
-reads a company's public board JSON by slug, which needs no key and no account.
+**Greenhouse and Lever are the two sources implemented**:
+`backend/app/sources/greenhouse.py` and `backend/app/sources/lever.py` each read
+a company's public board JSON by slug, which needs no key and no account, and
+`app/sources/__init__.py`'s `SOURCES` resolves a stored source to its adapter.
 Three others were considered and left out, each with its own reason.
 
 - **LinkedIn** — partner-gated, and scraping it breaches its terms.
 - **Indeed** — the same: partner-gated, and scraping it breaches its terms.
 - **Workday and the other enterprise ATS providers** — their feeds are XML and
-  messier in shape, so a second adapter is a follow-up rather than a flag on this
-  one: #28.
+  messier in shape, so one is a third adapter rather than a flag on the two that
+  exist.
 
 ## How this repository was built, with AI
 
