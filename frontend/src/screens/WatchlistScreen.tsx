@@ -134,10 +134,16 @@ export default function WatchlistScreen() {
               <form onSubmit={(event) => move(event, company.id)}>
                 <label>
                   New board slug
-                  <input name="slug" defaultValue={company.slug} />
+                  <input
+                    name="slug"
+                    defaultValue={company.slug}
+                    aria-describedby={`slug-cost-${company.id}`}
+                  />
                 </label>
                 <button type="submit">Move to board</button>
-                <span>Moving closes this board's open postings; its matches are kept.</span>
+                <span id={`slug-cost-${company.id}`}>
+                  Moving closes this board's open postings; its matches are kept.
+                </span>
               </form>
               <button
                 type="button"

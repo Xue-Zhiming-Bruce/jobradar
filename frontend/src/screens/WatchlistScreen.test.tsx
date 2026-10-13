@@ -42,6 +42,17 @@ function renameRow(text: string, name: string) {
   fireEvent.click(within(row(text)).getByRole('button', { name: 'Rename' }))
 }
 
+/** The cost the row states before a move is sent. */
+const MOVE_COST = "Moving closes this board's open postings; its matches are kept."
+
+/** Types a board slug into a row's own field and submits that row's move form. */
+function moveRow(text: string, slug: string) {
+  fireEvent.change(within(row(text)).getByLabelText('New board slug'), {
+    target: { value: slug },
+  })
+  fireEvent.click(within(row(text)).getByRole('button', { name: 'Move to board' }))
+}
+
 /** The form's own controls, typed the way they are read back. */
 const typedInto = (label: string) => (screen.getByLabelText(label) as HTMLInputElement).value
 const selectedSource = () => (screen.getByLabelText('Source') as HTMLSelectElement).value
@@ -405,6 +416,128 @@ describe("the watchlist screen's edit controls", () => {
       expect(Object.keys(body)).not.toContain('slug')
     }
   })
+})
+
+describe("the watchlist screen's board move", () => {
+  it('gives each row the slug field, the move button and the move\'s cost before anything is sent', async () => {
+    const written: Recorded[] = []
+    server.use(
+      http.get('/watchlist', () => HttpResponse.json(twoRows)),
+      answeringPatch(written, twoRows[0]),
+    )
+    render(<WatchlistScreen />)
+    await screen.findByText('Acme (acme)')
+
+    const acme = row('Acme (acme)')
+
+    expect((within(acme).getByLabelText('New board slug') as HTMLInputElement).value).toBe('acme')
+    expect(within(acme).getByRole('button', { name: 'Move to board' })).toBeDefined()
+    expect(within(acme).getByText(MOVE_COST)).toBeDefined()
+    expect(within(row('Globex (globex)')).getByText(MOVE_COST)).toBeDefined()
+    // The field names the cost line as its description, so a screen reader reads it too.
+    expect(
+      (within(acme).getByLabelText('New board slug') as HTMLInputElement).getAttribute(
+        'aria-describedby',
+      ),
+    ).toBe(within(acme).getByText(MOVE_COST).id)
+    // The add form keeps the only `Board slug` field: a row's own is a second label.
+    expect(screen.getAllByLabelText('Board slug')).toHaveLength(1)
+    expect(written).toEqual([]) // stating the cost sends nothing by itself
+  })
+
+  it('moves one row to the slug the route answered with, and leaves every other row alone', async () => {
+    const written: Recorded[] = []
+    let reads = 0
+    server.use(
+      http.get('/watchlist', () => {
+        reads += 1
+        return HttpResponse.json(twoRows)
+      }),
+      // The route trims and lower-cases a slug, so the row must show the answer's
+      // own spelling and not the one that was typed.
+      answeringPatch(written, {
+        id: 1,
+        name: 'Acme',
+        slug: 'acme-corp',
+        is_active: true,
+        source: 'greenhouse',
+      }),
+    )
+    render(<WatchlistScreen />)
+    await screen.findByText('Acme (acme)')
+    const globex = row('Globex (globex)').outerHTML
+
+    moveRow('Acme (acme)', '  Acme-Corp  ')
+
+    expect(await screen.findByText('Acme (acme-corp)')).toBeDefined()
+    expect(written).toEqual([{ path: '/watchlist/1', body: { slug: '  Acme-Corp  ' } }])
+    expect(row('Globex (globex)').outerHTML).toBe(globex)
+    expect(reads).toBe(1) // no second read of the list
+  })
+
+  it('puts only the slug on the wire, and renders the whole row the answer carried', async () => {
+    const written: Recorded[] = []
+    server.use(
+      http.get('/watchlist', () => HttpResponse.json(twoRows)),
+      // Disagrees with the pre-write row on three fields, so a row built from local
+      // state, or from the row's other field, would show something else.
+      answeringPatch(written, {
+        id: 1,
+        name: 'Acme',
+        slug: 'acme-corp',
+        is_active: false,
+        source: 'lever',
+      }),
+    )
+    render(<WatchlistScreen />)
+    await screen.findByText('Acme (acme)')
+
+    // A name typed into the row's other field is not part of the move's body.
+    fireEvent.change(within(row('Acme (acme)')).getByLabelText('New name'), {
+      target: { value: 'Acme Ltd' },
+    })
+    moveRow('Acme (acme)', 'acme-corp')
+
+    const movedRow = (await screen.findByText('Acme (acme-corp)')).closest('li') as HTMLElement
+    expect(await within(movedRow).findByText('Inactive')).toBeDefined()
+    expect(within(movedRow).getByText('lever')).toBeDefined()
+    expect(within(movedRow).getByRole('button', { name: 'Activate' })).toBeDefined()
+    expect(screen.queryByText('Acme Ltd (acme-corp)')).toBeNull()
+    expect(written).toEqual([{ path: '/watchlist/1', body: { slug: 'acme-corp' } }])
+    expect(Object.keys(written[0].body as object)).toEqual(['slug'])
+  })
+
+  it.each<[number, string]>([
+    [404, "The board 'acme-corp' does not exist"],
+    [409, "The slug 'globex' is already watched on greenhouse"],
+    [502, "The board 'acme-corp' could not be read"],
+  ])(
+    "shows the route's own %i detail and leaves the list exactly as it was",
+    async (status, detail) => {
+      const written: Recorded[] = []
+      server.use(
+        http.get('/watchlist', () => HttpResponse.json(twoRows)),
+        http.patch('/watchlist/:id', async ({ request }) => {
+          written.push({ path: new URL(request.url).pathname, body: await request.json() })
+          return HttpResponse.json({ detail }, { status })
+        }),
+      )
+      render(<WatchlistScreen />)
+      await screen.findByText('Acme (acme)')
+      const before = screen.getAllByRole('listitem').map((listItem) => listItem.outerHTML)
+
+      moveRow('Acme (acme)', 'acme-corp')
+
+      expect((await screen.findByRole('alert')).textContent).toBe(detail)
+      expect(written).toEqual([{ path: '/watchlist/1', body: { slug: 'acme-corp' } }])
+      expect(screen.getAllByRole('listitem').map((listItem) => listItem.outerHTML)).toEqual(before)
+      // The refused slug stays in the field, so it can be corrected.
+      expect(
+        (within(row('Acme (acme)')).getByLabelText('New board slug') as HTMLInputElement).value,
+      ).toBe('acme-corp')
+      expect(screen.queryByText('Acme (acme-corp)')).toBeNull()
+    },
+  )
 })
 
 describe("the watchlist screen's three outcomes", () => {
