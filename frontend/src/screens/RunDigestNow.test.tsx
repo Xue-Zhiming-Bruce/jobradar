@@ -321,3 +321,116 @@ describe('the budget-stopped line', () => {
     expect(screen.queryByText(/not fetched/)).toBeNull()
   })
 })
+
+/**
+ * One test per case in #78's AC2-AC7: the sentence follows the row's own count
+ * and never the run's status.
+ */
+describe('the digest emailed line', () => {
+  /** Test helper: installs the fake clock, then answers the tick with the fresh row and the read with `row`. */
+  function useRunReads(row: JsonBodyType) {
+    useTestClock()
+    server.use(
+      http.post('/internal/tick', () => HttpResponse.json(runSummary, { status: 202 })),
+      http.get('/runs/:id', () => HttpResponse.json(row)),
+    )
+  }
+
+  it('says how many matches the digest emailed, beside the created line (AC2)', async () => {
+    useRunReads(runSucceeded)
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    expect(screen.getByText('Digest emailed: 3 matches.')).toBeDefined()
+    expect(screen.getByText('Digest finished: 4 matches created.')).toBeDefined()
+  })
+
+  it('says "1 match", never "1 matches" (AC3)', async () => {
+    useRunReads({ ...runSucceeded, matches_emailed: 1 })
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    expect(screen.getByText('Digest emailed: 1 match.')).toBeDefined()
+  })
+
+  it('reads a count of 0 as "no matches", not as silence (AC4)', async () => {
+    useRunReads({ ...runSucceeded, matches_emailed: 0 })
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    expect(screen.getByText('Digest emailed: no matches.')).toBeDefined()
+  })
+
+  it('renders no sentence for the tick 202\'s null count, still running (AC5)', async () => {
+    useRunReads(runSummary)
+    render(<RunDigestNow />)
+
+    // The fresh row: `running`, and no count recorded yet.
+    await runNow()
+    expect(screen.getByText('Digest running...')).toBeDefined()
+    expect(screen.queryByText(/Digest emailed/)).toBeNull()
+
+    await poll()
+    expect(screen.getByText('Digest running...')).toBeDefined()
+    expect(screen.queryByText(/Digest emailed/)).toBeNull()
+    expect(screen.queryByText(/null|undefined/)).toBeNull()
+  })
+
+  it('renders no sentence for a null count on a finished row (AC5)', async () => {
+    useRunReads({ ...runSucceeded, matches_emailed: null })
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    expect(screen.getByText('Digest finished: 4 matches created.')).toBeDefined()
+    expect(screen.queryByText(/Digest emailed/)).toBeNull()
+    expect(screen.queryByText(/null|undefined/)).toBeNull()
+  })
+
+  it('renders the sentence on a row that is still running (AC6)', async () => {
+    useRunReads({ ...runSummary, matches_emailed: 3 })
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    expect(screen.getByText('Digest running...')).toBeDefined()
+    expect(screen.getByText('Digest emailed: 3 matches.')).toBeDefined()
+  })
+
+  it('renders the sentence on a failed row whose digest still emailed (AC6)', async () => {
+    useRunReads({
+      ...runSummary,
+      status: 'failed',
+      error: 'Greenhouse timed out',
+      matches_emailed: 3,
+    })
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    expect(screen.getByText('Digest failed: Greenhouse timed out')).toBeDefined()
+    expect(screen.getByText('Digest emailed: 3 matches.')).toBeDefined()
+  })
+
+  it('prints the row\'s own emailed count, never the created one (AC7)', async () => {
+    useRunReads({ ...runSucceeded, matches_created: 4, matches_emailed: 3 })
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    // The fixture's 4 created and 3 emailed: two answers, neither derived from the other.
+    expect(screen.getByText('Digest finished: 4 matches created.')).toBeDefined()
+    expect(screen.getByText('Digest emailed: 3 matches.')).toBeDefined()
+    expect(screen.queryByText('Digest emailed: 4 matches.')).toBeNull()
+  })
+})
