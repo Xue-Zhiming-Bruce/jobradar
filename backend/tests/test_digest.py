@@ -40,8 +40,8 @@ from sqlalchemy.engine import Engine
 
 from app import db
 from app.main import app
-from app.matching.prefilter import REJECTION_REASON_PREFIX
-from app.matching.scorer import NOT_SCORED_PREFIX, FakeScorer, MatchResult
+from app.matching.prefilter import REJECTION_REASON_PREFIX, PrefilterDecision, record_rejection
+from app.matching.scorer import NOT_SCORED_PREFIX, FakeScorer, MatchResult, record_score
 from app.models import Company, Match, Posting, Resume, Run
 from app.routes import internal
 from app.routes.internal import TICK_SECRET_HEADER, get_mailer, get_pipeline, get_run_starter
@@ -233,6 +233,7 @@ def _match(
     reason: str = "Synthetic fit.",
     gaps: list[str] | None = None,
     state: str = "new",
+    outcome: str = "scored",
     created_at: datetime | None = None,
     notified_at: datetime | None = None,
 ) -> int:
@@ -240,7 +241,9 @@ def _match(
 
     `gaps` is written the way `scorer.record_score` writes it -- the JSON text of
     the list, or NULL when the scorer reported none -- so a case reads back the
-    shape the digest really meets.
+    shape the digest really meets. `outcome` is written as the writers write it:
+    `'scored'` unless a case is about a rejection or a not-scored result, and it
+    is the column the selection reads, not the reason's text.
     """
     with db.session_scope() as session:
         row = Match(
@@ -249,6 +252,7 @@ def _match(
             reason=reason,
             gaps=None if gaps is None else json.dumps(gaps),
             state=state,
+            outcome=outcome,
             created_at=created_at,
             notified_at=notified_at,
         )
@@ -299,6 +303,12 @@ def _notified(match_id: int) -> datetime | None:
     """The marker on one match row, read back through the app's own session."""
     with db.session_scope() as session:
         return session.get(Match, match_id).notified_at
+
+
+def _match_id_of(posting_id: int) -> int:
+    """The id of the one match row that posting has, read the way `_notified` reads a row."""
+    with db.session_scope() as session:
+        return session.scalar(select(Match.id).where(Match.posting_id == posting_id))
 
 
 def _tick(client: TestClient) -> Response:
@@ -412,7 +422,7 @@ def test_the_cutoff_defaults_to_seventy_and_is_read_per_call(
 
     monkeypatch.setenv(DIGEST_MIN_SCORE, "0")
 
-    assert digest.min_score() == 0  # 0 is legitimate, and the two prefixes are what it needs
+    assert digest.min_score() == 0  # 0 is legitimate, and `outcome` is what it needs
 
     monkeypatch.setenv(DIGEST_MIN_SCORE, "85")
     assert digest.min_score() == 85
@@ -435,42 +445,68 @@ def test_every_variable_is_named_in_digest_and_read_in_no_other_module() -> None
     assert DEFAULT_MIN_SCORE == 70
 
 
-# What qualifies: un-notified, at or above the cutoff, and neither prefix.
+# What qualifies: un-notified, at or above the cutoff, and scored.
 
 
 def test_a_prefiltered_and_a_not_scored_row_are_never_emailed_at_a_cutoff_of_zero(
     engine: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Both are stored at score 0, so at 0 the two prefixes are all that keeps them out."""
+    """All of these sit at `score = 0`, so at 0 the row's own `outcome` is what decides.
+
+    The rows come from the real writers -- `record_rejection`, and `record_score`
+    with a genuine 0 and with a model failure -- so this case measures the whole
+    chain rather than the selection's spelling of it. The reason texts keep the
+    prefixes the writers write, because #30 changes no stored text; the rejected
+    row with no prefix on its reason is kept out by the column and not the text,
+    and the genuine `('scored', 0)` row -- the case the prefixes could not express
+    -- is the one that goes out.
+    """
     monkeypatch.setenv(DIGEST_MIN_SCORE, "0")
     acme = _company()
-    rejected = _match(
-        _posting(acme, "rejected", title="Intern Backend Engineer"),
+    rejected_posting = _posting(acme, "rejected", title="Intern Backend Engineer")
+    record_rejection(rejected_posting, PrefilterDecision(reasons=("title term 'intern'",)))
+    rejected = _match_id_of(rejected_posting)
+    prefixless_rejection = _match(
+        _posting(acme, "rejected-note", title="Filed Away Engineer"),
         score=0,
-        reason=REJECTION_REASON_PREFIX + "title term 'intern'",
+        reason="An operator's own note, with no prefix on it.",
+        outcome="rejected",
     )
-    unscored = _match(
-        _posting(acme, "unscored", title="Unknown Data Engineer"),
-        score=0,
-        reason=NOT_SCORED_PREFIX + "the model call failed",
-        gaps=[],
+    unscored_posting = _posting(acme, "unscored", title="Unknown Data Engineer")
+    record_score(
+        unscored_posting,
+        MatchResult(score=0, reason=NOT_SCORED_PREFIX + "the model call failed", gaps=[]),
     )
-    scored = _match(
-        _posting(acme, "scored", title="Genuinely Scored Engineer"),
-        score=0,
-        reason="Synthetic fit, at the floor.",
+    unscored = _match_id_of(unscored_posting)
+    scored_posting = _posting(acme, "scored", title="Genuinely Scored Engineer")
+    record_score(
+        scored_posting, MatchResult(score=0, reason="Synthetic fit, at the floor.", gaps=[])
     )
+    scored = _match_id_of(scored_posting)
     mailer = FakeMailer()
 
     send_digest(mailer)
 
     _, body = _only_message(mailer)
     assert "Intern Backend Engineer" not in body
+    assert "Filed Away Engineer" not in body
     assert "Unknown Data Engineer" not in body
     assert REJECTION_REASON_PREFIX not in body and NOT_SCORED_PREFIX not in body
     assert "Genuinely Scored Engineer" in body  # a scored 0 is emailed at a cutoff of 0
-    assert (_notified(rejected), _notified(unscored)) == (None, None)
+    assert (_notified(rejected), _notified(prefixless_rejection), _notified(unscored)) == (
+        None,
+        None,
+        None,
+    )
     assert _notified(scored) is not None
+
+
+def test_the_selection_reads_the_outcome_column_and_neither_prefix() -> None:
+    """The reader changed in #30: one column, and no import of either constant."""
+    assert "REJECTION_REASON_PREFIX" not in DIGEST_SOURCE
+    assert "NOT_SCORED_PREFIX" not in DIGEST_SOURCE
+    assert "app.matching" not in DIGEST_SOURCE
+    assert "_is_a_non_score" not in DIGEST_SOURCE
 
 
 def test_no_match_is_skipped_for_its_state(engine: Engine) -> None:

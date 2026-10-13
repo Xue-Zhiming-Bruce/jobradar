@@ -11,10 +11,12 @@ a run sends through is `app.routes.internal.get_mailer()`'s, the one place a
 `SmtpMailer` is constructed.
 
 What qualifies is one selection and three rules: `notified_at IS NULL`, a score
-at or above `min_score()`, and a reason that is neither a prefilter rejection nor
-a not-scored result -- both of which are stored with `score = 0`, so at a cutoff
-of 0 the two prefixes are the only thing keeping a row the scorer never answered
-out of an email. `state` is deliberately not one of the rules: a match the owner
+at or above `min_score()`, and an `outcome` of `'scored'` -- the row's own marker
+of the model having answered it. A rejection and a not-scored result are both
+stored with `score = 0`, so at a cutoff of 0 that column is the only thing keeping
+a row the scorer never answered out of an email; before #30 the same rule was read
+off the reason's text, and the column names the same three states without parsing
+it. `state` is deliberately not one of the rules: a match the owner
 saved or dismissed before its first email is still emailed, because dismissing
 happens while browsing matches and this is the alerting step.
 
@@ -52,8 +54,6 @@ from typing import Protocol, runtime_checkable
 from sqlalchemy import select, update
 
 from app import db
-from app.matching.prefilter import REJECTION_REASON_PREFIX
-from app.matching.scorer import NOT_SCORED_PREFIX
 from app.models import Company, Match, Posting
 
 # The seven variables, named here and read in no other module, the way the scorer
@@ -198,8 +198,8 @@ def min_score() -> int:
 
     Read per call, so a deployment tunes the cutoff by setting the variable and a
     test sets one instead of storing a high-scoring match. `0` is a legitimate
-    value: at 0 every genuinely scored match qualifies, and the two reason
-    prefixes are what keeps the rows nobody scored out.
+    value: at 0 every genuinely scored match qualifies, and the row's own
+    `outcome` is what keeps the rows nobody scored out.
     """
     configured = os.environ.get(DIGEST_MIN_SCORE, "").strip()
     return int(configured) if configured else DEFAULT_MIN_SCORE
@@ -256,7 +256,7 @@ def send_digest(mailer: Mailer) -> None:
 
 
 def _selected() -> list[DigestMatch]:
-    """Every un-notified match at or above the cutoff, newest first, as plain values.
+    """Every un-notified score at or above the cutoff, newest first, as plain values.
 
     One statement, one session, over the three tables the message text is built
     from: the match, the posting it scores and the company that posting belongs
@@ -264,9 +264,10 @@ def _selected() -> list[DigestMatch]:
     and `match.id` descending breaks a tie between two rows written in the same
     instant.
 
-    The two reason prefixes are read from the modules that declared them and
-    filtered here rather than in SQL: the comparison is a plain `startswith`, so
-    no collation decides whether a row is a rejection.
+    The row qualifies by its own `outcome`: `'scored'` is the one value that means
+    the model answered, and the negation of it -- `outcome != 'scored'` -- is the
+    rule the two reason prefixes used to stand for. The `NOT NULL` check makes
+    `'scored'` the whole of it: a row is rejected, not scored, or scored.
     """
     cutoff = min_score()
     statement = (
@@ -275,6 +276,7 @@ def _selected() -> list[DigestMatch]:
         .join(Company, Posting.company_id == Company.id)
         .where(Match.notified_at.is_(None))
         .where(Match.score >= cutoff)
+        .where(Match.outcome == "scored")
         .order_by(Match.created_at.desc(), Match.id.desc())
     )
     with db.session_scope() as session:
@@ -289,17 +291,7 @@ def _selected() -> list[DigestMatch]:
                 gaps=_gaps(match.gaps),
             )
             for match, posting, company in session.execute(statement)
-            if not _is_a_non_score(match.reason)
         ]
-
-
-def _is_a_non_score(reason: str) -> bool:
-    """Whether that reason is a rejection or a not-scored result rather than a score.
-
-    Both are stored with `score = 0` and both are a row the scorer never
-    answered, so a cutoff of 0 would otherwise email them.
-    """
-    return reason.startswith(REJECTION_REASON_PREFIX) or reason.startswith(NOT_SCORED_PREFIX)
 
 
 def _gaps(stored: str | None) -> list[str]:
