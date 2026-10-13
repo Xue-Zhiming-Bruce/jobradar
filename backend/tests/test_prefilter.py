@@ -164,6 +164,15 @@ def _one_stored_posting() -> int:
     return _stored_postings(1)[0]
 
 
+def _run() -> int:
+    """One `run` row for the digest to write its own count on, the way #9's route writes one."""
+    with db.session_scope() as session:
+        run = Run(status="running")
+        session.add(run)
+        session.flush()
+        return run.id
+
+
 def _matches() -> list[dict[str, object]]:
     """Every `match` row as plain column values, in id order."""
     with db.session_scope() as session:
@@ -699,7 +708,7 @@ def test_a_row_a_digest_already_notified_is_not_emailed_again(
     monkeypatch.setenv(DIGEST_MIN_SCORE, "70")
     mailer = FakeMailer()
 
-    send_digest(mailer)
+    send_digest(mailer, _run())  # #36: the digest writes the count on this run's row
 
     stored = _matches()[0]
     assert (stored["outcome"], stored["score"], stored["notified_at"]) == (

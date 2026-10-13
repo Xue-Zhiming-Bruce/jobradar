@@ -1,4 +1,4 @@
-"""The digest (#10): the seam, the cutoff, the selection, the body, and the one marker write.
+"""The digest (#10): the seam, the cutoff, the selection, the body, and the two values it writes.
 
 Every case here sends through `digest.FakeMailer`, reached through
 `app.dependency_overrides[internal.get_mailer]` wherever the real provider runs:
@@ -14,8 +14,8 @@ pipeline would have stored. The tick-level ones drive the real `POST
 /internal/tick` over a temporary SQLite file the way `tests/test_internal_tick.py`
 does: the starter is replaced by one that runs the work on this thread, so the
 run row is final when the `202` is read, and #34's own two collaborators are
-injected where #9's provider calls `run_pipeline`, because the digest is global
-and takes no run id.
+injected where #9's provider calls `run_pipeline`, because the digest selects
+over every un-notified match and takes only the run's id.
 
 The resume is synthetic and its text is a sentinel: no case reads a real one,
 sets a key or opens a socket.
@@ -67,6 +67,7 @@ BACKEND_ROOT = Path(__file__).resolve().parent.parent
 APP_ROOT = BACKEND_ROOT / "app"
 TESTS_ROOT = BACKEND_ROOT / "tests"
 DIGEST_SOURCE = (APP_ROOT / "services" / "digest.py").read_text(encoding="utf-8")
+INTERNAL_SOURCE = (APP_ROOT / "routes" / "internal.py").read_text(encoding="utf-8")
 PIPELINE_SOURCE = (APP_ROOT / "services" / "pipeline.py").read_text(encoding="utf-8")
 
 # The shared secret a tick carries, and a resume whose text holds one value that
@@ -87,6 +88,7 @@ RUN_COLUMNS = (
     "error",
     "postings_seen",
     "matches_created",
+    "matches_emailed",
 )
 
 # Two instants a day apart, so "newest first" has something to sort and the
@@ -333,6 +335,56 @@ def _counts_writer(postings_seen: int, matches_created: int) -> Callable[..., No
     return work
 
 
+def _finished_run(matches_emailed: int | None) -> int:
+    """One finished `run` row carrying that count, for the cases that only read a row back."""
+    with db.session_scope() as session:
+        run = Run(
+            status="succeeded",
+            finished_at=datetime.now(UTC),
+            matches_emailed=matches_emailed,
+        )
+        session.add(run)
+        session.flush()
+        return run.id
+
+
+def _emailed(run_id: int) -> int | None:
+    """How many matches that run's row says it emailed, read through the app's own session."""
+    with db.session_scope() as session:
+        return session.get(Run, run_id).matches_emailed
+
+
+def _calls(source: str, function: str) -> bool:
+    """Whether this module *calls* `function`: a call node, not a mention in a docstring."""
+    return any(
+        isinstance(node, ast.Call) and getattr(node.func, "id", None) == function
+        for node in ast.walk(ast.parse(source))
+    )
+
+
+def _assigns(source: str, column: str) -> bool:
+    """Whether this module writes a run row's `column`: `row.column = ...` or `Run(column=...)`.
+
+    The two spellings and no others, for the reason
+    `tests/test_models.py::_assigns_a_match_column` gives: declaring a column in
+    the model, comparing it and rendering it into a response are none of them
+    writes.
+    """
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Run":
+            if any(keyword.arg == column for keyword in node.keywords):
+                return True
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            targets = []
+        if any(getattr(target, "attr", None) == column for target in targets):
+            return True
+    return False
+
+
 def _imported_roots(source: str) -> set[str]:
     """The top-level module names `source` imports, however it imports them."""
     roots: set[str] = set()
@@ -484,8 +536,9 @@ def test_a_prefiltered_and_a_not_scored_row_are_never_emailed_at_a_cutoff_of_zer
     )
     scored = _match_id_of(scored_posting)
     mailer = FakeMailer()
+    run_id = _run()
 
-    send_digest(mailer)
+    send_digest(mailer, run_id)
 
     _, body = _only_message(mailer)
     assert "Intern Backend Engineer" not in body
@@ -499,6 +552,7 @@ def test_a_prefiltered_and_a_not_scored_row_are_never_emailed_at_a_cutoff_of_zer
         None,
     )
     assert _notified(scored) is not None
+    assert _emailed(run_id) == 1  # the one row that went out, read off the run's own row
 
 
 def test_the_selection_reads_the_outcome_column_and_neither_prefix() -> None:
@@ -520,12 +574,14 @@ def test_no_match_is_skipped_for_its_state(engine: Engine) -> None:
         for state in states
     }
     mailer = FakeMailer()
+    run_id = _run()
 
-    send_digest(mailer)
+    send_digest(mailer, run_id)
 
     _, body = _only_message(mailer)
     assert [state for state in states if f"{state.title()} Engineer" not in body] == []
     assert [_notified(match_id) is None for match_id in ids.values()] == [False, False, False]
+    assert _emailed(run_id) == len(states)  # one email, and its row says how many it carried
 
 
 # One email, carrying all of them, newest first.
@@ -550,8 +606,9 @@ def test_one_send_carries_every_qualifying_match_newest_first(engine: Engine) ->
         created_at=EARLY + timedelta(days=3),
     )
     mailer = FakeMailer()
+    run_id = _run()
 
-    send_digest(mailer)
+    send_digest(mailer, run_id)
 
     assert len(mailer.sent) == 1  # one message for all of them, never one per match or company
     _, body = _only_message(mailer)
@@ -566,6 +623,7 @@ def test_one_send_carries_every_qualifying_match_newest_first(engine: Engine) ->
     assert order == sorted(order)
     assert [body.count(title) for title in expected] == [1] * len(expected)
     assert "Below Engineer" not in body
+    assert _emailed(run_id) == len(expected)  # the below-cutoff row is not counted
 
 
 # What the body carries: who, what, where, how well, why, and each gap on its own line.
@@ -583,8 +641,9 @@ def test_the_body_carries_the_company_title_url_score_reason_and_one_line_per_ga
         gaps=gaps,
     )
     mailer = FakeMailer()
+    run_id = _run()
 
-    send_digest(mailer)
+    send_digest(mailer, run_id)
 
     subject, body = _only_message(mailer)
     lines = body.splitlines()
@@ -609,8 +668,9 @@ def test_a_match_with_no_gaps_still_carries_its_score_and_reason(engine: Engine)
     _match(_posting(acme, "empty", title="Empty Gaps Engineer"), score=91, gaps=[])
     _match(_posting(acme, "null", title="Null Gaps Engineer"), score=92, gaps=None)
     mailer = FakeMailer()
+    run_id = _run()
 
-    send_digest(mailer)
+    send_digest(mailer, run_id)
 
     _, body = _only_message(mailer)
     lines = body.splitlines()
@@ -624,6 +684,7 @@ def test_a_match_with_no_gaps_still_carries_its_score_and_reason(engine: Engine)
     ]
     assert [line for line in lines if line.startswith("Gap: ")] == []
     assert "[]" not in body
+    assert _emailed(run_id) == 2  # two rows in the one message
 
 
 # The resume's text is user data: it is in no subject, no body and no log line.
@@ -637,8 +698,9 @@ def test_the_resume_marker_is_in_no_subject_no_body_and_no_log_line(
     acme = _company()
     _match(_posting(acme, "1", title="Backend Engineer"), score=90, gaps=["No Kubernetes."])
     mailer = FakeMailer()
+    run_id = _run()
 
-    send_digest(mailer)
+    send_digest(mailer, run_id)
 
     subject, body = _only_message(mailer)
     assert resume.active_resume_text() == RESUME_MARKER  # the row holding it really exists
@@ -660,24 +722,28 @@ def test_a_below_cutoff_match_is_absent_and_emailed_when_the_cutoff_lowers(
     high = _match(_posting(acme, "high", title="High Engineer"), score=90)
     low = _match(_posting(acme, "low", title="Low Engineer"), score=79)
     first = FakeMailer()
+    first_run = _run()
 
-    send_digest(first)
+    send_digest(first, first_run)
 
     _, first_body = _only_message(first)
     assert "High Engineer" in first_body
     assert "Low Engineer" not in first_body
     assert _notified(low) is None  # stored, un-notified, and still eligible
+    assert _emailed(first_run) == 1  # one match in that run's one message
 
     monkeypatch.setenv(DIGEST_MIN_SCORE, "70")
     second = FakeMailer()
+    second_run = _run()
 
-    send_digest(second)
+    send_digest(second, second_run)
 
     _, second_body = _only_message(second)
     assert "Low Engineer" in second_body
     assert "High Engineer" not in second_body  # already marked by the run above
     assert _notified(high) is not None
     assert _notified(low) is not None
+    assert _emailed(second_run) == 1  # and this row describes this run, not the one before it
 
 
 # The marker: one write, one instant, only what went out, and only after the send returned.
@@ -691,8 +757,9 @@ def test_only_the_sent_matches_are_marked_at_one_aware_utc_instant(
     second = _match(_posting(acme, "second", title="Second Engineer"), score=95)
     below = _match(_posting(acme, "below", title="Below Engineer"), score=10)
     mailer = TimedMailer()
+    run_id = _run()
 
-    send_digest(mailer)
+    send_digest(mailer, run_id)
 
     marks = {match_id: _notified(match_id) for match_id in (first, second, below)}
     assert marks[below] is None  # nothing that stayed home was marked
@@ -700,6 +767,7 @@ def test_only_the_sent_matches_are_marked_at_one_aware_utc_instant(
     assert marks[first] is not None and marks[first].tzinfo == UTC
     assert mailer.sent_at is not None
     assert marks[first] >= mailer.sent_at  # read after the send returned, never before
+    assert _emailed(run_id) == 2  # and the row counts what went out, not what stayed home
 
 
 def test_the_marker_is_written_in_one_session_scope_after_the_send(
@@ -707,6 +775,7 @@ def test_the_marker_is_written_in_one_session_scope_after_the_send(
 ) -> None:
     acme = _company()
     _match(_posting(acme, "1", title="Backend Engineer"), score=90)
+    run_id = _run()  # before the counting starts: this row is the test's own plumbing
     events: list[str] = []
     real_session_scope = db.session_scope
 
@@ -716,27 +785,35 @@ def test_the_marker_is_written_in_one_session_scope_after_the_send(
 
     monkeypatch.setattr(digest.db, "session_scope", counted_session_scope)
 
-    send_digest(RecordingMailer(events))
+    send_digest(RecordingMailer(events), run_id)
 
-    assert events == ["session", "send", "session"]  # the read, the send, then the one write
+    # The read, the send, then the one write the marker and the count share.
+    assert events == ["session", "send", "session"]
+    assert _emailed(run_id) == 1
 
 
-def test_a_second_run_sends_nothing_and_changes_no_marker(engine: Engine) -> None:
+def test_a_second_run_sends_nothing_writes_zero_and_changes_no_marker(engine: Engine) -> None:
     acme = _company()
     _match(_posting(acme, "1", title="Backend Engineer"), score=90)
     first = FakeMailer()
+    first_run = _run()
 
-    send_digest(first)
+    send_digest(first, first_run)
 
     assert len(first.sent) == 1
+    assert _emailed(first_run) == 1
     marked = _rows_of(Match)
 
     second = FakeMailer()
+    second_run = _run()
 
-    send_digest(second)
+    send_digest(second, second_run)
 
     assert second.sent == []
     assert _rows_of(Match) == marked  # the same instant, not a second one
+    # `0` and not NULL: this run really did email nothing, which is a different
+    # answer from the row of a run that never got to say (a failed send).
+    assert _emailed(second_run) == 0
 
 
 # A send that raises: nothing is marked, and the same matches go out next time.
@@ -750,25 +827,29 @@ def test_a_send_that_raises_writes_no_marker_and_its_matches_go_out_next_time(
     _match(_posting(acme, "2", title="Second Engineer"), score=95)
     before = _rows_of(Match)
     error = RuntimeError("the relay refused the message")
+    run_id = _run()
 
     with pytest.raises(RuntimeError) as raised:
-        send_digest(RaisingMailer(error))
+        send_digest(RaisingMailer(error), run_id)
 
     assert raised.value is error
     assert _rows_of(Match) == before  # every marker is still NULL, so nothing is lost
+    assert _emailed(run_id) is None  # and no count either: "unknown" is the honest value
 
     retried = FakeMailer()
+    retried_run = _run()
 
-    send_digest(retried)
+    send_digest(retried, retried_run)
 
     _, body = _only_message(retried)
     assert "First Engineer" in body and "Second Engineer" in body
+    assert _emailed(retried_run) == 2
 
 
 # A run with nothing to send: no send, no marker, and no row touched.
 
 
-def test_a_run_with_nothing_to_send_calls_send_never_and_writes_nothing(engine: Engine) -> None:
+def test_a_run_with_nothing_to_send_records_zero_and_writes_no_other_row(engine: Engine) -> None:
     acme = _company()
     _match(_posting(acme, "below", title="Below Engineer"), score=10)  # stored, below the cutoff
 
@@ -776,34 +857,60 @@ def test_a_run_with_nothing_to_send_calls_send_never_and_writes_nothing(engine: 
 
     before = _rows_of(Match)
     mailer = FakeMailer()
+    run_id = _run()
 
-    send_digest(mailer)
+    send_digest(mailer, run_id)
 
     assert mailer.sent == []
     assert _rows_of(Match) == before
+    assert _emailed(run_id) == 0  # "no new matches", written down by the run itself
 
     with db.session_scope() as session:
         session.execute(delete(Match))
 
     empty = FakeMailer()
+    empty_run = _run()
 
-    send_digest(empty)
+    send_digest(empty, empty_run)
 
     assert empty.sent == []  # and the same on a database with no match at all
+    assert _emailed(empty_run) == 0
 
 
-# The only write is the marker.
+# The row alone: "emailed nothing" told from "emailed", with no mailer and no match row.
 
 
-def test_the_digest_writes_no_row_but_the_marker(engine: Engine) -> None:
+def test_the_row_alone_tells_a_run_that_emailed_nothing_from_one_that_did(engine: Engine) -> None:
+    """The sentence `_docs/plan.md` asks for, read off three finished rows and nothing else.
+
+    No mailer is built, no log line is read and no `match` row is walked: `0` is
+    this run having emailed nothing, `2` is two matches in its one message, and
+    NULL is a run that never got to say -- which is why `0` is not the column's
+    default. Those three are different answers, and each is told from the others
+    by its own row.
+    """
+    emailed_nothing = _finished_run(0)
+    emailed_two = _finished_run(2)
+    unknown = _finished_run(None)
+
+    assert [_emailed(run_id) for run_id in (emailed_nothing, emailed_two, unknown)] == [0, 2, None]
+    assert _emailed(emailed_nothing) != _emailed(unknown)
+    assert _emailed(emailed_two) > _emailed(emailed_nothing)
+
+
+# The only writes: the marker on the matches, and the run's own count.
+
+
+def test_the_digest_writes_no_row_but_the_marker_and_the_runs_count(engine: Engine) -> None:
     acme = _company()
     _active_resume()
     _match(_posting(acme, "1", title="Backend Engineer", url="https://boards.test/1"), score=90)
     tables = (Match, Posting, Company, Resume)
     before = {model.__tablename__: _rows_of(model) for model in tables}
     mailer = FakeMailer()
+    run_id = _run()
 
-    send_digest(mailer)
+    send_digest(mailer, run_id)
 
     after = {model.__tablename__: _rows_of(model) for model in tables}
 
@@ -822,6 +929,7 @@ def test_the_digest_writes_no_row_but_the_marker(engine: Engine) -> None:
     assert after["posting"] == before["posting"]
     assert after["company"] == before["company"]
     assert after["resume"] == before["resume"]
+    assert _emailed(run_id) == 1  # the fourth table the digest writes: this run's own count
 
 
 # Where the call hangs: the second half of #9's provider, after #34's pipeline.
@@ -834,15 +942,42 @@ def test_the_digest_is_the_second_half_of_the_providers_callable(
     monkeypatch.setattr(internal, "run_pipeline", lambda run_id, **_: events.append("pipeline"))
     acme = _company()
     _match(_posting(acme, "1", title="Backend Engineer"), score=90)
+    run_id = _run()
 
-    get_pipeline(mailer=RecordingMailer(events))(_run())
+    get_pipeline(mailer=RecordingMailer(events))(run_id)
 
     assert events == ["pipeline", "send"]  # the walk first, the digest second
+    # The closure handed the digest the id it was called with, so the count lands
+    # on this run's row and on no other.
+    assert _emailed(run_id) == 1
 
 
 def test_the_provider_still_takes_no_arguments_and_its_work_still_takes_the_run_id() -> None:
     assert list(inspect.signature(get_pipeline(mailer=FakeMailer())).parameters) == ["run_id"]
     assert callable(get_pipeline())  # #9's tests call it with no arguments at all
+
+
+def test_the_run_id_bearing_send_digest_has_one_caller_outside_its_own_module() -> None:
+    """The provider's closure, and nothing else: no route and no other module sends a digest."""
+    callers = sorted(
+        path.relative_to(APP_ROOT).as_posix()
+        for path in APP_ROOT.rglob("*.py")
+        if _calls(path.read_text(encoding="utf-8"), "send_digest")
+    )
+
+    assert callers == ["routes/internal.py"]
+    assert "send_digest(mailer, run_id)" in INTERNAL_SOURCE  # with the id the closure was handed
+
+
+def test_the_digest_is_the_only_module_that_writes_the_emailed_count() -> None:
+    """One writer for the column: the digest's own `_record`, and no other module assigns it."""
+    assigning = sorted(
+        path.relative_to(APP_ROOT).as_posix()
+        for path in APP_ROOT.rglob("*.py")
+        if _assigns(path.read_text(encoding="utf-8"), "matches_emailed")
+    )
+
+    assert assigning == ["services/digest.py"]
 
 
 def test_a_run_whose_pipeline_raises_sends_no_email_and_the_match_goes_out_next_time(
@@ -856,12 +991,14 @@ def test_a_run_whose_pipeline_raises_sends_no_email_and_the_match_goes_out_next_
 
     monkeypatch.setattr(internal, "run_pipeline", the_walk_stored_it_and_the_next_board_failed)
     failing = FakeMailer()
+    failing_run = _run()
 
     with pytest.raises(SourceError):
-        get_pipeline(mailer=failing)(_run())
+        get_pipeline(mailer=failing)(failing_run)
 
     assert failing.sent == []
     assert [_notified(row["id"]) for row in _rows_of(Match)] == [None]
+    assert _emailed(failing_run) is None  # no send, so no count: the run never got to say
 
     monkeypatch.setattr(internal, "run_pipeline", lambda run_id, **_: None)
     succeeding = FakeMailer()
@@ -903,6 +1040,7 @@ def test_a_tick_sends_through_the_overridden_mailer_and_only_marks_what_it_sent(
     row = _run_row(response.json()["id"])
     assert (row["status"], row["error"]) == ("succeeded", None)
     assert (row["postings_seen"], row["matches_created"]) == (7, 3)
+    assert row["matches_emailed"] == 1  # the one match this run's digest carried
 
 
 def test_a_tick_with_nothing_to_send_succeeds_with_the_counts_the_pipeline_wrote(
@@ -920,6 +1058,7 @@ def test_a_tick_with_nothing_to_send_succeeds_with_the_counts_the_pipeline_wrote
     row = _run_row(response.json()["id"])
     assert (row["status"], row["error"]) == ("succeeded", None)
     assert (row["postings_seen"], row["matches_created"]) == (7, 3)
+    assert row["matches_emailed"] == 0  # and the row says the run had nothing to send
 
 
 def test_a_tick_whose_send_raises_ends_the_run_failed_with_the_transport_message(
@@ -940,6 +1079,7 @@ def test_a_tick_whose_send_raises_ends_the_run_failed_with_the_transport_message
     assert RESUME_MARKER not in str(row["error"]) and "Backend Engineer" not in str(row["error"])
     assert _notified(match_id) is None  # so the match is still there to send
     assert (row["postings_seen"], row["matches_created"]) == (1, 1)
+    assert row["matches_emailed"] is None  # a send that failed wrote no count (#10's rule)
 
     app.dependency_overrides[get_mailer] = lambda: fake_mailer
 
@@ -948,7 +1088,9 @@ def test_a_tick_whose_send_raises_ends_the_run_failed_with_the_transport_message
     _, body = _only_message(fake_mailer)
     assert "Backend Engineer" in body
     assert _notified(match_id) is not None
-    assert _run_row(succeeding.json()["id"])["status"] == "succeeded"
+    succeeded_row = _run_row(succeeding.json()["id"])
+    assert succeeded_row["status"] == "succeeded"
+    assert succeeded_row["matches_emailed"] == 1  # the retry's own row carries the count
 
 
 def test_the_resume_marker_reaches_no_subject_and_no_body_through_a_tick(

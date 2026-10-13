@@ -1,9 +1,10 @@
 """The digest: one email per run, carrying every match that qualifies, newest first.
 
-`send_digest(mailer)` is the whole of it and takes no run id: the matches it
+`send_digest(mailer, run_id)` is the whole of it: the matches it
 emails are every un-notified match in the database, not the ones this run
 created, which is what makes a run that failed mid-walk cost a retry rather than
-a missed alert. `Mailer` is the interface it sends through, the way #8 declares
+a missed alert, and the run id is what lets it record the count on the run row it
+belongs to. `Mailer` is the interface it sends through, the way #8 declares
 `MatchScorer`: `FakeMailer` stands in for the real one so a test asserts exactly
 what went out without a host, a port or a credential, and `SmtpMailer` is the
 real one -- the only code in this repository that imports `smtplib`. Which mailer
@@ -25,14 +26,17 @@ URL, the score, the reason and every gap string #8 stored as JSON -- decoded, on
 per line, so no raw JSON is printed. The rows come back newest first, one email
 for all of them, never one per match or per company.
 
-`match.notified_at` is the only marker, and this module's only write to any
-table: it is written for exactly the matches that went out, in one
-`db.session_scope()`, at one aware UTC instant read after `send` returned. A send
-that raises therefore leaves every marker NULL and the exception escapes to #9's
-`_run`, which records the run failed with the transport's own message -- so the
-same matches are emailed by the next successful run. Delivery is at-least-once:
-a database failure between a successful send and this write re-emails those
-matches, and the marker write is the only thing that stops a re-send.
+`match.notified_at` is the marker and `run.matches_emailed` is the run's own
+count, and the one `db.session_scope()` writes both: the marker for exactly the
+matches that went out, the count as their number, at one aware UTC instant read
+after `send` returned. A selection with nothing in it writes `0` -- this run
+emailed nothing -- and no marker at all. A send that raises writes neither: the
+exception escapes to #9's `_run`, which records the run failed with the
+transport's own message, the count stays NULL ("unknown" is the honest value for
+a send that failed), and the same matches are emailed by the next successful run.
+Delivery is at-least-once: a database failure between a successful send and this
+write re-emails those matches, and the marker write is the only thing that stops
+a re-send.
 
 Every variable this module reads is named here and read in no other module, per
 call and never at import, the way `app.services.resume.uploads_dir()` reads its
@@ -54,7 +58,7 @@ from typing import Protocol, runtime_checkable
 from sqlalchemy import select, update
 
 from app import db
-from app.models import Company, Match, Posting
+from app.models import Company, Match, Posting, Run
 
 # The seven variables, named here and read in no other module, the way the scorer
 # and the prefilter read their own settings in one place.
@@ -240,19 +244,23 @@ def digest_to() -> str:
     return os.environ.get(DIGEST_TO, "").strip()
 
 
-def send_digest(mailer: Mailer) -> None:
-    """Email every qualifying match in one message, then mark exactly those notified.
+def send_digest(mailer: Mailer, run_id: int) -> None:
+    """Email every qualifying match in one message, and record what this run did.
 
-    A run with nothing to send returns here and does nothing else: no `send`, no
-    marker write, no row touched -- which is why the ordinary "nothing new" run
-    stays a success. A `send` that raises lets the exception escape with nothing
-    marked, so the same matches go out with the next run.
+    The run's count is written on the row `run_id` names, in every case. A
+    selection with nothing in it writes `0` -- the run emailed nothing -- and does
+    nothing else: no `send`, no marker, no other row touched, which is why the
+    ordinary "nothing new" run stays a success and why its row says so. A send
+    that returned writes the number of matches in the one message that went out,
+    with the markers, so the row always describes its own run and never a stale
+    count from an earlier one. A `send` that raises writes nothing at all -- the
+    count stays NULL, which means "unknown" -- and the exception escapes, so the
+    same matches go out with the next run.
     """
     matches = _selected()
-    if not matches:
-        return
-    mailer.send(subject=DIGEST_SUBJECT, body=_message_body(matches))
-    _mark_notified([match.id for match in matches], datetime.now(UTC))
+    if matches:
+        mailer.send(subject=DIGEST_SUBJECT, body=_message_body(matches))
+    _record(run_id, matches)
 
 
 def _selected() -> list[DigestMatch]:
@@ -316,14 +324,26 @@ def _match_block(match: DigestMatch) -> str:
     return "\n".join(lines)
 
 
-def _mark_notified(match_ids: list[int], instant: datetime) -> None:
-    """Write the marker on exactly those matches: one session, one unit of work, one instant.
+def _record(run_id: int, matches: list[DigestMatch]) -> None:
+    """Write this run's own count, and the marker on the matches that went out: one unit of work.
 
-    Only the matches that went out are updated, and only `notified_at` is
-    written. The instant is the caller's, read after `send` returned, so a
-    failure after the send leaves the rows as they were and re-emails them.
+    The count is the list's length -- `0` when nothing qualified and nothing was
+    sent, which is a real answer rather than a missing one -- and it is written
+    before anything the send could have changed, because this is only reached once
+    `send` returned. Only the matches that went out are marked, and only their
+    `notified_at` is written; the instant is read here, after the send, so a
+    failure above leaves the rows as they were and re-emails them.
+
+    A run row that is no longer there -- deleted while the run was in flight -- is
+    nothing to write and not an error, the way `internal._end_run` treats it.
     """
     with db.session_scope() as session:
-        session.execute(
-            update(Match).where(Match.id.in_(match_ids)).values(notified_at=instant)
-        )
+        run = session.get(Run, run_id)
+        if run is not None:
+            run.matches_emailed = len(matches)
+        if matches:
+            session.execute(
+                update(Match)
+                .where(Match.id.in_([match.id for match in matches]))
+                .values(notified_at=datetime.now(UTC))
+            )

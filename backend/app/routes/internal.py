@@ -31,15 +31,15 @@ credential or a socket, and no test depends on timing. #34 and #10 are what the
 second seam returns: the walk over the watchlist in `app.services.pipeline`,
 which fetches a board per company, stores what it finds, scores each survivor
 and counts what it did, and then #10's digest, which emails the matches that
-qualify and marks them notified. The order matters: a pipeline that raises sends
-no email at all, so the matches it scored before a board failure go out with the
-next successful run.
+qualify, marks them notified and records how many it emailed on the run's row.
+The order matters: a pipeline that raises sends no email at all, so the matches
+it scored before a board failure go out with the next successful run.
 
-The row's seven columns are the whole progress record, and this module is the
+The row's eight columns are the whole progress record, and this module is the
 only writer of `status`, `finished_at` and `error`: the row is inserted `running`
-with both counts 0, the pipeline writes the counts as the run earns them, and the
-run's end writes `succeeded` or `failed` with the failure's own message in
-`error`. The request answered `202` long before any of that, so the row is where
+with both counts 0, the pipeline writes the counts as the run earns them and the
+digest writes what it emailed, and the run's end writes `succeeded` or `failed`
+with the failure's own message in `error`. The request answered `202` long before any of that, so the row is where
 a failure has to be readable -- never a traceback to a client that is gone.
 
 The guard against two runs at once is this process's, not the database's. The
@@ -152,6 +152,9 @@ def get_pipeline(mailer: Mailer = Depends(get_mailer)) -> Pipeline:
     hands it. `Depends` resolves this provider on every request, so a later tick
     gets a scorer with a cap of its own.
 
+    The digest is handed the run id the closure was called with, and this is the
+    one call site: the count it writes lands on that run's own row.
+
     The mailer arrives as a `Depends` default rather than as a required argument,
     so this provider is still callable with no arguments: #9's tests call
     `get_pipeline()` to inspect the shape of the work it returns.
@@ -161,7 +164,7 @@ def get_pipeline(mailer: Mailer = Depends(get_mailer)) -> Pipeline:
     def pipeline(run_id: int) -> None:
         """One run's work, in the shape the starter and the row lifecycle take."""
         run_pipeline(run_id, sources=SOURCES, scorer=scorer)
-        send_digest(mailer)
+        send_digest(mailer, run_id)
 
     return pipeline
 
