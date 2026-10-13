@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import CheckConstraint, DateTime, Dialect, String, UniqueConstraint
+from sqlalchemy import CheckConstraint, DateTime, Dialect, Integer, String, UniqueConstraint
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.schema import CreateIndex, CreateTable
 
@@ -71,6 +71,7 @@ _EXPECTED_COLUMNS = {
         "error",
         "postings_seen",
         "matches_created",
+        "matches_emailed",
     },
 }
 
@@ -293,6 +294,21 @@ def test_a_timestamp_without_a_utc_offset_is_rejected() -> None:
 
     aware = datetime(2024, 5, 6, 7, 8, 9, tzinfo=UTC)
     assert UTCDateTime().process_bind_param(aware, postgresql.dialect()) == aware
+
+
+def test_the_count_the_digest_writes_is_nullable_and_defaulted_by_neither_side() -> None:
+    """Three states, and `0` is one of them, so nothing fills the column in.
+
+    A `NOT NULL` column with a default of `0` would make every row written before
+    the digest recorded its count claim it emailed nothing (#36), so this one is
+    left to its only writer. Nullability is not one of the facts
+    `_DEFAULTED_COLUMNS` covers, hence the two assertions here.
+    """
+    column = Run.__table__.c.matches_emailed
+
+    assert isinstance(column.type, Integer)
+    assert column.nullable is True
+    assert column.default is None and column.server_default is None
 
 
 def test_defaults_are_python_side_except_the_outcome_the_database_fills() -> None:

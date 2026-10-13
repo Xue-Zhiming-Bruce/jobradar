@@ -235,3 +235,12 @@ class Run(Base):
     error: Mapped[str | None] = mapped_column(Text)
     postings_seen: Mapped[int] = mapped_column(Integer, default=0)
     matches_created: Mapped[int] = mapped_column(Integer, default=0)
+    # How many matches this run's own digest emailed. Three states, and none of
+    # them is a missing value: `0` is this run having emailed nothing at all, a
+    # positive value is that many, and NULL is "unknown" -- a row written before
+    # this column existed, or a run whose send failed, where #10 writes nothing.
+    # Nullable with no default of either kind, because a `NOT NULL` default would
+    # make every pre-marker row claim it emailed nothing, which is a lie for a run
+    # that did. `matches_created` (above) is not this: it counts `record_score`
+    # writes, and only the digest writes this.
+    matches_emailed: Mapped[int | None] = mapped_column(Integer)

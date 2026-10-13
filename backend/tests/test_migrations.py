@@ -4,7 +4,8 @@
 `migrations/versions/` bring a database that already exists to the same five
 tables -- the baseline, then the column #26 added, then the source column and
 check #28 added, then the outcome column, its check and its backfill #30 added,
-then the model and prompt-version columns #32 added. Two paths to one schema
+then the model and prompt-version columns #32 added, then the run's emailed
+count #36 added. Two paths to one schema
 can drift, so nothing here assumes a revision is right: every test runs `alembic
 upgrade head` -- in-process, through `alembic.command.upgrade` -- against the
 database the shared `engine` fixture in `tests/conftest.py` supplies, and then
@@ -71,7 +72,7 @@ ALEMBIC_INI = BACKEND_ROOT / "alembic.ini"
 REVISIONS_DIR = BACKEND_ROOT / "migrations" / "versions"
 
 # The readable revision ids, in the order they apply, and the files that hold
-# them. The head is the last of the five.
+# them. The head is the last of the six.
 BASELINE_REVISION = "0001_baseline"
 BASELINE_REVISION_FILE = "0001_baseline_five_tables.py"
 PARSED_FIELDS_REVISION = "0002_parsed_fields"
@@ -82,14 +83,17 @@ OUTCOME_REVISION = "0004_match_outcome"
 OUTCOME_REVISION_FILE = "0004_match_outcome.py"
 PROVENANCE_REVISION = "0005_match_provenance"
 PROVENANCE_REVISION_FILE = "0005_match_provenance.py"
+RUN_MATCHES_EMAILED_REVISION = "0006_run_matches_emailed"
+RUN_MATCHES_EMAILED_REVISION_FILE = "0006_run_matches_emailed.py"
 THE_REVISION_FILES = (
     BASELINE_REVISION_FILE,
     PARSED_FIELDS_REVISION_FILE,
     SOURCE_REVISION_FILE,
     OUTCOME_REVISION_FILE,
     PROVENANCE_REVISION_FILE,
+    RUN_MATCHES_EMAILED_REVISION_FILE,
 )
-HEAD_REVISION = PROVENANCE_REVISION
+HEAD_REVISION = RUN_MATCHES_EMAILED_REVISION
 
 # Alembic's own bookkeeping table: one row per applied revision. It is not one of
 # the five the models declare, and `alembic current` reads it.
@@ -373,6 +377,65 @@ def _provenance_values(engine: Engine) -> list[tuple[object, object]]:
             for row in connection.exec_driver_sql(
                 "SELECT model, prompt_version FROM match ORDER BY id"
             )
+        ]
+
+
+def _store_a_run_row_before_this_revision(
+    engine: Engine,
+    *,
+    status: str,
+    error: str | None,
+    postings_seen: int,
+    matches_created: int,
+) -> None:
+    """Insert one run row with only the columns this schema has always had.
+
+    SQL rather than the model, for the reason `_store_a_match_row_before_this_revision`
+    gives: the model declares the column this case is about to add, so an INSERT
+    naming it would fail on the schema that predates the revision -- which is the
+    schema this row is written into.
+    """
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO run"
+                " (status, started_at, finished_at, error, postings_seen, matches_created)"
+                " VALUES (:status, '2026-01-01 00:00:00', :finished_at, :error,"
+                " :postings_seen, :matches_created)"
+            ),
+            {
+                "status": status,
+                "finished_at": None if status == "running" else "2026-01-01 00:00:04",
+                "error": error,
+                "postings_seen": postings_seen,
+                "matches_created": matches_created,
+            },
+        )
+
+
+def _run_rows_before_the_column(engine: Engine) -> list[tuple[object, ...]]:
+    """The `run` values a database before this revision holds, read with SQL.
+
+    Read with SQL for the reason the resume helper above gives: the model declares
+    the column this case adds, and a SELECT naming it would fail on the schema
+    that predates it.
+    """
+    with engine.connect() as connection:
+        return [
+            tuple(row)
+            for row in connection.exec_driver_sql(
+                "SELECT id, status, started_at, finished_at, error, postings_seen,"
+                " matches_created FROM run ORDER BY id"
+            )
+        ]
+
+
+def _matches_emailed_values(engine: Engine) -> list[object]:
+    """The new column's values, in id order, read with SQL for the reason above."""
+    with engine.connect() as connection:
+        return [
+            row[0]
+            for row in connection.exec_driver_sql("SELECT matches_emailed FROM run ORDER BY id")
         ]
 
 
@@ -746,6 +809,48 @@ def test_the_provenance_columns_are_added_null_with_no_backfill(database: Engine
     assert _reflected_columns(database, "match")["prompt_version"] == ("VARCHAR(50)", True)
     assert _provenance_values(database) == [(None, None)] * len(reasons)
     assert _stored_match_texts(database) == before
+
+
+def test_the_run_column_is_added_null_with_no_backfill(database: Engine) -> None:
+    """#36's column: a database at #32 with two run rows gains it, both NULL.
+
+    The fixture's database is rebuilt at #32 -- the schema before this revision --
+    and two run rows go in: a succeeded run that mailed its matches and a failed
+    one. `upgrade head` adds the column: every row reads NULL, which means
+    "unknown" and not "none" -- a `NOT NULL` default of `0` would make the run
+    that did email claim it emailed nothing -- and no row's status, end, error or
+    other count is rewritten. `downgrade()` takes the column away again and
+    leaves the rows exactly as they were.
+    """
+    Base.metadata.drop_all(database)
+    command.upgrade(_config(), PROVENANCE_REVISION)
+    _store_a_run_row_before_this_revision(
+        database, status="succeeded", error=None, postings_seen=12, matches_created=4
+    )
+    _store_a_run_row_before_this_revision(
+        database,
+        status="failed",
+        error="the board refused: acme",
+        postings_seen=1,
+        matches_created=0,
+    )
+    before = _run_rows_before_the_column(database)
+    assert "matches_emailed" not in _reflected_columns(database, "run")
+
+    command.upgrade(_config(), "head")
+
+    assert _reflected_columns(database, "run")["matches_emailed"] == ("INTEGER", True)
+    assert _matches_emailed_values(database) == [None, None]
+    assert _run_rows_before_the_column(database) == before
+    assert [row[1] for row in before] == ["succeeded", "failed"]
+    assert [row[3] is not None for row in before] == [True, True]  # both ended, read as the engine's own type
+    assert [row[4] for row in before] == [None, "the board refused: acme"]
+    assert [row[5:] for row in before] == [(12, 4), (1, 0)]
+
+    command.downgrade(_config(), PROVENANCE_REVISION)
+
+    assert "matches_emailed" not in _reflected_columns(database, "run")
+    assert _run_rows_before_the_column(database) == before
 
 
 def test_the_four_documented_commands_do_what_they_say(database: Engine, tmp_path: Path) -> None:
