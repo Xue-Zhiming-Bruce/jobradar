@@ -106,10 +106,14 @@ What each piece is, where it sits, and the seam it talks through.
   compares the file with the document the app generates now and fails when the
   two differ, and `ci.yml`'s `contract` job regenerates it and fails on a diff,
   so a route change that was not exported is caught rather than merged.
-- **The MCP server in `mcp/`** -- the app reachable by an MCP client. A separate
-  uv project, `jobradar-mcp`, that drives this app over HTTP through five bounded
-  tools, in a process of its own, over stdio. Separate on purpose: the `mcp`
-  dependency never enters `backend/`'s tree and never enters the deployed image.
+- **The MCP server in `mcp/`** -- the app reachable by an MCP client. A uv
+  project, `jobradar-mcp`, that drives this app over HTTP through seven bounded
+  tools, in a process of its own over **stdio**, and -- since #43 -- served a
+  second way, over **MCP streamable HTTP**, mounted into the app's own process at
+  `/mcp`. #17 kept the tools in a separate project so the `mcp` dependency never
+  entered `backend/`'s tree or the deployed image; #43 reverses that to serve the
+  endpoint from the one container, and records it in
+  `_docs/decisions/2026-10-14-hosted-mcp.md`.
 
 ## Run the whole system
 
@@ -211,6 +215,7 @@ gitignored -- is where the real values go.
 | `UPLOADS_DIR` | `~/.jobradar/uploads`, outside the repository; compose sets `/data/uploads` |
 | `MAX_UPLOAD_BYTES` | 10 MiB per upload |
 | `TICK_SECRET` | every `POST /internal/tick` is `401`: there is no default secret |
+| `MCP_AUTH_TOKEN` | every request to the hosted MCP endpoint (`/mcp`) is `401`: the endpoint is off until an operator sets it |
 | `LLM_API_KEY` | scoring stops at the first posting; the run's row reads `failed` and names this variable |
 | `LLM_MODEL` | `gpt-4o-mini` |
 | `LLM_BASE_URL` | `https://api.openai.com/v1`; every model call posts to `<base>/chat/completions` |
@@ -496,12 +501,10 @@ relies on.
 
 ## MCP server
 
-`mcp/` is a second uv project, `jobradar_mcp`: a small MCP server that drives the
-app this repository already serves, over HTTP, through five bounded tools. It is a
-project of its own so the `mcp` dependency never enters `backend/`'s tree or the
-deployed image, and `cd backend && uv run pytest` is unaffected. It speaks MCP over
-**stdio** — no port, no host and no HTTP server of its own — and it holds no
-credential of its own beyond two variables:
+`mcp/` is a uv project, `jobradar_mcp`: a small MCP server that drives the
+app this repository already serves, over HTTP, through seven bounded tools. It
+speaks MCP over **stdio** — no port, no host and no HTTP server of its own — and
+it holds no credential of its own beyond two variables:
 
 | Variable | What it is |
 | --- | --- |
@@ -545,6 +548,37 @@ Each tool calls one endpoint the app serves today: `POST /watchlist`,
 `GET /watchlist`, `GET /matches`, `POST /internal/tick` and `GET /runs/{id}`.
 `trigger_run` sends one request and answers the row while the run is still
 running — it does not wait for it and does not poll it; `get_run` is the read.
+
+### The hosted endpoint (streamable HTTP)
+
+The same seven tools are also served over MCP **streamable HTTP** from the app's
+own container and origin — one process, one port, no second service and no CORS
+— so a hosted MCP client reaches them at the app's base URL. `app/mcp.py` mounts
+them at `/mcp` in `app/main.py`, and they are the same tool functions `mcp/`
+serves over stdio, not a copy. The mount adds no route to the API contract, so
+`backend/openapi.json` is unchanged by it.
+
+The endpoint is guarded by a bearer token and is **off by default**. The operator
+sets one variable on the instance — `MCP_AUTH_TOKEN` (the Configuration table
+above; on Render it is one more environment variable) — and gives its value to
+whoever may use the endpoint. From then on every request must carry:
+
+    Authorization: Bearer <the value of MCP_AUTH_TOKEN>
+
+The token is read from the environment **per request**, so rotating it needs no
+restart. An unconfigured deployment is not accidentally open: with
+`MCP_AUTH_TOKEN` unset or blank the endpoint refuses every request with `401`, and
+a request whose token is missing, blank or wrong is `401` too — no request
+reaches a tool without the right token. The value never appears in the browser,
+the repository, a served asset, a log line or a response body; the UI's API
+module does not call this path.
+
+A client is configured with the app's base URL and the path `/mcp`:
+
+    https://<the app's host>/mcp
+
+The transport streams its answers (SSE), so it needs a streamable-HTTP MCP
+client — the SDK's own, or any other — rather than a plain `curl`.
 
 ### Run it, and register it
 
