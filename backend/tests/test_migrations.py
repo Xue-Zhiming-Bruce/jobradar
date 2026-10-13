@@ -2,7 +2,8 @@
 
 `app.db.init_db()` creates the five tables in an empty database; the revisions in
 `migrations/versions/` bring a database that already exists to the same five
-tables -- the baseline, and then the column #26 added. Two paths to one schema
+tables -- the baseline, then the column #26 added, then the source column and
+check #28 added. Two paths to one schema
 can drift, so nothing here assumes a revision is right: every test runs `alembic
 upgrade head` -- in-process, through `alembic.command.upgrade` -- against the
 database the shared `engine` fixture in `tests/conftest.py` supplies, and then
@@ -64,13 +65,19 @@ ALEMBIC_INI = BACKEND_ROOT / "alembic.ini"
 REVISIONS_DIR = BACKEND_ROOT / "migrations" / "versions"
 
 # The readable revision ids, in the order they apply, and the files that hold
-# them. The head is the last of the two.
+# them. The head is the last of the three.
 BASELINE_REVISION = "0001_baseline"
 BASELINE_REVISION_FILE = "0001_baseline_five_tables.py"
 PARSED_FIELDS_REVISION = "0002_parsed_fields"
 PARSED_FIELDS_REVISION_FILE = "0002_add_resume_parsed_fields.py"
-THE_REVISION_FILES = (BASELINE_REVISION_FILE, PARSED_FIELDS_REVISION_FILE)
-HEAD_REVISION = PARSED_FIELDS_REVISION
+SOURCE_REVISION = "0003_company_source"
+SOURCE_REVISION_FILE = "0003_company_source.py"
+THE_REVISION_FILES = (
+    BASELINE_REVISION_FILE,
+    PARSED_FIELDS_REVISION_FILE,
+    SOURCE_REVISION_FILE,
+)
+HEAD_REVISION = SOURCE_REVISION
 
 # Alembic's own bookkeeping table: one row per applied revision. It is not one of
 # the five the models declare, and `alembic current` reads it.
@@ -441,6 +448,32 @@ def test_the_migrated_schema_refuses_a_duplicate_company_slug(database: Engine) 
             session.add(Company(name="Acme Again", slug="acme"))
 
     _assert_the_engine_named_what_it_refused(refusal.value, "company.slug", "company_slug_key")
+
+
+def test_the_migrated_schema_holds_the_source_column_and_its_check(database: Engine) -> None:
+    """Autogenerate does not detect a check constraint, so the revision carries it by hand."""
+    _migrate(database)
+
+    assert _reflected_columns(database, "company")["source"] == ("VARCHAR(20)", False)
+    assert {
+        check["name"] for check in inspect(database).get_check_constraints("company")
+    } == {"ck_company_source_values"}
+
+
+def test_the_migrated_schema_refuses_a_source_outside_the_vocabulary(database: Engine) -> None:
+    _migrate(database)
+
+    with db.session_scope() as session:
+        session.add(Company(name="Acme", slug="acme"))
+
+    with pytest.raises(IntegrityError) as refusal:
+        with db.session_scope() as session:
+            session.add(Company(name="Acme Lever", slug="acme-lever", source="workday"))
+
+    _assert_the_engine_named_what_it_refused(refusal.value, "ck_company_source_values")
+
+    with db.session_scope() as session:
+        assert [company.source for company in session.scalars(select(Company))] == ["greenhouse"]
 
 
 def test_the_migrated_schema_refuses_a_second_active_resume(database: Engine) -> None:

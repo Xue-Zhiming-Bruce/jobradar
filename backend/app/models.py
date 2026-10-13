@@ -113,13 +113,25 @@ class Resume(Base):
 
 
 class Company(Base):
-    """One watchlist entry: a company and the Greenhouse board slug to poll."""
+    """One watchlist entry: a company, the board slug to poll, and that board's source."""
 
     __tablename__ = "company"
+    # The vocabulary `source` accepts, as a named check the database enforces --
+    # the same statement on both engines, no dialect enum. A value outside it,
+    # `workday` say, is an `IntegrityError` and not a row.
+    __table_args__ = (
+        CheckConstraint(
+            "source IN ('greenhouse', 'lever')", name="ck_company_source_values"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255))
     slug: Mapped[str] = mapped_column(String(255), unique=True)
+    # Which adapter fetches this board -- one of `app.sources.SOURCES`. Defaulted
+    # for the ORM so a row added without a source is Greenhouse, which is what
+    # every row written before the column existed was.
+    source: Mapped[str] = mapped_column(String(20), default="greenhouse")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow)
 

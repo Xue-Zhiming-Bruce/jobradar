@@ -81,6 +81,7 @@ _STRING_LENGTHS = {
     ("resume", "parsed_fields"): None,
     ("company", "name"): 255,
     ("company", "slug"): 255,
+    ("company", "source"): 20,
     ("posting", "external_id"): 255,
     ("posting", "title"): None,
     ("posting", "location"): 255,
@@ -123,6 +124,7 @@ _DEFAULTED_COLUMNS = {
     ("resume", "is_active"),
     ("company", "is_active"),
     ("company", "created_at"),
+    ("company", "source"),
     ("posting", "first_seen_at"),
     ("posting", "updated_at"),
     ("match", "state"),
@@ -347,6 +349,7 @@ def test_the_checks_are_named_and_carry_plain_string_columns() -> None:
     }
 
     assert checks == {
+        ("company", "ck_company_source_values"): "source IN ('greenhouse', 'lever')",
         ("match", "ck_match_score_range"): "score >= 0 AND score <= 100",
         ("match", "ck_match_state_values"): "state IN ('new', 'saved', 'dismissed')",
         ("run", "ck_run_status_values"): "status IN ('running', 'succeeded', 'failed')",
@@ -357,6 +360,7 @@ def test_the_checks_are_named_and_carry_plain_string_columns() -> None:
         ), dialect_name
         # The vocabulary rides on a bounded string on both engines: no ENUM type
         # and no dialect import, which `test_no_app_module_names_a_dialect` holds.
+        assert "source VARCHAR(20) NOT NULL" in ddl, dialect_name
         assert "state VARCHAR(20) NOT NULL" in ddl, dialect_name
         assert "status VARCHAR(20) NOT NULL" in ddl, dialect_name
 
