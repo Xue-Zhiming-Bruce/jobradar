@@ -283,14 +283,12 @@ def rematch_stored_postings(run_id: int, *, scorer: MatchScorer) -> None:
     other half of #64: where the tick decides only the postings its board just
     created, this decides the ones an earlier run stored -- the resume the rules
     read, or the prefilter configuration the process holds, changed after that run.
-    It takes
-    no `sources` and no `sleep`: no adapter is constructed and none is called, no
-    `posting` column moves (`closed_at` included) and no `company.etag` /
-    `last_modified` moves, so `postings_seen` stays 0 and the run's own
-    `run_company` rows are the walk's -- this path writes none, `_recorded_failure`
-    finds none, and the run ends `succeeded`. No digest runs here either: the next
-    tick emails what the re-match produced, through the digest's own
-    `notified_at IS NULL` selection.
+    It takes no `sources` and no `sleep`: no adapter is constructed and none is
+    called, no `posting` column moves (`closed_at` included) and no `company.etag` /
+    `last_modified` moves, so `postings_seen` stays 0 and the run's own `run_company`
+    rows are the walk's -- this path writes none, `_recorded_failure` finds none, and
+    the run ends `succeeded`. No digest runs here either: the next tick emails what
+    the re-match produced, through the digest's own `notified_at IS NULL` selection.
 
     The candidates are every open posting whose `match` row is missing or the owner
     has neither acted on nor been told about (`state = 'new'` and
