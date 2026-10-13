@@ -35,6 +35,23 @@ Definition of done:
 Ignore what the implementation says it does. Only the acceptance criteria
 and the running code count.
 
+## Checking without losing the run
+
+- A mutation check or a probe is **optional evidence**, never the task. The
+  verdict is. If one costs you more than a couple of turns, drop it and say in
+  the report that you verified by reading and running instead.
+- Never edit the worktree to make a check. When its tests fail after you have
+  edited a file, that is your edit passing judgement, not a defect — restore
+  the file and stop re-running it. Whatever is in the worktree at the end must
+  be `git status --short` empty.
+- Do the edit in a `/tmp` copy, with `python3` and `re.sub`. `sed -i` is a
+  different dialect on macOS and is not worth debugging.
+- Check the issue's criteria, not a stricter rule you inferred. A probe that
+  asserts more than the issue does — a read per overlapping poll, a bound the
+  criterion never names — and then reports that as a failure has written its
+  own bug report. Note such a finding in your report as out-of-criteria, and
+  let the orchestrator decide whether it deserves a follow-up issue.
+
 If the acceptance criteria are missing from the issue, or the work was
 dispatched with criteria that are not written down, say so and ask before
 inventing them. A check against criteria you guessed yourself is not a
