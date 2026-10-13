@@ -333,7 +333,7 @@ def _store_a_match_row_before_this_revision(
         company_id = connection.execute(
             text(
                 "INSERT INTO company (name, slug, source, is_active, created_at)"
-                " VALUES (:name, :slug, 'greenhouse', 1, '2026-01-01 00:00:00')"
+                " VALUES (:name, :slug, 'greenhouse', TRUE, '2026-01-01 00:00:00')"
                 " RETURNING id"
             ),
             {"name": f"Acme {external_id}", "slug": slug},
@@ -462,7 +462,7 @@ def _store_company_rows_before_this_revision(engine: Engine, *slugs: str) -> Non
             connection.execute(
                 text(
                     "INSERT INTO company (name, slug, source, is_active, created_at)"
-                    " VALUES (:name, :slug, 'greenhouse', 1, '2026-01-01 00:00:00')"
+                    " VALUES (:name, :slug, 'greenhouse', TRUE, '2026-01-01 00:00:00')"
                 ),
                 {"name": slug.capitalize(), "slug": slug},
             )
