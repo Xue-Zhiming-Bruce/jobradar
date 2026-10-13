@@ -14,6 +14,15 @@ way `score_prompt.txt` is resolved. The mount is registered after every
 first it would answer `/healthz` and the API with 404s. When nothing is built
 (import, the suite, `uv run uvicorn` on a fresh clone) no mount is registered
 and the app is exactly the API it was.
+
+`#40` gives the mount one behavior of its own: a file under `assets/` is cached
+forever and the page is not. Vite names each built file with a hash of its own
+contents -- `index-B6OjL1iC.js` -- so a new build never reuses an old name and
+the browser may keep the old file without ever asking again. `index.html` names
+those hashes and has none itself, so caching it would serve a page pointing at a
+build that is no longer there; it is revalidated instead. Without this, the
+`cache-control` was absent on both and the browser made a conditional request for
+every hashed asset on every load.
 """
 
 import os
@@ -23,9 +32,10 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.types import Scope
 
 from app.db import init_db
 from app.routes.internal import router as internal_router
@@ -44,10 +54,31 @@ API_VERSION = "0.1.0"
 STATIC_DIR_VARIABLE = "STATIC_DIR"
 DEFAULT_STATIC_DIR = Path(__file__).parent / "static"
 
+# A year, which is as long as the name's content hash stays valid.
+ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
+# Revalidate every load: the page is what names the current build's hashes.
+PAGE_CACHE_CONTROL = "no-cache"
+
 
 def static_dir() -> Path:
     """`STATIC_DIR`, or the directory the image copies the build into when unset."""
     return Path(os.environ.get(STATIC_DIR_VARIABLE, "").strip() or DEFAULT_STATIC_DIR)
+
+
+class BuiltUiFiles(StaticFiles):
+    """`StaticFiles`, with the `cache-control` the requested path deserves.
+
+    The path arrives relative to the mount, so `assets/`-prefixed is a built
+    asset (`index-B6OjL1iC.js`) and anything else -- `index.html`, serving `/` --
+    is the page. Only the assets carry a content hash, so only they may be kept.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers["cache-control"] = (
+            ASSET_CACHE_CONTROL if path.startswith("assets/") else PAGE_CACHE_CONTROL
+        )
+        return response
 
 
 class Health(BaseModel):
@@ -105,4 +136,4 @@ app.include_router(matches_router)
 # Last, after every `include_router` above: the API's own paths are matched
 # first, and only a path none of them claims reaches the built UI.
 if static_dir().is_dir():
-    app.mount("/", StaticFiles(directory=static_dir(), html=True), name="ui")
+    app.mount("/", BuiltUiFiles(directory=static_dir(), html=True), name="ui")

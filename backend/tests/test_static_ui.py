@@ -11,6 +11,13 @@ holding an `index.html` and one hashed asset, and the module is reloaded because
 the decision to mount is taken when it is imported -- the same way a real import
 takes it. The paths checked are the committed contract's own, read from
 `backend/openapi.json`, so a route the mount swallowed cannot go unnoticed.
+
+`#40` adds two claims about that mount: the hashed asset answers a long-lived
+`cache-control` and the page does not, and a path in neither the contract nor the
+build is a `404` from the mount rather than an unhandled error. Both are asserted
+here, against a path that is not in the contract, because a future mount that
+falls back to `index.html` for every unknown path (what client-side routing
+would need) is exactly what the second one would catch.
 """
 
 import importlib
@@ -101,6 +108,41 @@ def test_healthz_answers_json_and_is_not_shadowed_by_the_mount(monkeypatch, tmp_
     assert response.headers["content-type"] == "application/json"
     assert response.json() == {"status": "ok"}
 
+
+def test_hashed_assets_are_cached_forever_and_the_page_is_not(monkeypatch, tmp_path: Path) -> None:
+    """A hashed asset can be kept for a year; `index.html` names the hashes, so it may not."""
+    _built_ui(tmp_path / "static")
+    app = _app_with_static_dir(monkeypatch, tmp_path / "static", tmp_path)
+
+    with TestClient(app) as client:
+        asset = client.get(f"/assets/{ASSET_NAME}")
+        page = client.get("/")
+
+    assert asset.headers["cache-control"] == "public, max-age=31536000, immutable"
+    # `no-cache` still stores the page, it revalidates it: a header that says
+    # "keep this for as long as the asset" is the failure this catches.
+    assert page.headers["cache-control"] == "no-cache"
+    assert page.headers["cache-control"] != asset.headers["cache-control"]
+
+
+def test_an_unknown_path_is_the_mount_404_and_the_api_still_answers(monkeypatch, tmp_path: Path) -> None:
+    """Nothing is built at `/no/such/path`, so the mount answers, and `/healthz` is untouched.
+
+    There is no client-side router in the UI, so a deep link has no `index.html`
+    to fall back to: the mount's own `404` is the answer until one exists.
+    """
+    _built_ui(tmp_path / "static")
+    app = _app_with_static_dir(monkeypatch, tmp_path / "static", tmp_path)
+
+    with TestClient(app) as client:
+        unknown = client.get("/no/such/path")
+        health = client.get("/healthz")
+
+    assert unknown.status_code == 404
+    assert unknown.headers["content-type"].startswith("application/json")
+    assert unknown.json() == {"detail": "Not Found"}
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok"}
 
 @pytest.mark.parametrize(("method", "path", "payload", "status", "body"), _CONTRACT_REQUESTS)
 def test_every_contract_path_is_answered_by_its_own_route(
