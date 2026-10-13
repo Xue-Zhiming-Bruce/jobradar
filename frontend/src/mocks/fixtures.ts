@@ -25,6 +25,7 @@ export const runSummary = {
   matches_created: 0,
   matches_emailed: null,
   companies_not_fetched: null,
+  postings_not_rematched: null,
   // No company has been attempted yet, so the list the `202` answers with is empty.
   company_outcomes: [],
 }
@@ -40,6 +41,7 @@ export const runSucceeded = {
   matches_created: 4,
   matches_emailed: 3,
   companies_not_fetched: null,
+  postings_not_rematched: null,
   company_outcomes: [
     { company_id: 1, slug: 'acme', outcome: 'fetched', error: null },
     { company_id: 2, slug: 'globex', outcome: 'not_modified', error: null },

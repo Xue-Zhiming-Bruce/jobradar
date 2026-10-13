@@ -4,7 +4,7 @@ A tick answers `202` with a run row while the work is still ahead of it, so this
 route is how a client -- the owner's browser, and #12's UI -- reads the rest:
 `running` while the run is in flight, then `succeeded` or `failed` with the
 counts the run earned and the failure's message when there was one. Nothing here
-is computed or invented: the body is the row's own nine columns plus the per-company
+is computed or invented: the body is the row's own ten columns plus the per-company
 outcomes of the run, because the row is the whole progress record this app keeps,
 and `app.models.Run` and `app.models.RunCompany` are where their meaning is
 declared.
@@ -58,7 +58,7 @@ class RunCompanyOutcome(BaseModel):
 
 
 class RunSummary(BaseModel):
-    """One `run` row as this API renders it: its nine columns and its per-company outcomes.
+    """One `run` row as this API renders it: its ten columns and its per-company outcomes.
 
     The same body a `202` from `POST /internal/tick` carries. `finished_at` and
     `error` are absent until the run ends, and the two counts the walk earns are
@@ -70,7 +70,10 @@ class RunSummary(BaseModel):
     send failed, and a different answer from a run that really did email none.
     `companies_not_fetched` is NULL for a run the board-call budget did not stop,
     which includes a run still in flight, and holds the count of active companies
-    the walk left for a later run when it did (#56).
+    the walk left for a later run when it did (#56). `postings_not_rematched` is
+    the same shape for a re-match: NULL for every tick, and every re-match whose
+    model cap left nothing, and a positive count of the passers a re-match's cap
+    left for a later run (#64).
     `company_outcomes` is one entry per company the run attempted and is empty for
     a run that has not attempted one yet -- the `202`'s fresh row -- so a client
     reads the same shape from both routes at every point in a run's life.
@@ -85,6 +88,7 @@ class RunSummary(BaseModel):
     matches_created: int
     matches_emailed: int | None
     companies_not_fetched: int | None
+    postings_not_rematched: int | None
     company_outcomes: list[RunCompanyOutcome]
 
 
@@ -126,6 +130,7 @@ def run_summary(run: Run) -> RunSummary:
         matches_created=run.matches_created,
         matches_emailed=run.matches_emailed,
         companies_not_fetched=run.companies_not_fetched,
+        postings_not_rematched=run.postings_not_rematched,
         company_outcomes=outcomes,
     )
 

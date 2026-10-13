@@ -39,7 +39,7 @@ from app.routes import internal
 from app.routes.internal import get_pipeline, get_run_starter
 from app.routes.runs import REAPED_RUN_ERROR, reap_stale_runs
 
-# The nine columns of a run plus the per-company outcomes it recorded, and
+# The ten columns of a run plus the per-company outcomes it recorded, and
 # therefore the whole body this route may answer with. A field that is not here is
 # a field the route invented.
 RUN_FIELDS = {
@@ -52,6 +52,7 @@ RUN_FIELDS = {
     "matches_created",
     "matches_emailed",
     "companies_not_fetched",
+    "postings_not_rematched",
     "company_outcomes",
 }
 
@@ -100,6 +101,7 @@ def test_a_running_run_reads_back_exactly_as_its_row_holds_it(client: TestClient
     assert body["matches_created"] == 0
     assert body["matches_emailed"] is None  # no digest of this run has recorded one yet
     assert body["companies_not_fetched"] is None  # and no budget stopped it yet
+    assert body["postings_not_rematched"] is None  # and it is a tick, not a re-match
     assert body["company_outcomes"] == []  # and no company has been attempted yet
     assert datetime.fromisoformat(body["started_at"]) is not None
 
@@ -203,6 +205,36 @@ def test_the_body_tells_a_run_the_budget_stopped_from_one_that_reached_the_end(
     assert answered == {stopped: 3, reached_the_end: None}
 
 
+# What a re-match's own model cap left: NULL for a tick, `0` for a pass that
+# decided every candidate, a count for a truncated one -- three readings, and the
+# read serves the row's own value (#64).
+
+
+def test_the_body_tells_a_re_match_that_left_nothing_from_one_that_left_some_and_a_tick(
+    engine: Engine,
+) -> None:
+    """Three finished runs, seeded through the app's own session: a tick's NULL, a re-match's
+    `0`, and a re-match that left three passers. No re-match is run -- the column is the row's own.
+    """
+    ended = datetime.now(UTC)
+    tick = seed(status="succeeded", finished_at=ended)
+    decided_everything = seed(status="succeeded", finished_at=ended, postings_not_rematched=0)
+    left_three = seed(status="succeeded", finished_at=ended, postings_not_rematched=3)
+
+    assert (
+        run_row(tick).postings_not_rematched,
+        run_row(decided_everything).postings_not_rematched,
+    ) == (None, 0)
+
+    with TestClient(app) as read_client:
+        answered = {
+            run_id: read(read_client, run_id).json()["postings_not_rematched"]
+            for run_id in (tick, decided_everything, left_three)
+        }
+
+    assert answered == {tick: None, decided_everything: 0, left_three: 3}
+
+
 # What a run recorded about each company it attempted: an outcome per company, and
 # the failure's own message on the company it names (#59).
 
@@ -301,7 +333,7 @@ def test_reading_a_run_needs_no_secret(
 def test_the_body_carries_no_secret_no_resume_text_and_no_database_url(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The body is the row's nine columns and its per-company outcomes: nothing private rides along."""
+    """The body is the row's ten columns and its per-company outcomes: nothing private rides along."""
     monkeypatch.setenv("TICK_SECRET", SECRET)
     run_id = seed(status="failed", error="the board refused: acme")
 

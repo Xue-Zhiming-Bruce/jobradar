@@ -37,7 +37,7 @@ it scored before a real failure go out with the next successful run; a walk that
 recorded a failed board is not that case -- it returned, so its digest still
 emails what the boards that answered produced (#59).
 
-The row's nine columns are the whole progress record, and this module is the only
+The row's ten columns are the whole progress record, and this module is the only
 writer of `status`, `finished_at` and `error`: the row is inserted `running` with
 both counts 0, the pipeline writes the counts as the run earns them, its own
 per-company outcome rows and the digest's `matches_emailed`, and the run's end
@@ -55,7 +55,15 @@ whole rule: `acquire(blocking=False)` makes the second tick a `409` rather than 
 wait, and the work releases it in a `finally`, whichever way it ended. A `run` row
 another process left in `running` deliberately does not refuse a tick: a process
 that dies mid-run would otherwise answer `409` to every later tick until someone
-edited the database by hand, and closing those rows properly is #35.
+edited` the database by hand, and closing those rows properly is #35.
+
+The re-match rides this same machinery (#64): `POST /internal/rematch`, a second
+route in this module with the same `X-Tick-Secret`, the same guard, the same
+`_claim_run()` row and the same `202`/`GET /runs/{id}` shape, and its own work in
+place of the walk and the digest -- `pipeline.rematch_stored_postings` over a fresh
+`LlmScorer`, through `get_rematch()`, the second `Pipeline` provider. It asks no
+board and sends no email; what it re-decides and what it protects is that
+function's own business.
 """
 
 import hmac
@@ -74,7 +82,7 @@ from app.matching.scorer import LlmScorer
 from app.models import Company, Run, RunCompany
 from app.routes.runs import RunSummary, run_summary
 from app.services.digest import Mailer, SmtpMailer, send_digest
-from app.services.pipeline import run_pipeline
+from app.services.pipeline import rematch_stored_postings, run_pipeline
 from app.sources import SOURCES
 
 logger = logging.getLogger(__name__)
@@ -115,6 +123,14 @@ UNRECORDED_RESPONSE = {
 }
 TICK_RESPONSES = (
     STARTED_RESPONSE | UNAUTHORISED_RESPONSE | BUSY_RESPONSE | UNRECORDED_RESPONSE
+)
+# The re-match answers through the same machinery and the same gate as the tick,
+# so its statuses are the same four; only the `202`'s wording names the other work.
+REMATCH_STARTED_RESPONSE = {
+    202: {"description": "A re-match started: the run row this request wrote"}
+}
+REMATCH_RESPONSES = (
+    REMATCH_STARTED_RESPONSE | UNAUTHORISED_RESPONSE | BUSY_RESPONSE | UNRECORDED_RESPONSE
 )
 
 
@@ -177,6 +193,26 @@ def get_pipeline(mailer: Mailer = Depends(get_mailer)) -> Pipeline:
         send_digest(mailer, run_id)
 
     return pipeline
+
+
+def get_rematch() -> Pipeline:
+    """The re-match's work, a callable taking the run's `id`, beside `get_pipeline`.
+
+    Zero arguments, so it carries no configuration, and resolved per request by
+    `Depends`, so the suite installs `app.dependency_overrides[get_rematch]` without
+    a model or a key. It returns the real `pipeline.rematch_stored_postings` over a
+    fresh `LlmScorer`, so the run's own model cap still bounds one re-match's model
+    calls and a later re-match gets a scorer with a cap of its own. No `sources`
+    and no mailer: no board is asked and no digest is sent, and the shape is the
+    one `get_pipeline()` returns -- a callable whose only argument is the run's `id`.
+    """
+    scorer = LlmScorer()
+
+    def rematch(run_id: int) -> None:
+        """One re-match's work, in the shape the starter and the row lifecycle take."""
+        rematch_stored_postings(run_id, scorer=scorer)
+
+    return rematch
 
 
 def _start_on_a_daemon_thread(work: Callable[[], None]) -> None:
@@ -311,28 +347,17 @@ def _run(run_id: int, pipeline: Pipeline) -> None:
         _run_in_progress.release()
 
 
-@router.post(
-    "/internal/tick",
-    response_model=RunSummary,
-    status_code=202,
-    tags=["internal"],
-    summary="Start one digest run",
-    responses=TICK_RESPONSES,
-)
-def tick(
-    request: Request,
-    starter: Annotated[RunStarter, Depends(get_run_starter)],
-    pipeline: Annotated[Pipeline, Depends(get_pipeline)],
-) -> RunSummary:
-    """Start one run, and answer `202` with the row this request wrote.
+def _start_run(request: Request, starter: RunStarter, pipeline: Pipeline) -> RunSummary:
+    """Check the caller, claim the guard, write the row, and hand the work over.
 
-    The caller is checked first, then the guard is claimed, then the row is
-    written, then the work is handed over -- and the answer carries that row in
-    status `running` rather than waiting for the work, which is what
-    `GET /runs/{id}` is for. Nothing before the hand-over can leave the guard
-    held: a row that cannot be written, like work that cannot be started, is a
-    `500` and gives the guard back, so the endpoint recovers instead of refusing
-    every later tick.
+    The one body the tick and the re-match share, because they differ only in which
+    `Pipeline` provider they take. The caller is checked first, then the guard is
+    claimed, then the row is written, then the work is handed over -- and the answer
+    carries that row in status `running` rather than waiting for the work, which is
+    what `GET /runs/{id}` is for. Nothing before the hand-over can leave the guard
+    held: a row that cannot be written, like work that cannot be started, is a `500`
+    and gives the guard back, so an endpoint recovers instead of refusing every
+    later call.
     """
     _require_tick_secret(request.headers.get(TICK_SECRET_HEADER))
 
@@ -357,3 +382,52 @@ def tick(
 
     logger.info("Started run %s", run.id)
     return run
+
+
+@router.post(
+    "/internal/tick",
+    response_model=RunSummary,
+    status_code=202,
+    tags=["internal"],
+    summary="Start one digest run",
+    responses=TICK_RESPONSES,
+)
+def tick(
+    request: Request,
+    starter: Annotated[RunStarter, Depends(get_run_starter)],
+    pipeline: Annotated[Pipeline, Depends(get_pipeline)],
+) -> RunSummary:
+    """Start one run, and answer `202` with the row this request wrote.
+
+    The shared sequence `_start_run`, with the walk-and-digest `get_pipeline()` as
+    the work: the caller is checked, the guard is claimed, the row is written, the
+    work is handed over, and the `202` carries that `running` row.
+    """
+    return _start_run(request, starter, pipeline)
+
+
+@router.post(
+    "/internal/rematch",
+    response_model=RunSummary,
+    status_code=202,
+    tags=["internal"],
+    summary="Re-match stored postings",
+    responses=REMATCH_RESPONSES,
+)
+def rematch(
+    request: Request,
+    starter: Annotated[RunStarter, Depends(get_run_starter)],
+    pipeline: Annotated[Pipeline, Depends(get_rematch)],
+) -> RunSummary:
+    """Start one re-match, and answer `202` with the row this request wrote.
+
+    The tick's own machinery, one door over: `_start_run` checks the caller through
+    the same shared header, claims the same in-process guard against two runs at
+    once, writes the same `_claim_run()` row, hands the work over through the same
+    `get_run_starter()` seam and records how it ended through the same `_run`. Only
+    the work differs -- the `get_rematch()` provider's
+    `pipeline.rematch_stored_postings` in place of the `get_pipeline()` provider's
+    walk and digest -- so the answer is a `running` `RunSummary` a client reads
+    through `GET /runs/{id}`, exactly as a tick's is.
+    """
+    return _start_run(request, starter, pipeline)

@@ -61,6 +61,7 @@ def test_contract_lists_every_registered_path_in_registration_order() -> None:
         "/watchlist",
         "/watchlist/{id}",
         "/internal/tick",
+        "/internal/rematch",
         "/runs/{id}",
         "/matches",
         "/matches/{id}",
@@ -247,7 +248,7 @@ def test_contract_describes_the_tick_and_the_run_it_started() -> None:
     read = contract["paths"]["/runs/{id}"]["get"]
 
     # One shape for a run wherever a client meets one: the `202` answers with the
-    # body the read answers with, and that body is the row's nine columns plus the
+    # body the read answers with, and that body is the row's ten columns plus the
     # per-company outcomes the run recorded (#59).
     started = tick["responses"]["202"]["content"]["application/json"]["schema"]
     summary = read["responses"]["200"]["content"]["application/json"]["schema"]
@@ -263,6 +264,7 @@ def test_contract_describes_the_tick_and_the_run_it_started() -> None:
         "matches_created",
         "matches_emailed",
         "companies_not_fetched",
+        "postings_not_rematched",
         "company_outcomes",
     }
     assert run["required"] == list(run["properties"])
@@ -286,11 +288,27 @@ def test_contract_describes_the_tick_and_the_run_it_started() -> None:
         {"type": "integer"},
         {"type": "null"},
     ]
+    # #64's field: NULL is a tick, `0` is a re-match that decided every candidate,
+    # a positive value is how many the cap left -- so it is nullable and required.
+    assert run["properties"]["postings_not_rematched"]["anyOf"] == [
+        {"type": "integer"},
+        {"type": "null"},
+    ]
 
     # Every status each route answers, and the tick's refusals are answers, not
     # omissions: a client reads them here instead of trying them out.
     assert set(tick["responses"]) == {"202", "401", "409", "500"}
     assert set(read["responses"]) == {"200", "404", "422"}
+
+    # The re-match is the tick's own machinery one door over (#64): the same four
+    # statuses, the same `RunSummary` body, and no request parameter -- what it
+    # must send is checked at the door, not by the request's own validation.
+    rematch = contract["paths"]["/internal/rematch"]["post"]
+    assert set(rematch["responses"]) == {"202", "401", "409", "500"}
+    assert rematch["responses"]["202"]["content"]["application/json"]["schema"][
+        "$ref"
+    ] == started["$ref"]
+    assert "parameters" not in rematch
 
     # The run's id is a path parameter and an integer, and the tick carries no
     # parameter at all: what it must send is checked at the door, not by the

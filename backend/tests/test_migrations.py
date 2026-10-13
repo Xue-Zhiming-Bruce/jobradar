@@ -7,7 +7,8 @@ check #28 added, then the outcome column, its check and its backfill #30 added,
 then the model and prompt-version columns #32 added, then the run's emailed
 count #36 added, then the two board-validator columns #55 added, then the run's
 unfetched-company count #56 added, then the company key widened from `slug`
-to `(source, slug)` #57, then the per-company outcome table #59 added. Two paths to one schema
+to `(source, slug)` #57, then the per-company outcome table #59 added, then the
+re-match's cap count #64 added. Two paths to one schema
 can drift, so nothing here assumes a revision is right: every test runs `alembic
 upgrade head` -- in-process, through `alembic.command.upgrade` -- against the
 database the shared `engine` fixture in `tests/conftest.py` supplies, and then
@@ -74,7 +75,7 @@ ALEMBIC_INI = BACKEND_ROOT / "alembic.ini"
 REVISIONS_DIR = BACKEND_ROOT / "migrations" / "versions"
 
 # The readable revision ids, in the order they apply, and the files that hold
-# them. The head is the last of the ten.
+# them. The head is the last of the eleven.
 BASELINE_REVISION = "0001_baseline"
 BASELINE_REVISION_FILE = "0001_baseline_five_tables.py"
 PARSED_FIELDS_REVISION = "0002_parsed_fields"
@@ -95,6 +96,8 @@ SOURCE_SLUG_UNIQUE_REVISION = "0009_company_source_slug_unique"
 SOURCE_SLUG_UNIQUE_REVISION_FILE = "0009_company_source_slug_unique.py"
 RUN_COMPANY_REVISION = "0010_run_company_outcomes"
 RUN_COMPANY_REVISION_FILE = "0010_run_company_outcomes.py"
+POSTINGS_NOT_REMATCHED_REVISION = "0011_run_postings_not_rematched"
+POSTINGS_NOT_REMATCHED_REVISION_FILE = "0011_run_postings_not_rematched.py"
 THE_REVISION_FILES = (
     BASELINE_REVISION_FILE,
     PARSED_FIELDS_REVISION_FILE,
@@ -106,8 +109,9 @@ THE_REVISION_FILES = (
     COMPANIES_NOT_FETCHED_REVISION_FILE,
     SOURCE_SLUG_UNIQUE_REVISION_FILE,
     RUN_COMPANY_REVISION_FILE,
+    POSTINGS_NOT_REMATCHED_REVISION_FILE,
 )
-HEAD_REVISION = RUN_COMPANY_REVISION
+HEAD_REVISION = POSTINGS_NOT_REMATCHED_REVISION
 
 # Alembic's own bookkeeping table: one row per applied revision. It is not one of
 # the six the models declare, and `alembic current` reads it.
@@ -992,6 +996,47 @@ def test_the_unfetched_company_count_is_added_null_with_no_backfill(database: En
     command.downgrade(_config(), BOARD_VALIDATOR_REVISION)
 
     assert "companies_not_fetched" not in _reflected_columns(database, "run")
+    assert _run_rows_before_the_column(database) == before
+
+
+def test_the_not_rematched_count_is_added_null_with_no_backfill(database: Engine) -> None:
+    """#64's column: a database at #59 with two run rows gains it, both NULL.
+
+    The fixture's database is rebuilt at #59 -- the schema before this revision --
+    and two run rows go in, the same two the #36 case seeds. `upgrade head` adds
+    the column: every row reads NULL, which means "this run did not re-match" and
+    not "it left nothing" -- a `NOT NULL` default of `0` would make a row written by
+    a tick or before the column existed claim a pass nobody bounded -- and no row's
+    status, end, error or other count is rewritten. `downgrade()` takes the column
+    away again and leaves the rows exactly as they were.
+    """
+    Base.metadata.drop_all(database)
+    command.upgrade(_config(), RUN_COMPANY_REVISION)
+    _store_a_run_row_before_this_revision(
+        database, status="succeeded", error=None, postings_seen=12, matches_created=4
+    )
+    _store_a_run_row_before_this_revision(
+        database,
+        status="failed",
+        error="the board refused: acme",
+        postings_seen=1,
+        matches_created=0,
+    )
+    before = _run_rows_before_the_column(database)
+    assert "postings_not_rematched" not in _reflected_columns(database, "run")
+
+    command.upgrade(_config(), "head")
+
+    assert _reflected_columns(database, "run")["postings_not_rematched"] == ("INTEGER", True)
+    assert _run_column_values(database, "postings_not_rematched") == [None, None]
+    assert _run_rows_before_the_column(database) == before
+    assert [row[1] for row in before] == ["succeeded", "failed"]
+    assert [row[4] for row in before] == [None, "the board refused: acme"]
+    assert [row[5:] for row in before] == [(12, 4), (1, 0)]
+
+    command.downgrade(_config(), RUN_COMPANY_REVISION)
+
+    assert "postings_not_rematched" not in _reflected_columns(database, "run")
     assert _run_rows_before_the_column(database) == before
 
 

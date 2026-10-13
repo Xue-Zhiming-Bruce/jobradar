@@ -407,11 +407,42 @@
           "internal"
         ],
         "summary": "Start one digest run",
-        "description": "Start one run, and answer `202` with the row this request wrote.\n\nThe caller is checked first, then the guard is claimed, then the row is\nwritten, then the work is handed over -- and the answer carries that row in\nstatus `running` rather than waiting for the work, which is what\n`GET /runs/{id}` is for. Nothing before the hand-over can leave the guard\nheld: a row that cannot be written, like work that cannot be started, is a\n`500` and gives the guard back, so the endpoint recovers instead of refusing\nevery later tick.",
+        "description": "Start one run, and answer `202` with the row this request wrote.\n\nThe shared sequence `_start_run`, with the walk-and-digest `get_pipeline()` as\nthe work: the caller is checked, the guard is claimed, the row is written, the\nwork is handed over, and the `202` carries that `running` row.",
         "operationId": "tick_internal_tick_post",
         "responses": {
           "202": {
             "description": "A run started: the run row this request wrote",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The request's shared internal header is missing, empty or wrong"
+          },
+          "409": {
+            "description": "A run is already in progress in this process"
+          },
+          "500": {
+            "description": "The run could not be recorded, or its work could not be started"
+          }
+        }
+      }
+    },
+    "/internal/rematch": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Re-match stored postings",
+        "description": "Start one re-match, and answer `202` with the row this request wrote.\n\nThe tick's own machinery, one door over: `_start_run` checks the caller through\nthe same shared header, claims the same in-process guard against two runs at\nonce, writes the same `_claim_run()` row, hands the work over through the same\n`get_run_starter()` seam and records how it ended through the same `_run`. Only\nthe work differs -- the `get_rematch()` provider's\n`pipeline.rematch_stored_postings` in place of the `get_pipeline()` provider's\nwalk and digest -- so the answer is a `running` `RunSummary` a client reads\nthrough `GET /runs/{id}`, exactly as a tick's is.",
+        "operationId": "rematch_internal_rematch_post",
+        "responses": {
+          "202": {
+            "description": "A re-match started: the run row this request wrote",
             "content": {
               "application/json": {
                 "schema": {
@@ -1065,6 +1096,17 @@
             ],
             "title": "Companies Not Fetched"
           },
+          "postings_not_rematched": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Postings Not Rematched"
+          },
           "company_outcomes": {
             "items": {
               "$ref": "#/components/schemas/RunCompanyOutcome"
@@ -1084,10 +1126,11 @@
           "matches_created",
           "matches_emailed",
           "companies_not_fetched",
+          "postings_not_rematched",
           "company_outcomes"
         ],
         "title": "RunSummary",
-        "description": "One `run` row as this API renders it: its nine columns and its per-company outcomes.\n\nThe same body a `202` from `POST /internal/tick` carries. `finished_at` and\n`error` are absent until the run ends, and the two counts the walk earns are\n0 from the moment the row is written: what the boards returned and how many\nmatches `record_score` wrote (#34), never a score computed here.\n`matches_emailed` is the third: how many matches this run's own digest emailed\n(#36), NULL until that digest records it -- which is the honest value for a\nrun still in flight, a row written before the column existed, and a run whose\nsend failed, and a different answer from a run that really did email none.\n`companies_not_fetched` is NULL for a run the board-call budget did not stop,\nwhich includes a run still in flight, and holds the count of active companies\nthe walk left for a later run when it did (#56).\n`company_outcomes` is one entry per company the run attempted and is empty for\na run that has not attempted one yet -- the `202`'s fresh row -- so a client\nreads the same shape from both routes at every point in a run's life."
+        "description": "One `run` row as this API renders it: its ten columns and its per-company outcomes.\n\nThe same body a `202` from `POST /internal/tick` carries. `finished_at` and\n`error` are absent until the run ends, and the two counts the walk earns are\n0 from the moment the row is written: what the boards returned and how many\nmatches `record_score` wrote (#34), never a score computed here.\n`matches_emailed` is the third: how many matches this run's own digest emailed\n(#36), NULL until that digest records it -- which is the honest value for a\nrun still in flight, a row written before the column existed, and a run whose\nsend failed, and a different answer from a run that really did email none.\n`companies_not_fetched` is NULL for a run the board-call budget did not stop,\nwhich includes a run still in flight, and holds the count of active companies\nthe walk left for a later run when it did (#56). `postings_not_rematched` is\nthe same shape for a re-match: NULL for every tick, and every re-match whose\nmodel cap left nothing, and a positive count of the passers a re-match's cap\nleft for a later run (#64).\n`company_outcomes` is one entry per company the run attempted and is empty for\na run that has not attempted one yet -- the `202`'s fresh row -- so a client\nreads the same shape from both routes at every point in a run's life."
       },
       "ValidationError": {
         "properties": {

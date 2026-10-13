@@ -265,6 +265,15 @@ class Run(Base):
     # than claiming a walk nobody bounded. Written by `services.pipeline`, the one
     # place that knows the bound stopped the walk; #9 writes neither side.
     companies_not_fetched: Mapped[int | None] = mapped_column(Integer)
+    # How many passers a re-match's own model cap left for a later
+    # run. Three readings, and a `0` is not one of them: NULL is "the cap left no
+    # passer" -- the ordinary case, and every row written by a tick or before this
+    # column existed -- and a positive value is that many passers, in candidate
+    # order, that this re-match declined to offer the model. Nullable with no
+    # default of either kind, so no tick claims a cap it does not have. Written by
+    # `services.pipeline._record_not_rematched`, the one place that knows the cap
+    # stopped the offers; #9 writes neither side.
+    postings_not_rematched: Mapped[int | None] = mapped_column(Integer)
 
 
 class RunCompany(Base):
