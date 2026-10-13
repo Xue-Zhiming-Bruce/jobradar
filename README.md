@@ -350,6 +350,25 @@ and every case starts on empty tables. The `TEST_DATABASE_URL` paragraph above i
 the unit suite's rule and stays as it is: there the PostgreSQL parameter skips
 without a server, because SQLite covers the same tests.
 
+### Measuring a tick, and what one costs
+
+One command measures a whole tick -- watchlist, fetch, ingest, prefilter, score,
+record, digest -- against a real PostgreSQL over a synthetic watchlist, with the
+board and the model faked at the seams the app already has. It prints the scale it
+used, the wall time of the run, the run's own `postings_seen`, `matches_created`
+and `matches_emailed`, and the `posting` and `match` rows it wrote:
+
+    cd backend && TEST_DATABASE_URL=postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:5433/jobradar uv run python benchmarks/tick_benchmark.py --companies 10 --postings 50
+
+It needs the throwaway Postgres above -- `--help` documents `--companies` and
+`--postings` and their defaults, and names the `docker run` line -- and it
+**fails rather than skips** without it: timings on SQLite say nothing about the
+engine the app deploys on. It is a script and not a test, so `uv run pytest` does
+not collect it, and it writes its rows in the database it was given only,
+emptying them before and after every run, so the repository stays clean. The
+numbers it produced, and what they mean for `SCORER_MAX_POSTINGS`, the tick's
+`202` design and the two 30-second timeouts, are in `_docs/performance.md`.
+
 ### Local development, without Docker
 
     cd backend && uv run uvicorn app.main:app --reload
