@@ -7,7 +7,7 @@ const LOADING = 'Uploading the resume...'
 const EMPTY = 'No resume uploaded yet.'
 
 /** The file kinds the input offers; whether the bytes are readable stays the server's call. */
-const ACCEPT = '.pdf,.docx,.txt'
+const ACCEPT = '.pdf,.docx,.txt,.png,.jpg,.jpeg,.tif,.tiff,.heic,.webp'
 
 /**
  * Uploads one resume file and shows which resume the answer made active, or why
