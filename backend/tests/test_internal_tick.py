@@ -37,7 +37,12 @@ from app import db
 from app.main import app
 from app.models import Run
 from app.routes import internal
-from app.routes.internal import TICK_SECRET_HEADER, get_pipeline, get_run_starter
+from app.routes.internal import (
+    TICK_SECRET_HEADER,
+    get_pipeline,
+    get_rematch,
+    get_run_starter,
+)
 from app.sources.base import SourceError
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
@@ -302,6 +307,7 @@ def test_a_valid_tick_answers_202_with_the_running_row_it_wrote_before_the_work_
         "matches_created",
         "matches_emailed",
         "companies_not_fetched",
+        "postings_not_rematched",
         "company_outcomes",
     }
     assert body["status"] == "running"
@@ -309,6 +315,8 @@ def test_a_valid_tick_answers_202_with_the_running_row_it_wrote_before_the_work_
     assert (body["postings_seen"], body["matches_created"]) == (0, 0)
     # #36's field: the row is written before any digest of it ran, so no count yet.
     assert body["matches_emailed"] is None
+    # #64's field: a tick is not a re-match, so the column the re-match writes is NULL.
+    assert body["postings_not_rematched"] is None
     # #59's field: no company has been attempted yet, so the list is empty and the
     # `202` and the read answer one shape.
     assert body["company_outcomes"] == []
@@ -514,4 +522,139 @@ def test_a_row_that_cannot_be_written_is_500_and_the_guard_is_given_back(
     assert run_rows() == []
     assert captured == []
     assert tick(client).status_code == 202  # the guard was released on that path too
+    assert len(captured) == 1
+
+
+# The re-match (#64): the tick's own machinery one door over -- the same secret,
+# the same guard, the same row, the same `202` and read -- with its own work seam.
+
+
+@pytest.fixture
+def rematch_work() -> Iterator[FakePipeline]:
+    """The re-match's work, installed over the route's own `get_rematch`, for one test."""
+    fake = FakePipeline()
+    app.dependency_overrides[get_rematch] = lambda: fake
+    try:
+        yield fake
+    finally:
+        app.dependency_overrides.pop(get_rematch, None)
+
+
+def rematch(client: TestClient, offered: str | None = SECRET) -> Response:
+    """One re-match, with the header a caller sends -- or with no such header at all."""
+    headers = {} if offered is None else {TICK_SECRET_HEADER: offered}
+    return client.post("/internal/rematch", headers=headers)
+
+
+def test_the_rematch_provider_is_a_zero_argument_pipeline_of_the_tick_s_shape() -> None:
+    """`get_rematch()` carries no configuration and returns a `Callable[[int], None]`."""
+    assert list(inspect.signature(get_rematch).parameters) == []
+    assert list(inspect.signature(get_rematch()).parameters) == ["run_id"]
+
+
+@pytest.mark.parametrize("offered", _REFUSED_HEADERS)
+def test_a_rematch_without_the_configured_secret_is_401_and_does_nothing(
+    client: TestClient,
+    captured: list[Callable[[], None]],
+    rematch_work: FakePipeline,
+    offered: str | None,
+) -> None:
+    response = rematch(client, offered)
+
+    message = refusal(response, 401)
+    assert TICK_SECRET_HEADER in message  # the refusal names the header it wanted
+    assert SECRET not in response.text
+    assert run_rows() == []  # a refusal is inert
+    assert captured == []
+    assert rematch_work.run_ids == []
+
+
+def test_a_valid_rematch_answers_202_with_the_running_row_before_the_work_started(
+    client: TestClient,
+    captured: list[Callable[[], None]],
+    rematch_work: FakePipeline,
+) -> None:
+    response = rematch(client)
+
+    assert response.status_code == 202
+    body = response.json()
+    assert set(body) == {
+        "id",
+        "status",
+        "started_at",
+        "finished_at",
+        "error",
+        "postings_seen",
+        "matches_created",
+        "matches_emailed",
+        "companies_not_fetched",
+        "postings_not_rematched",
+        "company_outcomes",
+    }
+    assert body["status"] == "running"
+    assert (body["postings_seen"], body["matches_created"]) == (0, 0)
+    assert (body["matches_emailed"], body["postings_not_rematched"]) == (None, None)
+    assert body["company_outcomes"] == []  # no board is asked, so no company outcome
+
+    assert len(captured) == 1  # exactly one unit of work was handed over
+    assert rematch_work.run_ids == []  # and it has provably not run yet
+    (row,) = run_rows()
+    assert row["id"] == body["id"]  # the row was written before the hand-over
+    assert row["status"] == "running"
+    assert client.get(f"/runs/{body['id']}").json() == body  # the 202 body is the read's body
+
+    captured[0]()  # the work, inline, on this test's own thread
+
+    assert rematch_work.run_ids == [body["id"]]  # handed the id the row already had
+    (finished,) = run_rows()
+    assert finished["id"] == body["id"] and finished["status"] == "succeeded"
+
+
+def test_a_rematch_while_a_tick_runs_is_409_and_a_tick_while_a_rematch_runs_is_409(
+    client: TestClient,
+    captured: list[Callable[[], None]],
+    pipeline: FakePipeline,
+    rematch_work: FakePipeline,
+) -> None:
+    """The guard is the process's and the two routes share it, in both directions."""
+    assert tick(client).status_code == 202  # a tick claims the one run-at-a-time guard
+
+    message = refusal(rematch(client), 409)  # the re-match is refused rather than queued
+    assert "in progress" in message
+    assert run_rows() and len(run_rows()) == 1  # no second row
+    assert pipeline.run_ids == [] and rematch_work.run_ids == []
+    assert len(captured) == 1  # no second unit of work
+
+    captured[0]()  # the tick's run ends and gives the guard back
+
+    assert rematch(client).status_code == 202  # a re-match now claims the guard
+
+    message = refusal(tick(client), 409)  # and the tick is refused
+    assert "in progress" in message
+    assert len(captured) == 2  # the refused tick handed over no work
+
+    captured[1]()
+    assert [row["status"] for row in run_rows()] == ["succeeded", "succeeded"]
+
+
+def test_a_rematch_row_that_cannot_be_written_is_500_and_the_guard_is_given_back(
+    client: TestClient,
+    captured: list[Callable[[], None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row that cannot be recorded must not refuse every later re-match."""
+    real_session_scope = db.session_scope
+
+    def the_database_is_gone(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("the database is gone")
+
+    monkeypatch.setattr("app.db.session_scope", the_database_is_gone)
+
+    refusal(rematch(client), 500)
+
+    monkeypatch.setattr("app.db.session_scope", real_session_scope)
+
+    assert run_rows() == []
+    assert captured == []
+    assert rematch(client).status_code == 202  # the guard was released on that path too
     assert len(captured) == 1

@@ -53,15 +53,17 @@ from app.matching.scorer import (
     LLM_API_KEY,
     LLM_MODEL,
     NOT_SCORED_PREFIX,
+    SCORE_PROMPT_VERSION,
     SCORER_MAX_POSTINGS,
     FakeScorer,
     MatchResult,
     ScorerConfigurationError,
 )
 from app.models import Company, Match, Posting, Run, RunCompany
-from app.routes.internal import TICK_SECRET_HEADER, get_pipeline, get_run_starter
+from app.routes.internal import TICK_SECRET_HEADER, get_pipeline, get_rematch, get_run_starter
 from app.services import pipeline as pipeline_module
 from app.services import resume
+from app.services.digest import DIGEST_MIN_SCORE, FakeMailer, send_digest
 from app.services.ingest import IngestResult
 from app.services.pipeline import (
     DEFAULT_REQUEST_BUDGET,
@@ -69,6 +71,8 @@ from app.services.pipeline import (
     NO_ACTIVE_RESUME,
     RUN_REQUEST_BUDGET_VARIABLE,
     RUN_REQUEST_INTERVAL_SECONDS_VARIABLE,
+    _postings_to_rematch,
+    rematch_stored_postings,
     run_pipeline,
 )
 from app.sources import greenhouse
@@ -129,6 +133,7 @@ RUN_COLUMNS = (
     "postings_seen",
     "matches_created",
     "companies_not_fetched",
+    "postings_not_rematched",
 )
 MATCH_COLUMNS = (
     "id",
@@ -137,6 +142,9 @@ MATCH_COLUMNS = (
     "reason",
     "gaps",
     "state",
+    "outcome",
+    "model",
+    "prompt_version",
     "created_at",
     "notified_at",
 )
@@ -2048,3 +2056,439 @@ def test_a_budget_stopped_run_is_not_a_failed_one_and_records_nothing_for_the_re
         ("acme", "fetched"),
         ("beta", "fetched"),
     ]
+
+
+# The re-match (#64): re-deciding the stored rows the owner has not resolved, under
+# the configuration now and the resume that is active now. It is the tick's own two
+# writers over the tick's own candidate shape, and it asks no board and no mailbox.
+
+
+def _seed_match(
+    posting_id: int,
+    *,
+    outcome: str,
+    score: int,
+    reason: str,
+    state: str = "new",
+    gaps: str | None = None,
+    model: str | None = None,
+    prompt_version: str | None = None,
+    notified_at: datetime | None = None,
+) -> int:
+    """One `match` row written straight through the app's own session, and its id.
+
+    Every column a re-match must leave alone is settable here, so a case seeds a
+    distinctive value and reads it back byte for byte.
+    """
+    with db.session_scope() as session:
+        row = Match(
+            posting_id=posting_id,
+            outcome=outcome,
+            score=score,
+            reason=reason,
+            state=state,
+            gaps=gaps,
+            model=model,
+            prompt_version=prompt_version,
+            notified_at=notified_at,
+        )
+        session.add(row)
+        session.flush()
+        return row.id
+
+
+def _match_of(posting_id: int) -> dict[str, Any] | None:
+    """The one `match` row of a posting as plain column values, or `None` when it has none."""
+    with db.session_scope() as session:
+        row = session.scalar(select(Match).where(Match.posting_id == posting_id))
+        return None if row is None else {column: getattr(row, column) for column in MATCH_COLUMNS}
+
+
+def _rematch(client: TestClient, scorer: Any) -> dict[str, Any]:
+    """One re-match over the real `rematch_stored_postings` and that scorer, and its run row.
+
+    The endpoint, not the function: the row's lifecycle, the guard and the `202`
+    are #9's, and the work is injected through `get_rematch` the way the tick's is
+    through `get_pipeline`. The starter (`inline_starter`) runs it on this thread.
+    """
+    app.dependency_overrides[get_rematch] = lambda: partial(rematch_stored_postings, scorer=scorer)
+    try:
+        response = client.post("/internal/rematch", headers={TICK_SECRET_HEADER: TICK_SECRET})
+    finally:
+        app.dependency_overrides.pop(get_rematch, None)
+    assert response.status_code == 202
+    return _run_row(response.json()["id"])
+
+
+def test_the_re_match_seam_reads_the_run_and_the_scorer_and_nothing_else() -> None:
+    """No `sources` and no `sleep`: this path constructs no adapter and waits for none."""
+    parameters = inspect.signature(rematch_stored_postings).parameters
+
+    assert list(parameters) == ["run_id", "scorer"]
+    assert parameters["run_id"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert parameters["scorer"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert set(parameters) & {"sources", "sleep"} == set()
+
+
+def test_the_candidate_read_is_the_open_unresolved_rows_oldest_posting_id_first(
+    engine: Engine,
+) -> None:
+    """Three exclusions, one row each, plus the row a closed posting is: none is a candidate."""
+    company = _company("acme")
+    undecided = _stored_posting(company, external_id="a")  # no match row at all
+    rejection = _stored_posting(company, external_id="b")
+    _seed_match(
+        rejection,
+        outcome="rejected",
+        score=0,
+        reason=REJECTION_REASON_PREFIX + "title term 'intern'",
+    )
+    saved = _stored_posting(company, external_id="c")
+    _seed_match(saved, outcome="scored", score=88, reason="a fit", state="saved")
+    dismissed = _stored_posting(company, external_id="d")
+    _seed_match(dismissed, outcome="scored", score=70, reason="a fit", state="dismissed")
+    emailed = _stored_posting(company, external_id="e")
+    _seed_match(emailed, outcome="scored", score=90, reason="a fit", notified_at=NOTIFIED_AT)
+    closed = _stored_posting(company, external_id="f", closed_at=NOTIFIED_AT)
+
+    candidates = _postings_to_rematch()
+
+    assert [posting_id for posting_id, _ in candidates] == [undecided, rejection]
+    assert [posting.external_id for _, posting in candidates] == ["a", "b"]
+    for excluded in (saved, dismissed, emailed, closed):
+        assert excluded not in [posting_id for posting_id, _ in candidates]
+
+
+def test_the_candidate_read_has_no_company_filter(engine: Engine) -> None:
+    """`is_active` gates the walk and not the stored rows: a deactivated company's posting is one too."""
+    active = _company("acme")
+    stopped = _company("dead", is_active=False)
+    open_postings = _stored_posting(stopped, external_id="a")
+    _stored_posting(active, external_id="b")
+
+    candidates = [posting_id for posting_id, _ in _postings_to_rematch()]
+
+    assert open_postings in candidates
+
+
+def test_the_re_match_asks_no_board_and_writes_no_company_posting_or_validator(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No adapter is constructed and none is called; `ingest_postings` is a spy that is not reached."""
+    company = _company("acme")
+    _seed_validator(company, etag=STORED_ETAG, last_modified=STORED_LAST_MODIFIED)
+    _stored_posting(company, external_id="a")
+    _active_resume()
+    before_postings = _postings_of(company)
+    ingested: list[int] = []
+
+    def recording_ingest(company_id: int, postings: list[SourcePosting]) -> IngestResult:
+        ingested.append(company_id)
+        return IngestResult(created_ids=[], reopened_ids=[])
+
+    monkeypatch.setattr(pipeline_module, "ingest_postings", recording_ingest)
+    run = _run()
+
+    rematch_stored_postings(run, scorer=FakeScorer(_result()))
+
+    assert ingested == []  # no board's payload reached an ingest
+    assert _postings_of(company) == before_postings  # no `posting` column moved
+    assert _stored_validator(company) == (STORED_ETAG, STORED_LAST_MODIFIED)
+    assert _rows(RunCompany) == 0  # no per-company outcome row
+    assert _rows(Posting) == 1
+
+
+def test_a_stored_rejection_is_re_decided_and_flips_to_a_score_on_the_same_row(
+    engine: Engine,
+) -> None:
+    """A rule switched off: the tick's own `record_score` rewrites the row a rejection wrote."""
+    company = _company("acme")
+    posting_id = _stored_posting(company, external_id="a", title="Backend Engineer")
+    match_id = _seed_match(
+        posting_id,
+        outcome="rejected",
+        score=0,
+        reason=REJECTION_REASON_PREFIX + "title term 'intern'",
+    )
+    _active_resume()
+    scored = MatchResult(score=87, reason="Synthetic fit.", gaps=["No Go."], model="gpt-test")
+    scorer = FakeScorer(scored)
+    run = _run()
+
+    rematch_stored_postings(run, scorer=scorer)
+
+    row = _match_of(posting_id)
+    assert row is not None
+    assert row["id"] == match_id  # the same row, not a second one
+    assert row["outcome"] == "scored"
+    assert (row["score"], row["reason"]) == (87, "Synthetic fit.")
+    assert json.loads(row["gaps"]) == ["No Go."]
+    assert row["model"] == "gpt-test"
+    assert row["prompt_version"] == SCORE_PROMPT_VERSION
+    assert row["state"] == "new"  # the owner never acted on it, and this path does not either
+    assert row["notified_at"] is None
+    assert [call[0].external_id for call in scorer.calls] == ["a"]
+    assert {text for _, text in scorer.calls} == {RESUME_TEXT}  # the active resume's own text
+    assert (_run_row(run)["postings_seen"], _run_row(run)["matches_created"]) == (0, 1)
+
+
+def test_a_stale_score_and_a_not_scored_row_are_re_decided(engine: Engine) -> None:
+    """A stored score and a model outage's row are both candidates, and both are rewritten."""
+    company = _company("acme")
+    stale = _stored_posting(company, external_id="a")
+    _seed_match(stale, outcome="scored", score=41, reason="stale fit", model="old", prompt_version="1")
+    outage = _stored_posting(company, external_id="b")
+    _seed_match(
+        outage,
+        outcome="not_scored",
+        score=0,
+        reason=NOT_SCORED_PREFIX + "the model call failed",
+        model="old",
+        prompt_version="1",
+    )
+    _active_resume()
+
+    rematch_stored_postings(_run(), scorer=FakeScorer(_result()))
+
+    assert _match_of(stale)["score"] == 87
+    assert _match_of(stale)["reason"] == "Synthetic fit."
+    assert _match_of(outage)["outcome"] == "scored"
+    assert _match_of(outage)["score"] == 87
+
+
+def test_a_candidate_the_prefilter_now_rejects_is_written_through_record_rejection(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`#50`'s rule reaches a stored row it did not gate when it was first seen."""
+    monkeypatch.setenv(PREFILTER_MUST_HAVE_FROM_RESUME, "1")
+    company = _company("acme")
+    posting_id = _stored_posting(
+        company, external_id="a", title="Backend Engineer", description="We use Python daily."
+    )
+    _seed_match(posting_id, outcome="scored", score=90, reason="an old fit", model="old", prompt_version="1")
+    _active_resume_with_skills([SKILL_SENTINEL])
+    scorer = FakeScorer(_result())
+
+    rematch_stored_postings(_run(), scorer=scorer)
+
+    row = _match_of(posting_id)
+    assert row["outcome"] == "rejected"
+    assert row["score"] == 0
+    assert row["reason"] == REJECTION_REASON_PREFIX + f"missing must-have '{SKILL_SENTINEL}'"
+    assert row["gaps"] is None
+    assert scorer.calls == []  # a rejection never reaches the model
+
+
+def test_the_owner_acted_and_emailed_rows_do_not_move_byte_for_byte(engine: Engine) -> None:
+    """`saved`, `dismissed` and `notified_at` rows are not candidates, and every column stays."""
+    company = _company("acme")
+    saved = _seed_match(
+        _stored_posting(company, external_id="s"),
+        outcome="scored",
+        score=91,
+        reason="the owner saved this one",
+        state="saved",
+        model="m1",
+        prompt_version="1",
+    )
+    dismissed = _seed_match(
+        _stored_posting(company, external_id="d"),
+        outcome="rejected",
+        score=0,
+        reason=REJECTION_REASON_PREFIX + "seniority term 'staff'",
+        state="dismissed",
+    )
+    emailed = _seed_match(
+        _stored_posting(company, external_id="e"),
+        outcome="scored",
+        score=88,
+        reason="a digest carried this one",
+        notified_at=NOTIFIED_AT,
+        model="m2",
+        prompt_version="1",
+    )
+    _stored_posting(company, external_id="c")  # a real candidate, so the pass is not vacuous
+    _active_resume()
+    before = {row["id"]: row for row in _matches()}
+    scorer = FakeScorer(_result())
+
+    rematch_stored_postings(_run(), scorer=scorer)
+
+    after = {row["id"]: row for row in _matches()}
+    for match_id in (saved, dismissed, emailed):
+        assert after[match_id] == before[match_id]
+    assert [call[0].external_id for call in scorer.calls] == ["c"]  # the protected rows are not offered
+
+
+@pytest.mark.parametrize(
+    "cap, decided, left",
+    [
+        pytest.param(2, 2, 1, id="a cap of two decides the two oldest and leaves one"),
+        pytest.param(0, 0, 3, id="a cap of zero decides none and leaves all three"),
+        pytest.param(5, 3, 0, id="a cap above the set decides every candidate and leaves none"),
+    ],
+)
+def test_the_cap_bounds_one_press_and_what_it_left_is_written_on_the_row(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, cap: int, decided: int, left: int
+) -> None:
+    """Oldest `posting.id` first, at most `max_postings()` of them, and the shortfall on the row."""
+    monkeypatch.setenv(SCORER_MAX_POSTINGS, str(cap))
+    company = _company("acme")
+    posting_ids = [_stored_posting(company, external_id=f"p{index}") for index in range(3)]
+    _active_resume()
+    scorer = FakeScorer(_result())
+    run = _run()
+
+    rematch_stored_postings(run, scorer=scorer)
+
+    assert len(scorer.calls) == decided  # at most the cap, and no more
+    assert {row["posting_id"] for row in _matches()} == set(posting_ids[:decided])
+    assert _run_row(run)["matches_created"] == decided
+    assert _run_row(run)["postings_not_rematched"] == left  # a `0` is a real answer, not a NULL
+    for skipped in posting_ids[decided:]:
+        assert _match_of(skipped) is None  # a candidate past the cap keeps the verdict it has
+
+
+def test_a_stored_score_past_the_cap_is_not_replaced_by_the_cap_message(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reason this path counts its own offers: a capped scorer would write `Not scored:` over 41."""
+    monkeypatch.setenv(SCORER_MAX_POSTINGS, "1")
+    company = _company("acme")
+    first = _stored_posting(company, external_id="a")
+    second = _stored_posting(company, external_id="b")
+    _seed_match(second, outcome="scored", score=41, reason="stale fit", model="old", prompt_version="1")
+    _active_resume()
+    scorer = FakeScorer(_result())
+
+    rematch_stored_postings(_run(), scorer=scorer)
+
+    assert [call[0].external_id for call in scorer.calls] == ["a"]
+    assert _match_of(second)["score"] == 41
+    assert _match_of(second)["reason"] == "stale fit"
+    assert not _match_of(second)["reason"].startswith(NOT_SCORED_PREFIX)
+    assert _match_of(first)["score"] == 87
+
+
+def test_a_pass_with_no_candidate_writes_zero_and_a_row_that_never_re_matched_stays_null(
+    engine: Engine,
+) -> None:
+    """`0` is "a re-match that decided every candidate"; a NULL is a run that did not re-match at all."""
+    _company("acme")  # a company with no postings, so the candidate list is empty
+    _active_resume()
+    run = _run()
+
+    rematch_stored_postings(run, scorer=FakeScorer(_result()))
+
+    assert _run_row(run)["postings_not_rematched"] == 0
+    assert _run_row(_run())["postings_not_rematched"] is None  # a tick writes no side of the column
+
+
+def test_a_re_match_ends_succeeded_with_no_company_row_and_the_counts_it_earned(
+    engine: Engine, client: TestClient, inline_starter: None
+) -> None:
+    """Through the real `POST /internal/rematch`: no board was asked, so no `'failed'` row exists."""
+    company = _company("acme")
+    _stored_posting(company, external_id="a")
+    _stored_posting(company, external_id="b")
+    _active_resume()
+
+    row = _rematch(client, FakeScorer(_result()))
+
+    assert (row["status"], row["error"]) == ("succeeded", None)
+    assert row["finished_at"] is not None
+    assert (row["postings_seen"], row["matches_created"]) == (0, 2)  # no board, two scores written
+    assert row["companies_not_fetched"] is None  # #56's column is not this path's to write
+    assert row["postings_not_rematched"] == 0
+    assert _rows(RunCompany) == 0
+    assert len(_matches()) == 2
+
+
+def test_a_re_match_with_no_active_resume_fails_before_any_match_row_moves(
+    engine: Engine, client: TestClient, inline_starter: None
+) -> None:
+    """`run_pipeline`'s own `NO_ACTIVE_RESUME`: the row reads `failed` and no `match` row changes."""
+    company = _company("acme")
+    posting_id = _stored_posting(company, external_id="a")
+    _seed_match(
+        posting_id,
+        outcome="rejected",
+        score=0,
+        reason=REJECTION_REASON_PREFIX + "title term 'intern'",
+    )
+    before = _matches()
+
+    row = _rematch(client, FakeScorer(_result()))
+
+    assert row["status"] == "failed"
+    assert row["error"] == NO_ACTIVE_RESUME
+    assert _matches() == before  # not one row moved, rejection reason included
+    assert _rows(RunCompany) == 0
+
+
+def test_a_re_match_over_a_blank_resume_fails_the_same_way(engine: Engine) -> None:
+    """A blank text is no more scorable than an absent resume: the module's own refusal, before a row."""
+    company = _company("acme")
+    posting_id = _stored_posting(company, external_id="a")
+    _active_resume(text="   ")
+
+    with pytest.raises(RuntimeError) as raised:
+        rematch_stored_postings(_run(), scorer=FakeScorer(_result()))
+
+    assert str(raised.value) == NO_ACTIVE_RESUME
+    assert _match_of(posting_id) is None
+
+
+def test_two_re_matches_select_the_same_rows_and_leave_every_match_row_byte_identical(
+    engine: Engine,
+) -> None:
+    """The candidate rule reads only columns this path never writes, so the second pass repeats it."""
+    company = _company("acme")
+    _stored_posting(company, external_id="a")
+    second = _stored_posting(company, external_id="b")
+    _seed_match(second, outcome="scored", score=10, reason="stale", model="old", prompt_version="1")
+    _active_resume()
+
+    first = _run()
+    rematch_stored_postings(first, scorer=FakeScorer(_result()))
+    after_first = _matches()
+    postings_after_first = _postings_of(company)
+    runs_before = _rows(Run)
+
+    second_run = _run()
+    rematch_stored_postings(second_run, scorer=FakeScorer(_result()))
+
+    assert _matches() == after_first  # every column, the two run rows aside
+    assert _postings_of(company) == postings_after_first
+    assert _rows(Run) == runs_before + 1
+    assert _rows(Posting) == 2
+    assert _run_row(first)["postings_not_rematched"] == 0
+    assert _run_row(second_run)["postings_not_rematched"] == 0
+
+
+def test_a_re_match_turning_a_stored_rejection_into_a_qualifying_score_is_emailed_once(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No second send path: the digest's own `notified_at IS NULL` selection carries it, once."""
+    monkeypatch.delenv(DIGEST_MIN_SCORE, raising=False)
+    company = _company("acme")
+    posting_id = _stored_posting(company, external_id="a", title="Backend Engineer")
+    _seed_match(
+        posting_id,
+        outcome="rejected",
+        score=0,
+        reason=REJECTION_REASON_PREFIX + "title term 'intern'",
+    )
+    _active_resume()
+    run = _run()
+
+    rematch_stored_postings(run, scorer=FakeScorer(_result()))
+
+    match = _match_of(posting_id)
+    assert match["outcome"] == "scored" and match["notified_at"] is None  # no email was sent here
+    mailer = FakeMailer()
+
+    send_digest(mailer, run)
+
+    assert len(mailer.sent) == 1  # the following digest carries it, exactly once
+    assert _match_of(posting_id)["notified_at"] is not None
