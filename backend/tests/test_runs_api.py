@@ -12,19 +12,32 @@ empty body or a row made up on the spot. A `run` row is seeded directly through
 the app's own session where a run's end state is what the test is about; the
 `202` and the `GET` are then compared against each other so the two routes that
 answer `RunSummary` cannot drift apart.
+
+A `running` row a dead process left behind is finished here as well, because it is
+the same row this module reads: `reap_stale_runs()` is called once from the app's
+lifespan, and the cases below start the real app around a seeded `running` row to
+see what it left. The row-level cases run on both engines through the shared
+`engine` fixture; the startup and tick cases drive `TestClient`, the way every
+other case in this file does. One subject, one file, and the reap is not a route,
+so the contract does not move.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
+from sqlalchemy.engine import Engine
 
-from app import db
+from app import db, main
 from app.main import app
-from app.models import Run
+from app.models import Company, Match, Posting, Resume, Run
+from app.routes import internal
+from app.routes.internal import get_pipeline, get_run_starter
+from app.routes.runs import REAPED_RUN_ERROR, reap_stale_runs
 
 # The seven columns of a run, and therefore the whole body this route may answer
 # with. A field that is not here is a field the route invented.
@@ -174,3 +187,171 @@ def test_the_body_is_exactly_the_run_summary_the_api_declares(client: TestClient
 
     assert set(body) == set(RunSummary.model_fields)
     assert set(body) == RUN_FIELDS
+
+
+# The reap: what a dead process left in `running`, and what it must leave alone.
+
+
+def run_row(run_id: int) -> Run:
+    """One `run` row, read through the app's own session and detached for the caller."""
+    with db.session_scope() as session:
+        row = session.get(Run, run_id)
+        assert row is not None
+        session.expunge(row)
+        return row
+
+
+def run_rows() -> list[dict[str, Any]]:
+    """Every `run` row as its own column values, in id order, so a stray write is visible."""
+    with db.session_scope() as session:
+        columns = [column.name for column in Run.__table__.columns]
+        return [
+            {name: getattr(row, name) for name in columns}
+            for row in session.scalars(select(Run).order_by(Run.id))
+        ]
+
+
+def table_counts() -> dict[str, int]:
+    """How many rows each of the four tables the reap must not write now holds."""
+    with db.session_scope() as session:
+        return {
+            model.__tablename__: session.scalar(select(func.count()).select_from(model))
+            for model in (Company, Posting, Match, Resume)
+        }
+
+
+def seed_a_posting_a_match_and_a_resume() -> None:
+    """One row in each table that is not `run`.
+
+    "No other table is written" needs rows in those tables to be worth asserting.
+    """
+    with db.session_scope() as session:
+        company = Company(name="Acme", slug="acme")
+        session.add(company)
+        session.flush()
+        posting = Posting(
+            company_id=company.id,
+            external_id="1",
+            title="Backend Engineer",
+            url="https://example.test/1",
+        )
+        session.add(posting)
+        session.flush()
+        session.add(Match(posting_id=posting.id, score=80, reason="a fit"))
+        session.add(
+            Resume(
+                filename="synthetic-resume.txt",
+                content_type="text/plain",
+                text="Synthetic resume text, written for this test and for no person",
+                stored_path="/tmp/synthetic-resume.txt",
+            )
+        )
+
+
+def test_the_reap_finishes_a_running_row_with_a_reason_an_end_and_the_counts_it_left(
+    engine: Engine,
+) -> None:
+    run_id = seed(status="running", postings_seen=5, matches_created=2)
+
+    assert reap_stale_runs() == 1
+
+    row = run_row(run_id)
+    assert row.id == run_id  # still the row that was seeded: not deleted, not replaced
+    assert row.status == "failed"
+    assert row.error == REAPED_RUN_ERROR
+    assert row.finished_at is not None
+    assert row.finished_at >= row.started_at  # an aware UTC instant, never before the start
+    assert (row.postings_seen, row.matches_created) == (5, 2)  # the record of how far it got
+
+
+def test_a_running_row_left_by_a_dead_process_is_failed_when_the_app_starts(
+    engine: Engine,
+) -> None:
+    """Seeded before the app starts, and read back as `failed` once it has."""
+    run_id = seed(status="running")
+
+    with TestClient(app) as client:
+        body = read(client, run_id).json()
+
+    assert body["status"] == "failed"
+    assert body["error"] == REAPED_RUN_ERROR
+    assert datetime.fromisoformat(body["finished_at"]) >= datetime.fromisoformat(
+        body["started_at"]
+    )
+
+
+def test_the_reap_touches_no_finished_row_and_no_other_table(engine: Engine) -> None:
+    ended = datetime.now(UTC)
+    seed(status="succeeded", finished_at=ended, postings_seen=7, matches_created=3)
+    seed(status="failed", finished_at=ended, error="the board refused: acme")
+    stale = seed(status="running")
+    seed_a_posting_a_match_and_a_resume()
+    before = run_rows()
+    counts = table_counts()
+
+    assert reap_stale_runs() == 1
+
+    after = run_rows()
+    # A finished run keeps its status, its end, its error and its counts.
+    assert after[:2] == before[:2]
+    (reaped,) = after[2:]
+    assert reaped["id"] == stale
+    assert reaped["status"] == "failed"
+    assert reaped["error"] == REAPED_RUN_ERROR
+    assert reaped["finished_at"] >= reaped["started_at"]
+    assert table_counts() == counts
+
+
+def test_a_second_process_start_reaps_again_and_finds_nothing_left_to_reap(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed(status="running")
+
+    with TestClient(app):
+        pass  # the first start finishes the row
+
+    counts: list[int] = []
+    real_reap = main.reap_stale_runs
+
+    def counted_reap() -> int:
+        """The reap, with the row count this start saw kept where this test can read it."""
+        counts.append(real_reap())
+        return counts[-1]
+
+    monkeypatch.setattr(main, "reap_stale_runs", counted_reap)
+    with TestClient(app):
+        pass  # so the second start has nothing to reap
+
+    assert counts == [0]
+    assert [row["status"] for row in run_rows()] == ["failed"]
+
+
+def test_a_tick_after_the_reap_is_accepted_and_the_reaped_row_keeps_its_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'jobradar.db'}")
+    monkeypatch.setenv(internal.TICK_SECRET_VARIABLE, SECRET)
+    db.init_db()  # the process that died had already created the tables
+    stale = seed(status="running")
+    work: list[Callable[[], None]] = []
+    app.dependency_overrides[get_run_starter] = lambda: work.append
+    app.dependency_overrides[get_pipeline] = lambda: lambda run_id: None
+    try:
+        with TestClient(app) as client:
+            assert run_row(stale).status == "failed"  # the startup reap, before any request
+
+            response = client.post(
+                "/internal/tick", headers={internal.TICK_SECRET_HEADER: SECRET}
+            )
+
+            assert response.status_code == 202
+            assert response.json()["status"] == "running"
+            assert response.json()["id"] != stale  # the reaped row's id is not reused
+            work[0]()  # the work this tick was handed, run inline on this test's thread
+    finally:
+        app.dependency_overrides.pop(get_run_starter, None)
+        app.dependency_overrides.pop(get_pipeline, None)
+        if internal._run_in_progress.locked():  # the guard is the process's, not this test's
+            internal._run_in_progress.release()
+
+    assert [row["status"] for row in run_rows()] == ["failed", "succeeded"]
