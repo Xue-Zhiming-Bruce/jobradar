@@ -37,6 +37,14 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
 WORKDIR /app
 
 COPY backend/pyproject.toml backend/uv.lock ./
+
+# The hosted MCP endpoint (#43) mounts `mcp/`'s tools into this process, so the
+# runtime image carries that source: the path dependency in `pyproject.toml`
+# points at `../mcp`, which resolves to `/mcp` from here. The SDK comes from
+# `uv sync`; the tools are the one implementation under `mcp/`, copied not
+# rewritten.
+COPY mcp/pyproject.toml /mcp/pyproject.toml
+COPY mcp/jobradar_mcp /mcp/jobradar_mcp
 RUN uv sync --frozen --no-dev
 
 COPY backend/app ./app

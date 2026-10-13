@@ -33,6 +33,7 @@ services:
       UPLOADS_DIR: /data/uploads
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-}
       TICK_SECRET: ${TICK_SECRET:-}
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
       SCORER_MAX_POSTINGS: ${SCORER_MAX_POSTINGS:-}
