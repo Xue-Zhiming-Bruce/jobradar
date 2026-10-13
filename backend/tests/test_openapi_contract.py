@@ -133,7 +133,10 @@ def test_contract_describes_the_watchlist_routes() -> None:
     assert array_schema["type"] == "array"
     company_ref = array_schema["items"]["$ref"]
     company = schemas[company_ref.rsplit("/", 1)[-1]]
-    assert set(company["properties"]) == {"id", "name", "slug", "is_active"}
+    assert set(company["properties"]) == {"id", "name", "slug", "is_active", "source"}
+    # The new field is additive: a client that reads the four it knows is not
+    # broken, so `source` carries a default and is not a required property.
+    assert "source" not in company.get("required", [])
 
     # The same company body `POST` answers with, and the refusals it answers instead.
     assert created["requestBody"]["required"] is True

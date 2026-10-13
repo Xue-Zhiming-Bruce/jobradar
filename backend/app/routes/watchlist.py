@@ -1,32 +1,33 @@
 """`/watchlist`: the companies this app watches, and the board each one names.
 
-`POST /watchlist` adds one company by name and Greenhouse slug, and only after
-the source has answered for that slug: a slug no board goes by is `404`, a board
+`POST /watchlist` adds one company by name, board slug and, optionally, which
+source the slug names -- Greenhouse when the body does not say -- and only after
+that source has answered for that slug: a slug no board goes by is `404`, a board
 that is down, slow or malformed is `502`, and a slug that is already watched is
-`409`. `GET /watchlist` lists every company with its slug and active state, and
-`DELETE /watchlist/{id}` removes one. Nobody renames a company or writes
-`is_active` here; that is #29.
+`409`. `GET /watchlist` lists every company with its slug, its source and its
+active state, and `DELETE /watchlist/{id}` removes one. Nobody renames a company
+or writes `is_active` here; that is #29.
 
 The probe is a validity check and nothing more. #6 is where a board's postings
 are stored and deduped, and #9 is where the tick calls the source for real; this
 route drops what the probe returns and writes no `posting` row.
 
 Two things decide the shape of this module. The source is reached through
-`get_source()`, one zero-argument provider the `POST` route takes with
-`Depends`: the suite replaces it with `app.dependency_overrides[get_source]` and
-no test in this module opens a socket. And every write goes through the
-`Company(...)` constructor rather than the table, because that is what runs the
-model's slug normaliser -- `"  ACME  "` is probed and stored as `"acme"`, so it
-collides with the row already holding it, and the unique index refuses the
-duplicate under the write. The `IntegrityError` that comes back is the `409`;
-no check in Python is what keeps one row per slug.
+`get_source()`, one zero-argument provider the `POST` route takes with `Depends`,
+returning the mapping from a stored source name to its adapter: the suite replaces
+it with `app.dependency_overrides[get_source]` and no test in this module opens a
+socket. And every write goes through the `Company(...)` constructor rather than
+the table, because that is what runs the model's slug normaliser -- `"  ACME  "`
+is probed and stored as `"acme"`, so it collides with the row already holding it,
+and the unique index refuses the duplicate under the write. The `IntegrityError`
+that comes back is the `409`; no check in Python is what keeps one row per slug.
 
-This module knows nothing about the source's payload: no key name and no URL of
-it appears here, and the family of failures it distinguishes is `#4`'s.
+This module knows nothing about a source's payload: no key name and no URL of one
+appears here, and the family of failures it distinguishes is the shared one.
 """
 
-from collections.abc import Callable
-from typing import Annotated
+from collections.abc import Mapping
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
@@ -35,22 +36,27 @@ from sqlalchemy.exc import IntegrityError
 
 from app import db
 from app.models import Company
-from app.sources.greenhouse import SourceError, SourcePosting, UnknownSlug, fetch
+from app.sources import SOURCES
+from app.sources.base import Source, SourceError, UnknownSlug
 
 router = APIRouter()
 
 
 class CompanyCreate(BaseModel):
-    """Body of an addition: the name to show, and the board slug to poll.
+    """Body of an addition: the name to show, the board slug to poll, and its source.
 
-    Both fields are required strings, and a string that carries nothing but
+    `name` and `slug` are required strings, and a string that carries nothing but
     whitespace is refused as well: the name labels a row a person reads, and the
-    slug is what the source is asked about. The values are left exactly as they
-    were sent; normalising the slug is `app.models.Company`'s, not this model's.
+    slug is what the source is asked about. `source` is optional and means
+    Greenhouse when it is absent, so a client that sends `{name, slug}` keeps
+    working; a value outside the two known names -- a case variant included -- is
+    a `422` from this model, before any request is made. The values are left
+    exactly as they were sent; normalising the slug is `app.models.Company`'s.
     """
 
     name: str
     slug: str
+    source: Literal["greenhouse", "lever"] = "greenhouse"
 
     @field_validator("name", "slug")
     @classmethod
@@ -62,16 +68,20 @@ class CompanyCreate(BaseModel):
 
 
 class WatchedCompany(BaseModel):
-    """One watchlist entry as this API renders it: four fields, and no timestamp.
+    """One watchlist entry as this API renders it: five fields, and no timestamp.
 
     The same body `POST` answers with, so a client reads one shape for a company
-    wherever it sees one. `created_at` is stored and not exposed.
+    wherever it sees one. `created_at` is stored and not exposed. `source` is the
+    board the row names, defaulted here so it is not a required property of the
+    contract: a client that already reads `{id, name, slug, is_active}` is not
+    broken by the extra field.
     """
 
     id: int
     name: str
     slug: str
     is_active: bool
+    source: Literal["greenhouse", "lever"] = "greenhouse"
 
 
 # The refusals this router answers with, named in the contract the way
@@ -96,28 +106,32 @@ CREATE_RESPONSES = (
 DELETE_RESPONSES = NOT_FOUND_RESPONSE | UNUSABLE_REQUEST_RESPONSE
 
 
-def get_source() -> Callable[[str], list[SourcePosting]]:
+def get_source() -> Mapping[str, Source]:
     """The one seam between this route and a job board: the provider the tests replace.
 
-    Zero arguments, so it carries no configuration and cannot know which board it
-    is about to be asked about, and it is resolved per request by `Depends`, so
-    the suite installs `app.dependency_overrides[get_source] = lambda: fake`
-    without a socket ever being opened. It returns `app.sources.greenhouse.fetch`
-    itself, the callable with the source's shape: one slug in, that board's
-    postings out.
+    Zero arguments, so it carries no configuration, and resolved per request by
+    `Depends`, so the suite installs `app.dependency_overrides[get_source] =
+    lambda: fake_sources` without a socket ever being opened. It returns
+    `app.sources.SOURCES`, the mapping from a stored source name to that board's
+    adapter: the request's own `source` is the key, so the probe goes through the
+    board the row will name.
     """
-    return fetch
+    return SOURCES
 
 
 def _watched(company: Company) -> WatchedCompany:
     """One company as this API renders it, read while its session is still open."""
     return WatchedCompany(
-        id=company.id, name=company.name, slug=company.slug, is_active=company.is_active
+        id=company.id,
+        name=company.name,
+        slug=company.slug,
+        is_active=company.is_active,
+        source=company.source,
     )
 
 
-def _probe(source: Callable[[str], list[SourcePosting]], slug: str) -> None:
-    """Ask the source whether the board that slug names exists, and drop the answer.
+def _probe(source: Source, slug: str) -> None:
+    """Ask that board whether the slug names it, and drop the answer.
 
     `UnknownSlug` is the one failure that means there is no board to poll, and it
     is the only one that answers `404`. The rest of the family --
@@ -148,7 +162,7 @@ def list_watchlist() -> list[WatchedCompany]:
     """Every company on the watchlist, in ascending id order, active or not.
 
     No filter and no paging: one user's watchlist is short, and an inactive
-    company is still a company to show.
+    company is still a company to show. Each row carries the source it names.
     """
     with db.session_scope() as session:
         return [
@@ -162,14 +176,14 @@ def list_watchlist() -> list[WatchedCompany]:
     response_model=WatchedCompany,
     status_code=201,
     tags=["watchlist"],
-    summary="Watch a company's Greenhouse board",
+    summary="Watch a company's board",
     responses=CREATE_RESPONSES,
 )
 def add_company(
     body: CompanyCreate,
-    source: Annotated[Callable[[str], list[SourcePosting]], Depends(get_source)],
+    sources: Annotated[Mapping[str, Source], Depends(get_source)],
 ) -> WatchedCompany:
-    """Add one company, once its board has answered and only if its slug is new.
+    """Add one company, once the board its `source` names has answered for its slug.
 
     The board is asked before anything is written, and every `POST` asks it once:
     a body that cannot be used never reaches this function, and a slug that is
@@ -177,8 +191,8 @@ def add_company(
     """
     # The constructor, not the table: this is where the model keeps one spelling
     # of a slug, and what the probe is then asked about.
-    company = Company(name=body.name, slug=body.slug)
-    _probe(source, company.slug)
+    company = Company(name=body.name, slug=body.slug, source=body.source)
+    _probe(sources[body.source], company.slug)
     try:
         with db.session_scope() as session:
             session.add(company)

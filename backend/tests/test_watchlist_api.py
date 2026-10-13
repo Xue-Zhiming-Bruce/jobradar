@@ -35,14 +35,14 @@ from app import db
 from app.main import app
 from app.models import Company, Posting
 from app.routes.watchlist import get_source
-from app.sources.greenhouse import (
+from app.sources import SOURCES
+from app.sources.base import (
     BoardUnavailable,
     MalformedPayload,
     SourceError,
     SourcePosting,
     SourceTimeout,
     UnknownSlug,
-    fetch,
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -65,7 +65,7 @@ UPSTREAM_TEXT = "UPSTREAM-SENTINEL-TEXT-THAT-MUST-NOT-BE-ECHOED"
 
 
 class FakeSource:
-    """Stands in for `greenhouse.fetch`: records every slug it is asked for, then answers or raises."""
+    """Stands in for a board adapter: records every slug it is asked for, then answers or raises."""
 
     def __init__(self, *, error: SourceError | None = None) -> None:
         self.slugs: list[str] = []
@@ -90,14 +90,20 @@ def no_outbound_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def source() -> Iterator[FakeSource]:
-    """The fake installed over the route's own provider, for the length of one test."""
-    fake = FakeSource()
-    app.dependency_overrides[get_source] = lambda: fake
+def sources() -> Iterator[dict[str, FakeSource]]:
+    """One fake per known source, installed over the route's own provider for the length of one test."""
+    fakes = {"greenhouse": FakeSource(), "lever": FakeSource()}
+    app.dependency_overrides[get_source] = lambda: fakes
     try:
-        yield fake
+        yield fakes
     finally:
         app.dependency_overrides.pop(get_source, None)
+
+
+@pytest.fixture
+def source(sources: dict[str, FakeSource]) -> FakeSource:
+    """The Greenhouse fake: the source a body that does not name one is probed against."""
+    return sources["greenhouse"]
 
 
 @pytest.fixture
@@ -130,6 +136,7 @@ def companies() -> list[dict[str, Any]]:
                 "name": company.name,
                 "slug": company.slug,
                 "is_active": company.is_active,
+                "source": company.source,
             }
             for company in session.scalars(select(Company).order_by(Company.id))
         ]
@@ -141,10 +148,10 @@ def postings() -> list[Posting]:
         return list(session.scalars(select(Posting)))
 
 
-def watch(name: str, slug: str, *, is_active: bool = True) -> int:
+def watch(name: str, slug: str, *, is_active: bool = True, source: str = "greenhouse") -> int:
     """A company put on the watchlist without going through the route, and its id."""
     with db.session_scope() as session:
-        company = Company(name=name, slug=slug, is_active=is_active)
+        company = Company(name=name, slug=slug, is_active=is_active, source=source)
         session.add(company)
         session.flush()
         return company.id
@@ -161,8 +168,10 @@ def git(*arguments: str) -> str:
 # The seam: one named provider, so no test has to guess how to stand in for the source.
 
 
-def test_the_source_seam_is_the_greenhouse_fetch_behind_a_zero_argument_provider() -> None:
-    assert get_source() is fetch
+def test_the_source_seam_is_the_source_mapping_behind_a_zero_argument_provider() -> None:
+    """One provider, resolving a stored name to that board's adapter and nothing else."""
+    assert get_source() is SOURCES
+    assert sorted(get_source()) == ["greenhouse", "lever"]
 
 
 def test_listing_and_deleting_never_ask_the_source(client: TestClient, source: FakeSource) -> None:
@@ -195,8 +204,20 @@ def test_the_watchlist_lists_every_company_with_its_slug_and_active_state(
 
     assert response.status_code == 200
     assert response.json() == [
-        {"id": first, "name": "Acme Inc", "slug": "acme", "is_active": True},
-        {"id": second, "name": "  Globex  ", "slug": "globex", "is_active": False},
+        {
+            "id": first,
+            "name": "Acme Inc",
+            "slug": "acme",
+            "is_active": True,
+            "source": "greenhouse",
+        },
+        {
+            "id": second,
+            "name": "  Globex  ",
+            "slug": "globex",
+            "is_active": False,
+            "source": "greenhouse",
+        },
     ]
 
 
@@ -215,6 +236,7 @@ def test_posted_company_is_created_and_returned_as_the_row_it_added(
     assert row["name"] == "Acme Inc"
     assert row["slug"] == "acme"
     assert row["is_active"] is True
+    assert row["source"] == "greenhouse"  # a body with no source stores Greenhouse
     assert source.slugs == ["acme"]  # asked exactly once, for the slug that was stored
     assert postings() == []  # the probe decides the slug; #6 is what stores postings
 
@@ -255,7 +277,13 @@ def test_a_second_post_of_a_watched_slug_is_refused_with_409(
 
     assert "acme" in message  # the refusal names the slug, so it is fixable
     assert companies() == [
-        {"id": 1, "name": "Acme Inc", "slug": "acme", "is_active": True}
+        {
+            "id": 1,
+            "name": "Acme Inc",
+            "slug": "acme",
+            "is_active": True,
+            "source": "greenhouse",
+        }
     ]
 
 
@@ -268,6 +296,49 @@ def test_a_second_post_spelled_differently_normalises_onto_the_watched_slug(
     refusal(add(client, "Acme Again", "  ACME  "), 409)
 
     assert len(companies()) == 1
+
+
+# The source a body names: probed through that adapter, stored, and reported back.
+
+
+def test_a_body_naming_lever_is_probed_stored_and_reported_through_that_adapter(
+    client: TestClient, sources: dict[str, FakeSource]
+) -> None:
+    response = client.post(
+        "/watchlist", json={"name": "Acme Inc", "slug": "acme", "source": "lever"}
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["source"] == "lever"
+    assert sources["lever"].slugs == ["acme"]
+    assert sources["greenhouse"].slugs == []  # the other board is never asked
+    assert companies()[0]["source"] == "lever"
+
+
+def test_the_listed_source_is_what_each_row_stores(
+    client: TestClient, sources: dict[str, FakeSource]
+) -> None:
+    watch("Globex", "globex", source="lever")
+    watch("Acme Inc", "acme")
+
+    assert [row["source"] for row in client.get("/watchlist").json()] == [
+        "lever",
+        "greenhouse",
+    ]
+
+
+@pytest.mark.parametrize("named", ["workday", "ashby", "Lever", "LEVER", "greenhouse "])
+def test_a_body_naming_an_unknown_source_is_422_and_makes_no_request(
+    client: TestClient, sources: dict[str, FakeSource], named: str
+) -> None:
+    response = client.post(
+        "/watchlist", json={"name": "Acme Inc", "slug": "acme", "source": named}
+    )
+
+    assert response.status_code == 422, response.text
+    assert sources["greenhouse"].slugs == []
+    assert sources["lever"].slugs == []
+    assert companies() == []
 
 
 # The database guard under that 409, on both engines the suite runs on.
@@ -296,6 +367,16 @@ def test_the_route_write_path_is_guarded_by_the_unique_slug_on_every_engine(
 
     with db.session_scope() as session:
         assert [company.slug for company in session.scalars(select(Company))] == ["acme"]
+
+
+def test_the_database_refuses_a_source_outside_the_vocabulary(engine: Engine) -> None:
+    """`workday` is not a value the check accepts, so it is an `IntegrityError` and not a row."""
+    with pytest.raises(IntegrityError):
+        with db.session_scope() as session:
+            session.add(Company(name="Acme", slug="acme", source="workday"))
+
+    with db.session_scope() as session:
+        assert session.scalars(select(Company)).all() == []
 
 
 # The probe: a board that is not there, and a board that cannot be read.
@@ -339,6 +420,47 @@ def test_a_board_that_cannot_be_read_is_502_and_creates_no_row(
     assert "could not be read" in message
     assert UPSTREAM_TEXT not in response.text  # none of the upstream body comes back
     assert source.slugs == ["acme"]
+    assert companies() == []
+
+
+def test_a_lever_slug_no_board_answers_to_is_refused_with_404(
+    client: TestClient, sources: dict[str, FakeSource]
+) -> None:
+    sources["lever"].error = UnknownSlug("There is no board named 'nope'")
+
+    response = client.post(
+        "/watchlist", json={"name": "Nope Inc", "slug": "nope", "source": "lever"}
+    )
+
+    message = refusal(response, 404)
+    assert "nope" in message
+    assert sources["lever"].slugs == ["nope"]
+    assert sources["greenhouse"].slugs == []
+    assert companies() == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        BoardUnavailable("The board refused to answer: HTTP 503"),
+        SourceTimeout("the board did not answer"),
+        MalformedPayload("the answer was not a board"),
+    ],
+    ids=["a board that refuses", "a board that is slow", "a malformed payload"],
+)
+def test_a_lever_board_that_cannot_be_read_is_502_and_creates_no_row(
+    client: TestClient, sources: dict[str, FakeSource], error: SourceError
+) -> None:
+    sources["lever"].error = error
+
+    response = client.post(
+        "/watchlist", json={"name": "Acme Inc", "slug": "acme", "source": "lever"}
+    )
+
+    message = refusal(response, 502)
+    assert "acme" in message
+    assert sources["lever"].slugs == ["acme"]
+    assert sources["greenhouse"].slugs == []
     assert companies() == []
 
 
