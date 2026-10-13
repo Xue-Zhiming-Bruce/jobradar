@@ -35,10 +35,11 @@ from app import matching as matching_module
 from app.matching import scorer as scorer_module
 from app.matching.prefilter import REJECTION_REASON_PREFIX, prefilter, record_rejection
 from app.matching.scorer import (
-    CHAT_COMPLETIONS_URL,
+    DEFAULT_BASE_URL,
     DEFAULT_MAX_POSTINGS,
     DEFAULT_MODEL,
     LLM_API_KEY,
+    LLM_BASE_URL,
     LLM_MODEL,
     MODEL_TIMEOUT_SECONDS,
     NOT_SCORED_PREFIX,
@@ -51,6 +52,8 @@ from app.matching.scorer import (
     MatchScorer,
     ScorerConfigurationError,
     api_key,
+    base_url,
+    chat_completions_url,
     max_postings,
     model,
     record_score,
@@ -66,9 +69,17 @@ SCORER_SOURCE = SCORER_MODULE.read_text(encoding="utf-8")
 # The endpoint, spelled out rather than imported, so a moved one fails here.
 THE_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 
-# The three variables, in the order this module reads them, with the reader beside
+# A synthetic gateway: not a real host, and the base URL no other case configures.
+TEST_BASE_URL = "https://gateway.example.test/v1"
+
+# The four variables, in the order this module reads them, with the reader beside
 # each, so one case can drive the configuration without naming it twice.
-THE_THREE = ((LLM_API_KEY, api_key), (LLM_MODEL, model), (SCORER_MAX_POSTINGS, max_postings))
+THE_FOUR = (
+    (LLM_API_KEY, api_key),
+    (LLM_MODEL, model),
+    (SCORER_MAX_POSTINGS, max_postings),
+    (LLM_BASE_URL, base_url),
+)
 
 # A recognisable key value and a recognisable resume: neither is a real
 # credential, a real resume, or allowed to appear in a message or a result.
@@ -131,7 +142,7 @@ def no_outbound_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def no_model_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each case starts with no key, no model and no cap, whatever its shell holds."""
-    for name, _ in THE_THREE:
+    for name, _ in THE_FOUR:
         monkeypatch.delenv(name, raising=False)
 
 
@@ -202,6 +213,21 @@ def _client_serving(
         if isinstance(answer, Exception):
             raise answer
         return answer
+
+    return httpx2.Client(transport=httpx2.MockTransport(handle))
+
+
+def _answering_client(requests: list[httpx2.Request]) -> httpx2.Client:
+    """A stub that records every request and serves one good result, whatever the URL.
+
+    `_client_serving` pins the URL to the default's, which is what a case about the
+    request body wants; this one serves whichever host a case configured, so the
+    recorded URL is the assertion.
+    """
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return _response(_completion(json.dumps(GOOD_FIELDS)))
 
     return httpx2.Client(transport=httpx2.MockTransport(handle))
 
@@ -436,7 +462,7 @@ def test_the_two_configuration_errors_are_distinct_rather_than_one_message(
     assert requests == []
 
 
-@pytest.mark.parametrize(("name", "reader"), THE_THREE, ids=[name for name, _ in THE_THREE])
+@pytest.mark.parametrize(("name", "reader"), THE_FOUR, ids=[name for name, _ in THE_FOUR])
 def test_each_variable_is_a_module_constant_and_its_reader_takes_no_argument(
     name: str, reader: object
 ) -> None:
@@ -444,26 +470,31 @@ def test_each_variable_is_a_module_constant_and_its_reader_takes_no_argument(
     assert list(inspect.signature(reader).parameters) == []
 
 
-def test_the_key_the_model_and_the_cap_are_read_per_call_not_at_import(
+def test_the_key_the_model_the_cap_and_the_base_url_are_read_per_call_not_at_import(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert api_key() == ""
     assert model() == DEFAULT_MODEL == "gpt-4o-mini"
     assert max_postings() == DEFAULT_MAX_POSTINGS == 50
+    assert base_url() == DEFAULT_BASE_URL
 
     monkeypatch.setenv(LLM_API_KEY, "  unit-test-key  ")
     monkeypatch.setenv(LLM_MODEL, "  gpt-4o  ")
     monkeypatch.setenv(SCORER_MAX_POSTINGS, " 7 ")
+    monkeypatch.setenv(LLM_BASE_URL, f"  {TEST_BASE_URL}  ")
     assert api_key() == "unit-test-key"
     assert model() == "gpt-4o"
     assert max_postings() == 7
+    assert base_url() == TEST_BASE_URL
 
     monkeypatch.setenv(LLM_API_KEY, "")
     monkeypatch.setenv(LLM_MODEL, "   ")
     monkeypatch.setenv(SCORER_MAX_POSTINGS, "")
+    monkeypatch.setenv(LLM_BASE_URL, "")
     assert api_key() == ""
     assert model() == DEFAULT_MODEL
     assert max_postings() == DEFAULT_MAX_POSTINGS
+    assert base_url() == DEFAULT_BASE_URL
 
 
 IMPORT_SCRIPT = f"""
@@ -499,7 +530,11 @@ from app.matching import scorer
 
 # The import may read what Python itself reads (sysconfig, importlib); it may not
 # read any of the three variables this module configures itself from.
-assert [name for name in reads if name in ("LLM_API_KEY", "LLM_MODEL", "SCORER_MAX_POSTINGS")] == [], reads
+assert [
+    name
+    for name in reads
+    if name in ("LLM_API_KEY", "LLM_MODEL", "SCORER_MAX_POSTINGS", "LLM_BASE_URL")
+] == [], reads
 assert scorer.PROMPT_PATH.is_file(), scorer.PROMPT_PATH
 """
 
@@ -514,6 +549,94 @@ def test_importing_the_scorer_reads_no_configuration_builds_no_client_and_finds_
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+# The endpoint: one base URL, read per call, joined to the one path in one place.
+
+
+def test_an_unset_base_url_means_the_declared_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default is the URL this module hardcoded before it became configuration."""
+    monkeypatch.delenv(LLM_BASE_URL, raising=False)
+
+    assert base_url() == DEFAULT_BASE_URL == "https://api.openai.com/v1"
+    assert chat_completions_url() == THE_ENDPOINT
+
+
+@pytest.mark.parametrize("configured", ["", "   "], ids=["empty", "whitespace"])
+def test_a_blank_base_url_means_the_same_default(
+    configured: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(LLM_BASE_URL, configured)
+
+    assert base_url() == DEFAULT_BASE_URL
+    assert chat_completions_url() == THE_ENDPOINT
+
+
+def test_a_configured_base_url_is_where_the_request_goes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A gateway deployment points `LLM_BASE_URL` at itself and the one call follows."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    monkeypatch.setenv(LLM_BASE_URL, TEST_BASE_URL)
+
+    result = LlmScorer(client=_answering_client(requests)).score(_posting(), RESUME_TEXT)
+
+    assert result.score == 87
+    assert [str(request.url) for request in requests] == [f"{TEST_BASE_URL}/chat/completions"]
+
+
+def test_a_trailing_slash_on_the_configured_base_url_is_tolerated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    monkeypatch.setenv(LLM_BASE_URL, f"{TEST_BASE_URL}/")
+
+    LlmScorer(client=_answering_client(requests)).score(_posting(), RESUME_TEXT)
+
+    assert [str(request.url) for request in requests] == [f"{TEST_BASE_URL}/chat/completions"]
+    assert chat_completions_url() == f"{TEST_BASE_URL}/chat/completions"
+
+
+# A base URL that is not an http or https URL is refused before any request, so a
+# deployment's typo fails loudly instead of becoming a stored 0 for every posting.
+UNUSABLE_BASE_URLS = [
+    pytest.param("gateway.example.test/v1", id="no scheme"),
+    pytest.param("ftp://gateway.example.test/v1", id="another scheme"),
+    pytest.param("http://", id="no host"),
+    pytest.param("not a URL at all", id="not a URL"),
+]
+
+
+@pytest.mark.parametrize("configured", UNUSABLE_BASE_URLS)
+def test_a_base_url_that_is_not_http_raises_before_any_request(
+    configured: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    monkeypatch.setenv(LLM_BASE_URL, configured)
+
+    with pytest.raises(ScorerConfigurationError) as raised:
+        LlmScorer(client=_answering_client(requests)).score(_posting(), RESUME_TEXT)
+
+    assert LLM_BASE_URL in str(raised.value)
+    assert configured not in str(raised.value)
+    assert requests == []
+
+
+def test_the_url_is_assembled_in_one_place() -> None:
+    """One place joins the base URL and the path, so a gateway moves all three callers."""
+    joining = [
+        node.name
+        for node in ast.parse(SCORER_SOURCE).body
+        if isinstance(node, ast.FunctionDef)
+        and any(
+            isinstance(call, ast.Call)
+            and getattr(call.func, "id", None) == "chat_completions_url"
+            for call in ast.walk(node)
+        )
+    ]
+
+    assert joining == ["ask_model"]
 
 
 # The request: one call per posting, to one endpoint, with four fields and nothing else.
@@ -531,7 +654,7 @@ def test_one_request_is_made_to_the_chat_completions_endpoint(monkeypatch: pytes
     assert len(requests) == 1
     request = requests[0]
     assert request.method == "POST"
-    assert str(request.url) == THE_ENDPOINT == CHAT_COMPLETIONS_URL
+    assert str(request.url) == THE_ENDPOINT == chat_completions_url()
     assert request.headers["authorization"] == f"Bearer {THE_KEY}"
     assert _body_of(request) == {
         "model": DEFAULT_MODEL,
@@ -1225,11 +1348,11 @@ def test_scores_of_two_postings_are_two_rows(engine: Engine) -> None:
 # The module's boundaries: one place per variable, one writer, one model client.
 
 
-def test_the_key_the_model_and_the_cap_are_read_in_one_module_only() -> None:
+def test_the_four_variables_are_read_in_one_module_only() -> None:
     """The one-place rule #7 proved for the rules, proved here for the model config.
 
-    `scorer` is the one module that reads the three variables --
-    `test_only_the_three_readers_touch_the_environment` is that proof -- and the
+    `scorer` is the one module that reads the four variables --
+    `test_only_the_four_readers_touch_the_environment` is that proof -- and the
     two modules that reach the model through it name the key as well: #26's resume
     parser, and #27's scan reader, each in the refusal it raises before any
     request.
@@ -1237,7 +1360,7 @@ def test_the_key_the_model_and_the_cap_are_read_in_one_module_only() -> None:
     naming = sorted(
         path.relative_to(BACKEND_ROOT).as_posix()
         for path in (BACKEND_ROOT / "app").rglob("*.py")
-        if any(name in path.read_text(encoding="utf-8") for name, _ in THE_THREE)
+        if any(name in path.read_text(encoding="utf-8") for name, _ in THE_FOUR)
     )
 
     assert naming == [
@@ -1247,7 +1370,7 @@ def test_the_key_the_model_and_the_cap_are_read_in_one_module_only() -> None:
     ]
 
 
-def test_only_the_three_readers_touch_the_environment() -> None:
+def test_only_the_four_readers_touch_the_environment() -> None:
     """`os.environ` appears in one reader per value, and nowhere else in the module."""
     reading: list[str] = []
     for node in ast.parse(SCORER_SOURCE).body:
@@ -1259,7 +1382,7 @@ def test_only_the_three_readers_touch_the_environment() -> None:
         ):
             reading.append(node.name)
 
-    assert reading == ["api_key", "model", "max_postings"]
+    assert reading == ["api_key", "model", "max_postings", "base_url"]
 
 
 def test_only_the_recorder_opens_a_session() -> None:

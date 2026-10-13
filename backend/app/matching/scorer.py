@@ -6,11 +6,12 @@ is the interface #9's tick calls once per survivor, `FakeScorer` stands in for
 the real one so a test can assert what was scored and with which resume text
 without a model, a key or a network, and `LlmScorer` is the real one.
 
-`LlmScorer` makes one `POST` to `CHAT_COMPLETIONS_URL` -- OpenAI's Chat
-Completions endpoint -- per posting, carrying the prompt rendered from
-`PROMPT_PATH` (the file `score_prompt.txt` beside this module, read on every
-call) and reading the answer at `choices[0].message.content`. The answer is
-parsed strictly and nothing is coerced: a score that is not a JSON integer in
+`LlmScorer` makes one `POST` per posting to the Chat Completions endpoint
+`chat_completions_url()` builds -- the base URL `LLM_BASE_URL` names, OpenAI's
+own by default, and the one path the provider serves -- carrying the prompt
+rendered from `PROMPT_PATH` (the file `score_prompt.txt` beside this module, read
+on every call) and reading the answer at `choices[0].message.content`. The answer
+is parsed strictly and nothing is coerced: a score that is not a JSON integer in
 0-100, a reason that is not a non-blank string, or a `gaps` list holding anything
 but strings is a malformed answer, and a malformed answer costs one of
 `SCORER_MAX_ATTEMPTS` attempts. There is no LLM SDK in this project: the call is
@@ -45,6 +46,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 import httpx2
 from sqlalchemy import select
@@ -53,19 +55,23 @@ from app import db
 from app.models import Match
 from app.sources.base import SourcePosting
 
-# The three variables, named here and read in no other module, the way the resume
+# The variables, named here and read in no other module, the way the resume
 # service and the prefilter read their own settings in one place.
 LLM_API_KEY = "LLM_API_KEY"
 LLM_MODEL = "LLM_MODEL"
 SCORER_MAX_POSTINGS = "SCORER_MAX_POSTINGS"
-
-# The one endpoint this module knows, and the one request per posting the plan
-# asks for. A second provider or a configurable base URL is #32.
-CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
+LLM_BASE_URL = "LLM_BASE_URL"
 
 # What an unset or empty variable means, declared rather than left to a library.
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_MAX_POSTINGS = 50
+# The one endpoint this module posts to, in two halves: the base URL a deployment
+# points at its own OpenAI-compatible gateway, and the one path the provider
+# serves. The default is the URL this module used to hardcode, so an unset
+# `LLM_BASE_URL` reproduces the request the app has always made, and every call
+# the parser and the scan reader make moves with it because `ask_model` is the
+# one place the two are joined.
+DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 # The total number of calls one posting's `score` makes -- not three retries on
 # top of an original -- and deliberately not configurable: an answer that cannot
@@ -99,11 +105,12 @@ _CALL_FAILED = "the model call failed"
 class ScorerConfigurationError(RuntimeError):
     """Scoring was asked for without something it cannot work without.
 
-    A missing key and an empty resume are both this error, raised before any
-    request: an unconfigured JobRadar must fail loudly once instead of storing a
-    confident-looking 0 for every posting. Neither message carries the key's
-    value or any part of the resume's text, and neither is a `MatchResult` --
-    that would be indistinguishable from a model that answered 0.
+    A missing key, an empty resume and a base URL that is not an `http`/`https`
+    URL are all this error, raised before any request: an unconfigured JobRadar
+    must fail loudly once instead of storing a confident-looking 0 for every
+    posting. No message carries the key's value, any part of the resume's text or
+    the rejected URL itself, and none of them is a `MatchResult` -- that would be
+    indistinguishable from a model that answered 0.
     """
 
 
@@ -167,6 +174,34 @@ def max_postings() -> int:
     """
     configured = os.environ.get(SCORER_MAX_POSTINGS, "").strip()
     return int(configured) if configured else DEFAULT_MAX_POSTINGS
+
+
+def base_url() -> str:
+    """`LLM_BASE_URL`, or `DEFAULT_BASE_URL` when it is unset or empty.
+
+    Read per call and never at import, so a deployment points every model call at
+    a gateway by setting the variable. The value is a URL rather than a
+    credential, and it still reaches one request and no message.
+    """
+    return os.environ.get(LLM_BASE_URL, "").strip() or DEFAULT_BASE_URL
+
+
+def chat_completions_url() -> str:
+    """The one URL this module posts to: the configured base URL and the one path.
+
+    A base URL that is not an `http` or `https` URL is refused here, before any
+    request: it is a configuration mistake rather than a model outage, so it
+    raises instead of becoming a not-scored row that hides the typo. The message
+    names the variable and never the value it holds, because the value may name
+    a host the owner would rather not publish.
+    """
+    base = base_url()
+    parts = urlsplit(base)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ScorerConfigurationError(
+            f"{LLM_BASE_URL} must be an http or https URL: no request was made"
+        )
+    return base.rstrip("/") + "/chat/completions"
 
 
 def posting_text(posting: SourcePosting) -> str:
@@ -330,7 +365,9 @@ def ask_model(client: httpx2.Client, body: dict[str, object], key: str) -> tuple
 
     Public for the reason `request_body` gives: #26's resume parser sends the
     same request with this same function, so the timeout, the endpoint and the
-    failure wording have one spelling.
+    failure wording have one spelling. The endpoint is `chat_completions_url()`,
+    built here and nowhere else, so a configured base URL moves all three callers
+    at once.
 
     Every `httpx2` failure is turned into a reason here, so none of them escapes
     `score`. The reason names a status or nothing at all: the response body is
@@ -338,7 +375,7 @@ def ask_model(client: httpx2.Client, body: dict[str, object], key: str) -> tuple
     """
     try:
         response = client.post(
-            CHAT_COMPLETIONS_URL,
+            chat_completions_url(),
             json=body,
             headers={"Authorization": f"Bearer {key}"},
             timeout=MODEL_TIMEOUT_SECONDS,

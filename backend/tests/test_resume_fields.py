@@ -35,13 +35,14 @@ from app.matching.resume_fields import (
     ResumeParseError,
 )
 from app.matching.scorer import (
-    CHAT_COMPLETIONS_URL,
     DEFAULT_MODEL,
     LLM_API_KEY,
+    LLM_BASE_URL,
     MODEL_TIMEOUT_SECONDS,
     SCORER_MAX_ATTEMPTS,
     ScorerConfigurationError,
     api_key,
+    chat_completions_url,
 )
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
@@ -51,6 +52,9 @@ RESUME_FIELDS_SOURCE = RESUME_FIELDS_MODULE.read_text(encoding="utf-8")
 
 # The endpoint, spelled out rather than imported, so a moved one fails here.
 THE_ENDPOINT = "https://api.openai.com/v1/chat/completions"
+
+# A synthetic gateway: not a real host, and the base URL no other case configures.
+TEST_BASE_URL = "https://gateway.example.test/v1"
 
 # A recognisable key value and a recognisable resume: neither is a real
 # credential, a real resume, or allowed to appear in a raised message.
@@ -75,8 +79,9 @@ def no_outbound_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def no_model_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each case starts with no key, whatever its shell holds."""
+    """Each case starts with no key and no gateway, whatever its shell holds."""
     monkeypatch.delenv(LLM_API_KEY, raising=False)
+    monkeypatch.delenv(LLM_BASE_URL, raising=False)
 
 
 def _response(body: str, *, status: int = 200) -> httpx2.Response:
@@ -305,7 +310,7 @@ def test_one_request_is_made_to_the_chat_completions_endpoint(
     assert len(requests) == 1
     request = requests[0]
     assert request.method == "POST"
-    assert str(request.url) == THE_ENDPOINT == CHAT_COMPLETIONS_URL
+    assert str(request.url) == THE_ENDPOINT == chat_completions_url()
     assert request.headers["authorization"] == f"Bearer {THE_KEY}"
     assert _body_of(request) == {
         "model": DEFAULT_MODEL,
@@ -315,6 +320,24 @@ def test_one_request_is_made_to_the_chat_completions_endpoint(
     }
     assert request.extensions["timeout"]["connect"] == MODEL_TIMEOUT_SECONDS
     assert request.extensions["timeout"]["read"] == MODEL_TIMEOUT_SECONDS
+
+
+def test_the_configured_base_url_is_where_the_parse_request_goes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The endpoint is the scorer's, not a copy of it: `LLM_BASE_URL` moves this call too."""
+    requests: list[httpx2.Request] = []
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    monkeypatch.setenv(LLM_BASE_URL, TEST_BASE_URL)
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return _response(_completion(json.dumps(GOOD_FIELDS)))
+
+    parser = LlmResumeParser(client=httpx2.Client(transport=httpx2.MockTransport(handle)))
+
+    assert parser.parse(RESUME_TEXT) == _fields()
+    assert [str(request.url) for request in requests] == [f"{TEST_BASE_URL}/chat/completions"]
 
 
 def test_the_client_it_builds_carries_the_module_timeout(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -39,13 +39,14 @@ from app.matching.resume_ocr import (
     ResumeOcrError,
 )
 from app.matching.scorer import (
-    CHAT_COMPLETIONS_URL,
     DEFAULT_MODEL,
     LLM_API_KEY,
+    LLM_BASE_URL,
     MODEL_TIMEOUT_SECONDS,
     SCORER_MAX_ATTEMPTS,
     ScorerConfigurationError,
     api_key,
+    chat_completions_url,
 )
 from app.services import resume as resume_service
 
@@ -57,6 +58,9 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 # The endpoint, spelled out rather than imported, so a moved one fails here.
 THE_ENDPOINT = "https://api.openai.com/v1/chat/completions"
+
+# A synthetic gateway: not a real host, and the base URL no other case configures.
+TEST_BASE_URL = "https://gateway.example.test/v1"
 
 IMAGE_PNG = "image/png"
 APPLICATION_PDF = "application/pdf"
@@ -82,8 +86,9 @@ def no_outbound_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def no_model_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each case starts with no key, whatever its shell holds."""
+    """Each case starts with no key and no gateway, whatever its shell holds."""
     monkeypatch.delenv(LLM_API_KEY, raising=False)
+    monkeypatch.delenv(LLM_BASE_URL, raising=False)
 
 
 def _scan_png(size: tuple[int, int] = (40, 30)) -> bytes:
@@ -297,7 +302,7 @@ def test_one_vision_request_carries_the_prompt_and_the_page_images(
     assert len(requests) == 1
     request = requests[0]
     assert request.method == "POST"
-    assert str(request.url) == THE_ENDPOINT == CHAT_COMPLETIONS_URL
+    assert str(request.url) == THE_ENDPOINT == chat_completions_url()
     assert request.headers["authorization"] == f"Bearer {THE_KEY}"
     assert _body_of(request) == {
         "model": DEFAULT_MODEL,
@@ -307,6 +312,25 @@ def test_one_vision_request_carries_the_prompt_and_the_page_images(
     }
     assert request.extensions["timeout"]["connect"] == MODEL_TIMEOUT_SECONDS
     assert request.extensions["timeout"]["read"] == MODEL_TIMEOUT_SECONDS
+
+
+def test_the_configured_base_url_is_where_the_scan_request_goes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The endpoint is the scorer's, not a copy of it: `LLM_BASE_URL` moves this call too."""
+    requests: list[httpx2.Request] = []
+    png = _scan_png()
+    monkeypatch.setenv(LLM_API_KEY, THE_KEY)
+    monkeypatch.setenv(LLM_BASE_URL, TEST_BASE_URL)
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return _response(_answer({"text": SCAN_TEXT}))
+
+    reader = LlmResumeOcr(client=httpx2.Client(transport=httpx2.MockTransport(handle)))
+
+    assert reader.read(IMAGE_PNG, png) == SCAN_TEXT
+    assert [str(request.url) for request in requests] == [f"{TEST_BASE_URL}/chat/completions"]
 
 
 def test_the_image_parts_are_one_png_data_url_per_page(monkeypatch: pytest.MonkeyPatch) -> None:
