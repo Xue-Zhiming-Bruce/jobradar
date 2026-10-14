@@ -238,6 +238,114 @@ def test_a_docx_upload_stores_the_sentence_its_document_carries(
     assert row["stored_path"].read_bytes() == document
 
 
+# The DOCX reader's untrusted part: bounded on the read, DTD refused before the parse.
+
+
+def deflated_docx(part: bytes) -> bytes:
+    """A DOCX package with `word/document.xml` deflated, so a large part fits a small upload."""
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("word/document.xml", part)
+    return package.getvalue()
+
+
+def sized_document(size: int, text: str) -> bytes:
+    """A `word/document.xml` of exactly `size` bytes, carrying `text` as one run."""
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    prefix = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    opening = f'<w:document xmlns:w="{namespace}"><w:body>'
+    closing = "</w:body></w:document>"
+    run = f"<w:p><w:r><w:t>{text}"
+    tail = "</w:t></w:r></w:p>"
+    padding = size - len(prefix) - len(opening) - len(closing) - len(run) - len(tail)
+    assert padding >= 0, "the fixed part of the document is already over the size"
+    return (prefix + opening + run + " " * padding + tail + closing).encode()
+
+
+def test_a_docx_part_over_the_limit_is_rejected_with_413(
+    client: TestClient, uploads_dir: Path, small_limit: int
+) -> None:
+    """The bound is on the read, not on the archive: 512 KiB out of a sub-kilobyte file.
+
+    Measured, the capped read allocates the limit and stops; it does not expand the
+    entry the archive declares.
+    """
+    part = b"\0" * (512 * 1024)
+    document = deflated_docx(part)
+    assert len(document) < small_limit  # the upload is small; the part it hides is not
+
+    message = refusal(upload(client, "bomb.docx", document, DOCX), 413)
+
+    assert "word/document.xml" in message  # the refusal names the part
+    assert str(small_limit) in message  # and the limit, so it is fixable
+    assert rows() == []
+    assert stored_files(uploads_dir) == []
+
+
+def test_a_docx_part_at_the_limit_is_read(
+    client: TestClient, uploads_dir: Path, small_limit: int
+) -> None:
+    """The limit is what is refused when it is exceeded, not when it is met."""
+    document = deflated_docx(sized_document(small_limit, SENTENCE))
+
+    response = upload(client, "at-the-limit.docx", document, DOCX)
+
+    assert response.status_code == 201
+    (row,) = rows()
+    assert SENTENCE in collapsed(row["text"])
+
+
+def test_a_docx_part_declaring_an_external_entity_is_rejected_with_422(
+    client: TestClient, uploads_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An entity can only be declared in a DTD, so the declaration is refused first."""
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    part = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<!DOCTYPE w:document [<!ENTITY e SYSTEM "file:///etc/passwd">]>'
+        f'<w:document xmlns:w="{namespace}"><w:body>'
+        f"<w:p><w:r><w:t>{SENTINEL}&e;</w:t></w:r></w:p>"
+        "</w:body></w:document>"
+    ).encode()
+    caplog.set_level(logging.DEBUG)
+
+    message = refusal(upload(client, "entity.docx", deflated_docx(part), DOCX), 422)
+
+    assert "DTD" in message
+    assert SENTINEL not in message  # the refusal names the declaration, never the text
+    assert rows() == []
+    assert stored_files(uploads_dir) == []
+    assert [line for line in _log_lines(caplog.records) if SENTINEL in line] == []
+
+
+def test_a_docx_part_with_a_nested_entity_bomb_is_rejected_with_422(
+    client: TestClient, uploads_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same refusal in UTF-16-LE: the check reads the declaration, not the parse."""
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    entities = "".join(
+        f'<!ENTITY lol{level} "{"".join(f"&lol{level - 1};" for _ in range(10))}">'
+        for level in range(1, 10)
+    )
+    part = (
+        '<?xml version="1.0" encoding="UTF-16"?>'
+        f'<!DOCTYPE lolz [<!ENTITY lol "{SENTINEL}">{entities}]>'
+        f'<w:document xmlns:w="{namespace}"><w:body>'
+        "<w:p><w:r><w:t>&lol9;</w:t></w:r></w:p>"
+        "</w:body></w:document>"
+    ).encode("utf-16-le")
+    caplog.set_level(logging.DEBUG)
+
+    message = refusal(upload(client, "bomb.docx", deflated_docx(part), DOCX), 422)
+
+    assert "DTD" in message
+    assert SENTINEL not in message
+    assert rows() == []
+    assert stored_files(uploads_dir) == []
+    assert [line for line in _log_lines(caplog.records) if SENTINEL in line] == []
+
+
 # The type gate: the declared type, and then the bytes.
 
 
