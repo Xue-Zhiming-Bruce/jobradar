@@ -1,7 +1,7 @@
-# CI: this repository's own runners run the three suites, the committed-data
-# guard, the security scan and the stale-contract check. There is no deploy
-# step -- deploying a green `main` is #45, which needs #16's Render service and
-# Neon database. Nothing in this file reaches a credential beyond the throwaway
+# CI: this repository's own runners run the four suites, the committed-data
+# guard, the security scan and the stale-contract check, in five jobs. There is
+# no deploy step -- deploying a green `main` is #45, which needs #16's Render
+# service and Neon database. Nothing in this file reaches a credential beyond the throwaway
 # Postgres one below, which the README already publishes for an ephemeral
 # container.
 #
@@ -37,6 +37,15 @@
 #                git diff --exit-code -- backend/openapi.json
 #                a stale or hand-edited contract rewrites the file, so the diff
 #                is non-empty and this fails with the diff printed
+#   mcp          cd mcp && uv sync && uv run pytest
+#                the stdio server's own suite, over the fake app the cases build
+#                from `httpx2.MockTransport`. It needs no app, no network and no
+#                `.env`: the autouse guard in `mcp/tests/conftest.py` refuses a
+#                real socket, and the two variables are set in-process to
+#                throwaways. Suite `mcp/` holds one case marked `live`, which
+#                CI does not run -- the default run deselects it (`addopts` in
+#                `mcp/pyproject.toml`), and the local counterpart for that
+#                excluded case alone is `cd mcp && uv run pytest -m live`.
 #
 # The `backend` job's first step is the committed-data guard (#19), on its own so
 # its verdict is readable without the suite's output, and again inside the suite:
@@ -197,3 +206,30 @@ jobs:
       - run: uv run python -m app.export_openapi
         working-directory: backend
       - run: git diff --exit-code -- backend/openapi.json
+
+  mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.12"
+      - run: uv sync
+        working-directory: mcp
+      # No `env:` here on purpose: the suite is offline and keyless, so a
+      # variable would mean it is reaching something it should not. The guard in
+      # `mcp/tests/conftest.py` refuses a real socket, and `mcp`'s one `live`
+      # case is deselected by `addopts`, not skipped -- so a `skipped` count
+      # means the run was not the full offline default.
+      - name: Run the offline suite
+        working-directory: mcp
+        run: |
+          set -o pipefail
+          uv run pytest | tee /tmp/pytest-summary.txt
+      - name: Fail when the run skipped anything
+        run: |
+          grep -qE '[1-9][0-9]* passed' /tmp/pytest-summary.txt
+          if grep -qE '[0-9]+ skipped' /tmp/pytest-summary.txt; then
+            echo "the suite skipped cases: the live case is deselected, not a skip"
+            exit 1
+          fi
