@@ -22,6 +22,21 @@ from tests.support import TOOL_NAMES, TICK_SECRET, FakeApp, answered, call, list
 README = Path(__file__).resolve().parents[2] / "README.md"
 CONTRACT = Path(__file__).resolve().parents[2] / "backend" / "openapi.json"
 
+# The prose that states the tool count, in the three places the tools table's own
+# pin does not reach. The count arrives as a word in each of them, so it is
+# compared to the word for the live list's length rather than to a literal.
+COUNTED_FILES = (
+    README,
+    Path(__file__).resolve().parents[1] / "pyproject.toml",
+    Path(__file__).resolve().parents[1] / "jobradar_mcp" / "__init__.py",
+)
+COUNT_CLAIM = re.compile(r"\b(\w+) bounded tools?\b")
+# A server with more than ten tools is a document to rewrite by hand, not to guess here.
+COUNT_WORDS = {
+    1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+    6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+}
+
 # The app's own `MatchSummary` shape, its field names read from the committed
 # contract rather than spelled here: the write tool hands back a body the app
 # sent, so the shape under test is the app's, not this file's opinion of it.
@@ -228,6 +243,16 @@ def test_the_readme_tool_table_names_the_same_seven_tools_and_arguments(server: 
     assert [(cells[1].strip().strip("`"), tuple(re.findall(r"`(\w+): ", cells[2]))) for cells in rows] == [
         (tool.name, tuple(tool.input_schema.get("properties", {}))) for tool in listed_tools(server)
     ]
+
+
+def test_every_bounded_tool_count_claim_states_the_tools_the_server_lists(server: MCPServer) -> None:
+    """Each `<n> bounded tool(s)` claim in the prose is the live list's length, spelled out."""
+    expected = COUNT_WORDS[len(listed_tools(server))]
+
+    for path in COUNTED_FILES:
+        claims = COUNT_CLAIM.findall(path.read_text())
+        assert claims, f"no '<n> bounded tool(s)' claim in {path}"
+        assert set(claims) == {expected}, f"{path} counts {set(claims)}"
 
 
 def test_add_company_sends_the_post_the_app_serves_and_answers_its_201_body(
