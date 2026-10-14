@@ -1,0 +1,228 @@
+# Deploy: a green `main` deploys the commit CI passed to #16's Render service.
+#
+# THIS IS A SEPARATE FILE, NOT A `deploy` JOB INSIDE `ci.yml`, and it starts from
+# `ci.yml`'s completion rather than from `needs:`. #45 allows either shape and
+# says the header comment names which. This one is a new file because `ci.yml`
+# belongs to #15/#19 and is being edited by another lane at the same time; a
+# `deploy` job there would collide. The cost of the choice is one extra workflow
+# run per green `main` instead of one run with two jobs.
+#
+# Why `workflow_run` and not `push`: a `push`-triggered deploy would race the
+# tests, which is the exact failure this file exists to prevent. `workflow_run`
+# fires when the `CI` workflow finishes, and the job's own `if` (below) admits
+# only `conclusion == 'success'` from a `push` to `main`. A red or cancelled CI
+# run therefore leaves this job `skipped` -- `gh run view` prints it skipped, not
+# green -- and no request can reach Render, because a skipped job runs no step at
+# all. The `event == 'push'` and `head_branch == 'main'` halves of that `if` are
+# what keeps a pull request out: `on.workflow_run.branches` matches the *head*
+# branch name, which a fork's own `main` would also match. Check it by hand once:
+# push a deliberately failing test to a scratch branch, merge it, and watch
+# `gh run list --workflow=deploy.yml` stay empty while the `CI` run is red.
+#
+# The credential is `RENDER_API_KEY` plus `RENDER_SERVICE_ID`, not the simpler
+# single `RENDER_DEPLOY_HOOK_URL` that #45 also allows: a deploy hook returns no
+# deploy object, so it can neither name the commit to deploy nor be polled to
+# `live`, and those two are the acceptance criteria about deploying the revision
+# CI passed and verifying the result.
+#
+# RED UNTIL #16 IS EXPECTED. The Render web service, its URL and its credential
+# do not exist yet (#16), so the first step finds at least one of
+# `secrets.RENDER_API_KEY`, `secrets.RENDER_SERVICE_ID` and `vars.JOBRADAR_URL`
+# unset, prints a `::error::` naming whichever one it is, and exits non-zero.
+# That is the intended signal, not a broken workflow: a deploy that is quietly
+# skipped is indistinguishable from a deploy nobody noticed had stopped working.
+# No credential value is in this file -- every one arrives as `${{ secrets.* }}`
+# at runtime -- and no step enables shell tracing or a verbose transfer, so no
+# value can reach the log. `permissions: contents: read` and no
+# `pull_request_target` anywhere: a pull request must not be able to reach the
+# Render credential.
+#
+# The revision deployed is the one CI passed. Under `workflow_run`, `github.sha`
+# is the tip of `main` when this workflow starts, which is *not* necessarily the
+# sha the CI run tested (a second push can land while the first run finishes), so
+# the deploy step logs `${{ github.sha }}` beside
+# `github.event.workflow_run.head_sha`, deploys the latter, and fails with a
+# `::error::` if the deploy Render creates is for a different commit. Deploying
+# the untested newer revision, or claiming a test-passing revision while the
+# service serves another, is then a visible failure rather than a silent one.
+#
+# Whatever the by-hand equivalent of each step is, with `<sha>` the commit to
+# deploy and the two Render values exported in your own shell:
+#
+#   the credential guard          test -z "${RENDER_API_KEY}" && echo "unset"
+#   the deploy                    curl -sS --request POST \
+#                                   --header "Authorization: Bearer ${RENDER_API_KEY}" \
+#                                   --header "Content-Type: application/json" \
+#                                   --data "{\"commitId\": \"<sha>\"}" \
+#                                   "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys"
+#   the status poll               curl -sS --header "Authorization: Bearer ${RENDER_API_KEY}" \
+#                                   "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys/<deployId>"
+#   the health check              curl -sSf "https://<JOBRADAR_URL>/healthz"
+#
+# The Render account and the service are #16's to create; nothing above was run
+# against Render to write this file, because there is no service and no
+# credential on this machine. Deploying by hand is that `curl`, deliberately
+# without a `workflow_dispatch` trigger: a manual dispatch would be a path where
+# a failing test does not block a deploy, which is the rule this file enforces.
+#
+# `POST /services/{serviceId}/deploys` with `commitId` is Render's documented way
+# to deploy one named commit (api-docs.render.com/reference/create-deploy); the
+# response is the created deploy, carrying `id`, `commit.id` and `status`, and
+# `GET /services/{serviceId}/deploys/{deployId}` returns it again while it runs.
+# The statuses this file waits on are Render's: `created`, `queued`,
+# `build_in_progress`, `update_in_progress` and `pre_deploy_in_progress` are
+# still in flight, `live` is the success this job requires, and `canceled`,
+# `deactivated`, `build_failed`, `update_failed` and `pre_deploy_failed` fail the
+# job at once. `jq` ships with the `ubuntu-latest` image.
+#
+# The timeouts are the free plan's (`_docs/plan.md`, README): a free build takes
+# minutes and a free instance spins down after 15 minutes idle and takes about a
+# minute to wake, so the poll allows 15 minutes and then the health check retries
+# for 5, and the job itself is capped at 30. A cold instance's first refused
+# request is not a broken deploy, which is why both loops retry instead of
+# failing on the first answer.
+#
+# "Exactly one deploy per green `main`" also needs autodeploys turned off on the
+# Render service, or a push would deploy untested code beside this job. That
+# setting is #16's, recorded here because this file cannot see it.
+#
+# That the YAML itself is valid -- empty output and exit 0 on all three files:
+#
+#   python3 -c 'import yaml, sys; [yaml.safe_load(open(path)) for path in sys.argv[1:]]' .github/workflows/*.yml
+#
+# The stronger check, which knows Actions' own schema:
+#
+#   docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest .github/workflows/*.yml
+#
+# `workflows: [CI]` is a literal coupling: renaming `ci.yml`'s `name:` stops this
+# file from ever running, so a rename has to move this string with it.
+
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    steps:
+      # The two Render values and the URL are all checked before anything is
+      # sent, so an unconfigured repository is loudly red instead of quietly
+      # doing nothing.
+      # Each annotation names the input that is missing; a failing step stops the
+      # job, so the deploy below never runs.
+      - name: Require RENDER_API_KEY, RENDER_SERVICE_ID and JOBRADAR_URL
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+          JOBRADAR_URL: ${{ vars.JOBRADAR_URL }}
+        run: |
+          missing=0
+          if [ -z "${RENDER_API_KEY}" ]; then
+            echo "::error::The repository secret RENDER_API_KEY is unset or empty."
+            missing=1
+          fi
+          if [ -z "${RENDER_SERVICE_ID}" ]; then
+            echo "::error::The repository secret RENDER_SERVICE_ID is unset or empty."
+            missing=1
+          fi
+          if [ -z "${JOBRADAR_URL}" ]; then
+            echo "::error::The repository variable JOBRADAR_URL is unset or empty."
+            missing=1
+          fi
+          if [ "${missing}" -ne 0 ]; then
+            echo "::error::No deploy was triggered. Set all three under Settings > Secrets and variables > Actions; until #16 creates the Render service this job is red on purpose."
+            exit 1
+          fi
+
+      - name: Deploy the revision CI passed
+        id: deploy
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+          GITHUB_SHA: ${{ github.sha }}
+          CI_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          echo "github.sha (tip of main when this workflow started): ${GITHUB_SHA}"
+          echo "The CI run that passed was at ${CI_SHA}, and that is the revision this job deploys."
+          deploy=$(curl --fail-with-body --silent --show-error --max-time 60 \
+            --request POST \
+            --header "Authorization: Bearer ${RENDER_API_KEY}" \
+            --header "Content-Type: application/json" \
+            --data "{\"commitId\": \"${CI_SHA}\"}" \
+            "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys")
+          deploy_id=$(echo "${deploy}" | jq -r '.id')
+          deployed=$(echo "${deploy}" | jq -r '.commit.id')
+          if [ "${deployed}" != "${CI_SHA}" ]; then
+            echo "::error::Render created deploy ${deploy_id} of ${deployed}, not ${CI_SHA}, the revision CI passed. An autodeploy or a differently tracked branch does this; the environment must not be left on an untested revision."
+            exit 1
+          fi
+          echo "deploy_id=${deploy_id}" >> "${GITHUB_OUTPUT}"
+          echo "Render accepted deploy ${deploy_id} of ${CI_SHA}."
+
+      # The deploy object is polled by id, so this waits on this job's own deploy
+      # and not on whatever the service happens to be doing.
+      - name: Wait for the deploy to reach live
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+          DEPLOY_ID: ${{ steps.deploy.outputs.deploy_id }}
+        run: |
+          deadline=$((SECONDS + 900))
+          while :; do
+            deploy=$(curl --fail-with-body --silent --show-error --max-time 60 \
+              --header "Authorization: Bearer ${RENDER_API_KEY}" \
+              "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys/${DEPLOY_ID}")
+            status=$(echo "${deploy}" | jq -r '.status')
+            case "${status}" in
+              live)
+                echo "Deploy ${DEPLOY_ID} is live after ${SECONDS}s."
+                exit 0
+                ;;
+              canceled | deactivated | build_failed | update_failed | pre_deploy_failed)
+                echo "::error::Deploy ${DEPLOY_ID} ended ${status}; the previous revision is still serving."
+                exit 1
+                ;;
+            esac
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::Deploy ${DEPLOY_ID} was still ${status} after 15 minutes. A free plan build takes minutes, not a quarter of an hour, so this is a fault; check the Render build log."
+              exit 1
+            fi
+            echo "Deploy ${DEPLOY_ID} is ${status} after ${SECONDS}s."
+            sleep 15
+          done
+
+      # A live deploy is not a working app: this asks the running service. No
+      # credential is in this step, and the URL comes from the repository
+      # variable, so no hostname is written into this file.
+      - name: Require GET {JOBRADAR_URL}/healthz to answer 200
+        env:
+          JOBRADAR_URL: ${{ vars.JOBRADAR_URL }}
+        run: |
+          url="${JOBRADAR_URL%/}/healthz"
+          deadline=$((SECONDS + 300))
+          while :; do
+            code=$(curl --silent --show-error --max-time 30 \
+              --output /dev/null --write-out '%{http_code}' "${url}" || true)
+            if [ "${code}" = "200" ]; then
+              echo "${url} answered 200 after ${SECONDS}s."
+              exit 0
+            fi
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::${url} never answered 200 within 5 minutes (last answer: ${code}); the deploy is live but the app behind it is not serving."
+              exit 1
+            fi
+            echo "${url} answered ${code} after ${SECONDS}s; retrying."
+            sleep 10
+          done
