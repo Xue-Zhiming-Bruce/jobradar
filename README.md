@@ -95,10 +95,11 @@ What each piece is, where it sits, and the seam it talks through.
   the repository, and one compose file that brings the image up with its database
   and its named volumes, so `docker compose up --build --wait` from the root is
   the whole of the local system.
-- **GitHub Actions** -- CI, in `.github/workflows/`. `ci.yml` runs four jobs on
-  every push and pull request -- `backend`, `frontend`, `integration` and
-  `contract` -- and each file's leading comment names the local command that
-  stands in for every job it runs, so the pipeline is reproducible off GitHub.
+- **GitHub Actions** -- CI, in `.github/workflows/`. `ci.yml` runs five jobs on
+  every push and pull request -- `backend`, `frontend`, `integration`,
+  `contract` and `mcp` -- and each file's leading comment names the local
+  command that stands in for every job it runs, so the pipeline is reproducible
+  off GitHub.
   `tick.yml` is the scheduled convenience: one `POST /internal/tick` a day,
   deliberately red until #16 supplies its two inputs.
 - **The committed contract, `backend/openapi.json`** -- what the API answers,
@@ -478,7 +479,7 @@ Two workflows, both in `.github/workflows/`, and each file's leading comment
 names the local command that stands in for every job it runs, so the pipeline can
 be reproduced without GitHub Actions.
 
-- `ci.yml` runs on every push and every pull request, in four jobs: `backend`
+- `ci.yml` runs on every push and every pull request, in five jobs: `backend`
   (`uv sync && uv run pytest` as one pass over both engines, against its own
   `postgres:17` service container and with `TEST_DATABASE_URL` naming that
   container, with the step `Fail on a committed secret, resume or database file`
@@ -488,9 +489,13 @@ be reproduced without GitHub Actions.
   the suite, and the run failing on a summary that skipped anything), `frontend`
   (`npm ci && npm run build && npm test`), `integration`
   (`uv run pytest -m integration` against a `postgres:17` service
-  container holding the same throwaway credentials as the local server), and
-  `contract` (regenerate `backend/openapi.json`, then fail on a diff). It has no
-  deploy step; deploying a green `main` is #45.
+  container holding the same throwaway credentials as the local server), `mcp`
+  (`cd mcp && uv sync && uv run pytest`, the stdio server's own suite run over
+  the fake app its cases build, which needs no app, no network and no `.env`: an
+  autouse guard in `mcp/tests/conftest.py` refuses a real socket and the two
+  variables are set in-process to throwaways, and the one `live` case is
+  deselected rather than run), and `contract` (regenerate `backend/openapi.json`,
+  then fail on a diff). It has no deploy step; deploying a green `main` is #45.
 - `tick.yml` calls `POST /internal/tick` once a day, taking the secret from the
   repository secret `TICK_SECRET` and the base URL from the repository variable
   `JOBRADAR_URL`. No secret value is in either file. Until #16 sets
