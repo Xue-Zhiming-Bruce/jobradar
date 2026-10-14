@@ -149,6 +149,16 @@ OCR_MAX_SCAN_IMAGES = 20
 _WORD_DOCUMENT_PART = "word/document.xml"
 _WORD_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
+# The declaration an entity needs, in the three byte spellings an XML declaration
+# can name it in: ASCII/UTF-8, and UTF-16 little- and big-endian, with a zero byte
+# between characters. A part in another encoding falls through to the parse.
+_DTD_DECLARATION = "<!DOCTYPE"
+_DTD_SPELLINGS = (
+    _DTD_DECLARATION.encode(),
+    _DTD_DECLARATION.encode("utf-16-le"),
+    _DTD_DECLARATION.encode("utf-16-be"),
+)
+
 
 class ResumeRejected(Exception):
     """An upload this app refuses. `status_code` is the answer the endpoint sends."""
@@ -169,7 +179,13 @@ class UnsupportedResume(ResumeRejected):
 
 
 class ResumeTooLarge(ResumeRejected):
-    """The upload is bigger than `MAX_UPLOAD_BYTES` allows."""
+    """More of the client's file than this app reads: the upload's bytes, or the part.
+
+    `MAX_UPLOAD_BYTES` is the one bound, and it has two sites: the upload's own
+    bytes in `POST /resume`, and the `word/document.xml` part a DOCX reader
+    decompresses. A ZIP expands before the parser sees a byte, so the archive's
+    size cannot bound what comes out of it and the reader bounds the read.
+    """
 
     status_code = 413
 
@@ -187,7 +203,11 @@ class ResumeTooManyPages(ResumeRejected):
 
 
 class UnreadableResume(ResumeRejected):
-    """The bytes do not parse as the format they were declared to be: corrupt or truncated."""
+    """The bytes do not parse as the format they were declared to be.
+
+    Corrupt or truncated, or -- for a DOCX -- carrying a declaration this reader
+    refuses before the parse.
+    """
 
 
 class ResumeWithoutText(ResumeRejected):
@@ -733,12 +753,40 @@ def _word_document_text(data: bytes) -> str:
     resume has, so no DOCX library is needed for what this app reads. A run and a
     paragraph are joined the way Word lays them out: runs inline, paragraphs on
     their own line.
+
+    The part is untrusted and two checks bound it before `ElementTree` sees it,
+    both read from the one configured value. The read is bounded by
+    `max_upload_bytes()` -- the limit the upload's own bytes meet -- because a ZIP
+    is expanded before it is parsed, so the archive's size bounds nothing that
+    comes out of it. And a part that declares a DTD is refused first, because an
+    entity can only be declared in one.
     """
+    limit = max_upload_bytes()
     with zipfile.ZipFile(BytesIO(data)) as package:
-        document = package.read(_WORD_DOCUMENT_PART)
-    # The parsed string is this archive's own `word/document.xml`, the upload is
-    # bounded by `MAX_UPLOAD_BYTES` (10 MiB default) and `ElementTree` resolves no
-    # external entity; assessing a hardened parser is #85.
+        # Bounded on the read, not on the entry: what the archive declares about
+        # the part is the upload's claim, and `read(limit + 1)` allocates the cap
+        # and stops instead of expanding the entry.
+        with package.open(_WORD_DOCUMENT_PART) as part:
+            document = part.read(limit + 1)
+    if len(document) > limit:
+        raise ResumeTooLarge(
+            f"The {_WORD_DOCUMENT_PART} part is at least {len(document)} bytes: the "
+            f"reader reads at most {limit} bytes of it"
+        )
+    if any(spelling in document for spelling in _DTD_SPELLINGS):
+        raise UnreadableResume(
+            f"The {_WORD_DOCUMENT_PART} part declares a DTD ('<!DOCTYPE'): this "
+            f"reader refuses it before parsing"
+        )
+    # `ElementTree` parses this archive's own `word/document.xml`, bounded by the
+    # two checks above: the part is read under `max_upload_bytes()` (so the bytes
+    # are bounded by this code, not by the entry's declared size), and a part
+    # declaring a DTD is refused before the parse (so no entity is reachable).
+    # Nothing here sets a handler or asks expat for parameter-entity parsing, so no
+    # external entity is resolved and no external DTD is fetched. The one residual
+    # is a part whose encoding is outside the three spellings the DTD check reads:
+    # it reaches the parse, where `libexpat`'s amplification ceiling -- a property
+    # of the platform's library and not of this code -- still answers.
     root = ElementTree.fromstring(document)  # noqa: S314
     paragraphs = [
         "".join(node.text or "" for node in paragraph.iter(f"{{{_WORD_NAMESPACE}}}t"))
