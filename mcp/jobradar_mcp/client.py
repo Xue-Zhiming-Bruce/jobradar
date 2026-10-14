@@ -24,7 +24,8 @@ import httpx2
 from mcp.server.mcpserver.exceptions import ToolError
 
 URL_VARIABLE = "JOBRADAR_URL"
-TICK_SECRET_VARIABLE = "JOBRADAR_TICK_SECRET"
+# The variable's name, not a value: the secret is read by that name when the app is called.
+TICK_SECRET_VARIABLE = "JOBRADAR_TICK_SECRET"  # noqa: S105
 
 # One timeout for a request to the app, read here and in no other module. A tick
 # answers at once and the other four routes are reads, so a request that hangs is

@@ -1,8 +1,9 @@
 # CI: this repository's own runners run the three suites, the committed-data
-# guard and the stale-contract check. There is no deploy step -- deploying a
-# green `main` is #45, which needs #16's Render service and Neon database. Nothing
-# in this file reaches a credential beyond the throwaway Postgres one below, which
-# the README already publishes for an ephemeral container.
+# guard, the security scan and the stale-contract check. There is no deploy
+# step -- deploying a green `main` is #45, which needs #16's Render service and
+# Neon database. Nothing in this file reaches a credential beyond the throwaway
+# Postgres one below, which the README already publishes for an ephemeral
+# container.
 #
 # What each job runs, and the local command that stands in for it:
 #
@@ -45,6 +46,20 @@
 # A secret, resume or database file in the git index makes that step red before
 # the suite starts. It needs no credential and prints no matched value: the
 # failure names the file and the kind.
+#
+# The `backend` job's next check is the security scan (#82), its own step so a
+# finding reads without the suite's output, and at the repository root so every
+# path it prints is repository-relative -- `uv run --project backend` uses the
+# environment the `uv sync` above already built:
+#
+#   uv run --project backend ruff check --select S --output-format concise backend/app mcp/jobradar_mcp
+#
+# `ruff`'s `S` rules are flake8-bandit's checks. They need no network and no key,
+# and `ruff` is a backend dev dependency, so the image (`uv sync --no-dev`) never
+# carries it. The seven findings this tree had are dispositioned at their own
+# sites, so the step is green here and a *new* finding -- a hardcoded password, an
+# `xml` parse of untrusted data -- turns it red. The scope and the dispositions
+# are `security/scan.md`.
 #
 # That the YAML itself is valid -- empty output and exit 0 on both files:
 #
@@ -103,6 +118,8 @@ jobs:
       # option, so the guard sits on the step that carries the variable: drop
       # the `env:` below and the job is red before the suite starts, rather than
       # green with 369 skipped.
+      - name: Fail on a new security scan finding
+        run: uv run --project backend ruff check --select S --output-format concise backend/app mcp/jobradar_mcp
       - name: Run the whole suite against the throwaway PostgreSQL
         working-directory: backend
         env:

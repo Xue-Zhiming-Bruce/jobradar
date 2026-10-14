@@ -66,7 +66,8 @@ DIGEST_MIN_SCORE = "DIGEST_MIN_SCORE"
 SMTP_HOST = "SMTP_HOST"
 SMTP_PORT = "SMTP_PORT"
 SMTP_USERNAME = "SMTP_USERNAME"
-SMTP_PASSWORD = "SMTP_PASSWORD"
+# The variable's name, not a value: the relay's password is read by that name when a digest sends.
+SMTP_PASSWORD = "SMTP_PASSWORD"  # noqa: S105
 DIGEST_FROM = "DIGEST_FROM"
 DIGEST_TO = "DIGEST_TO"
 

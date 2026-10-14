@@ -40,7 +40,8 @@ from jobradar_mcp.hosted import build_http_app
 # guard reads, read here and in no other module. `import app.mcp` in the
 # `tests/test_env_example.py` scan is where the name is checked against `.env.example`.
 MCP_PATH = "/mcp"
-AUTH_TOKEN_VARIABLE = "MCP_AUTH_TOKEN"
+# The variable's name, not a value: the token itself is read by `auth_token` at call time.
+AUTH_TOKEN_VARIABLE = "MCP_AUTH_TOKEN"  # noqa: S105
 AUTHORIZATION_HEADER = b"authorization"
 BEARER_PREFIX = "Bearer "
 

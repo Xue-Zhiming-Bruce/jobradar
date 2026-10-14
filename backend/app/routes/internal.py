@@ -102,8 +102,10 @@ router = APIRouter()
 
 # The header a caller sends and the variable it is compared against, each spelled
 # once. The route reads this variable and no other module does.
-TICK_SECRET_HEADER = "X-Tick-Secret"
-TICK_SECRET_VARIABLE = "TICK_SECRET"
+# The header's name, not a value: the secret a caller sends is compared at call time.
+TICK_SECRET_HEADER = "X-Tick-Secret"  # noqa: S105
+# The variable's name, not a value: `tick_secret` reads the value an operator set.
+TICK_SECRET_VARIABLE = "TICK_SECRET"  # noqa: S105
 
 # The second proof: the browser sets `Origin` on every same-origin `POST`, and the
 # request's own `Host` is what that origin has to name.

@@ -199,7 +199,9 @@ assigned to a `*_API_KEY`, `*_SECRET`, `*_PASSWORD`, `*_TOKEN` or
 than the working tree, so a gitignored local `.env`, the local database and
 `~/.jobradar/uploads` are not violations; the seven throwaway values this file
 and `compose.yaml` publish are allowed as exact literals; and it names the file
-and the kind without ever printing the matched text.
+and the kind without ever printing the matched text. Which data an AI tool or an
+agent may see, and where each of those rules is enforced rather than promised, is
+`security/ai-tool-and-data-policy.md`.
 
 ### Configuration
 
@@ -480,8 +482,10 @@ be reproduced without GitHub Actions.
   (`uv sync && uv run pytest` as one pass over both engines, against its own
   `postgres:17` service container and with `TEST_DATABASE_URL` naming that
   container, with the step `Fail on a committed secret, resume or database file`
-  running `uv run pytest tests/test_committed_data_guard.py` before the suite,
-  and the run failing on a summary that skipped anything), `frontend`
+  running `uv run pytest tests/test_committed_data_guard.py` and the step `Fail on
+  a new security scan finding` running `uv run --project backend ruff check
+  --select S --output-format concise backend/app mcp/jobradar_mcp`, both before
+  the suite, and the run failing on a summary that skipped anything), `frontend`
   (`npm ci && npm run build && npm test`), `integration`
   (`uv run pytest -m integration` against a `postgres:17` service
   container holding the same throwaway credentials as the local server), and
@@ -757,6 +761,36 @@ Each with what it costs, because a limitation without a consequence is a slogan.
   to wake, so the first request after a quiet period is slow. That is the free
   tier's documented behaviour rather than an observation made here — #46 owns the
   observed numbers.
+
+## Security, audit and DevOps artifacts
+
+Five artifacts under `security/` and `ops/`, each the output of a command or of
+an incident rather than a statement of good practice.
+
+- `security/scan.md` -- the security scan: `ruff`'s `S` rules, which are
+  flake8-bandit's checks, over the shipped Python. It is one step of `ci.yml`'s
+  `backend` job, it needs no network and no key, and its findings and their
+  dispositions are the file. Rerun it from the repository root:
+
+      uv run --project backend ruff check --select S --output-format concise backend/app mcp/jobradar_mcp
+
+- `security/change-audit-committed-data-guard.md` -- a change audit of #19's
+  committed-data guard, re-run for the artifact rather than quoted. Its trail is
+  issue comments, because there is no pull request to audit:
+  `gh pr list --state all --json number` returns `[]`, so this repository's review
+  path is the issue's groom comment, its implementation comment, its QA verdict,
+  the commits and the CI run that carried them.
+- `security/agent-extension-notes.md` -- the blast radius of every agent surface
+  here: the committed-data guard, the hosted MCP endpoint, the two run routes, the
+  stdio server and this repository's own subagents, each with the file that shows
+  it and with its limit written down.
+- `security/ai-tool-and-data-policy.md` -- which data an agent here may see and
+  which it may not, and where each of those rules is enforced.
+- `ops/diagnosis-mcp-path-405.md` and `ops/diagnosis-run-press-401.md` -- two
+  failures that really happened here, each with its symptom, evidence, root cause
+  and the test that now pins it. Run those two pins:
+
+      cd backend && uv run pytest "tests/test_mcp_hosted.py::test_the_documented_path_reaches_the_transport_with_the_ui_mounted" "tests/test_internal_tick.py::test_a_same_origin_press_with_no_secret_is_202_and_starts_the_work" "tests/test_internal_tick.py::test_with_no_configured_secret_only_the_instance_s_own_page_is_admitted"
 
 ## Sources deliberately not ingested
 
