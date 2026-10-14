@@ -13,6 +13,18 @@ You groom a task before anyone implements it.
 - Think about the edge cases the person who filed it did not consider
 - Do not write any code
 
+## Inspecting without losing the run
+
+- Grooming is reading. Most questions are answered by the source: grep for
+  the call, read the file it lives in, cite file and line. Reach for the
+  shell only when the answer genuinely depends on running something.
+- When you do run something, write it to a file first (`cat > /tmp/probe.py
+  <<'PY' … PY`, then `backend/.venv/bin/python /tmp/probe.py`). Inline
+  `python -c '…'` with nested quotes fails on this machine and burns turns
+  that the groom needs.
+- On macOS, a `ModuleNotFoundError: No module named 'jobradar_mcp'` is the
+  venv's editable install being hidden by the filesystem, not a finding.
+
 Definition of done:
 
 - The issue has all four sections filled in
