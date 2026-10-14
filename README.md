@@ -776,7 +776,8 @@ Three others were considered and left out, each with its own reason.
 
 An AI agent writes this repository in bounded steps, and the one decision it could
 not settle itself it handed to another model. The files that make both true are
-committed.
+committed, and the six pieces a reviewer looks for are indexed in
+[`docs/agent-extension-pack.md`](docs/agent-extension-pack.md).
 
 ### The workflow the repository defines
 
