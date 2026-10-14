@@ -56,7 +56,7 @@
 #                                   --header "Content-Type: application/json" \
 #                                   --data "{\"commitId\": \"<sha>\"}" \
 #                                   "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys"
-#                                 # 202, an empty body and no `Location` header
+#                                 # an empty body and no `Location` header
 #   the deploy list               curl -sS --header "Authorization: Bearer ${RENDER_API_KEY}" \
 #                                   "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys?limit=20"
 #                                 # [{"deploy": {"id", "status", "commit": {"id"}}}, ...]
@@ -75,8 +75,9 @@
 #
 # `POST /services/{serviceId}/deploys` with `commitId` is Render's documented way
 # to deploy one named commit (api-docs.render.com/reference/create-deploy), and
-# it is asymmetric: the answer is 202 with an empty body and no `Location`
-# header, so it carries no deploy id and no commit id to read back. That is what
+# it is asymmetric: the answer carries an empty body and no `Location`
+# header -- whatever its status code, which this file reads but never relies on
+# -- so it carries no deploy id and no commit id to read back. That is what
 # run 38612297114 died on. The deploy does exist, and
 # `GET .../deploys?limit=20` lists it -- each item wrapped as `{"deploy": {...}}`,
 # newest first, beside older deploys of other commits. This file therefore finds
@@ -179,7 +180,7 @@ jobs:
             --data "{\"commitId\": \"${CI_SHA}\"}" \
             "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys")
           echo "Render accepted the deploy request for ${CI_SHA} (HTTP ${code}, empty body, no Location header)."
-          # The 202 names no deploy, so the deploy is found in the list instead.
+          # That answer names no deploy, so the deploy is found in the list instead.
           # It is listed asynchronously: absent is a retry, not a failure, until
           # the wait runs out.
           deadline=$((SECONDS + 300))
