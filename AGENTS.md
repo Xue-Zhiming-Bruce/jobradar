@@ -11,11 +11,17 @@ Commands
 
 Local trap (macOS)
 - `uv` installs `mcp/` into `backend/.venv` as an editable path source (#43), and
-  writes its `.pth` files with the macOS hidden flag. Python then skips them, so
-  `import jobradar_mcp` fails and the whole backend suite errors at collection —
-  after a `uv run`, which re-writes them. Clear the flag and run the venv's own
-  python: `chflags nohidden backend/.venv/lib/python3.12/site-packages/__editable__*jobradar_mcp*`
-  then `backend/.venv/bin/python -m pytest`. Linux CI is unaffected.
+  writes its `.pth` files with the macOS hidden flag. CPython skips hidden
+  `.pth` files, so `import jobradar_mcp` fails and the whole backend suite
+  errors at collection. `chflags nohidden` fixes it for seconds only —
+  something on this machine re-applies the flag within about three seconds —
+  so the reliable workaround is a real copy into the gitignored venv:
+
+      cp -R mcp/jobradar_mcp backend/.venv/lib/python3.12/site-packages/
+      cd backend && .venv/bin/python -m pytest
+
+  Prefer `.venv/bin/python -m pytest` over `uv run pytest`, which re-syncs the
+  editable install and re-hides the files. Linux CI is unaffected.
 
 Rules
 - Follow _docs/process.md
