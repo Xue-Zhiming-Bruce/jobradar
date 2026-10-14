@@ -61,7 +61,8 @@ Source = Literal["greenhouse", "lever"]
 
 # The header the app checks, spelled as `app.routes.internal.TICK_SECRET_HEADER`
 # spells it. The app reads the value itself from `TICK_SECRET`.
-TICK_SECRET_HEADER = "X-Tick-Secret"
+# The header's name, not a value: no secret is held or sent from here.
+TICK_SECRET_HEADER = "X-Tick-Secret"  # noqa: S105
 
 
 def add_company(

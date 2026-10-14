@@ -736,7 +736,10 @@ def _word_document_text(data: bytes) -> str:
     """
     with zipfile.ZipFile(BytesIO(data)) as package:
         document = package.read(_WORD_DOCUMENT_PART)
-    root = ElementTree.fromstring(document)
+    # The parsed string is this archive's own `word/document.xml`, the upload is
+    # bounded by `MAX_UPLOAD_BYTES` (10 MiB default) and `ElementTree` resolves no
+    # external entity; assessing a hardened parser is #85.
+    root = ElementTree.fromstring(document)  # noqa: S314
     paragraphs = [
         "".join(node.text or "" for node in paragraph.iter(f"{{{_WORD_NAMESPACE}}}t"))
         for paragraph in root.iter(f"{{{_WORD_NAMESPACE}}}p")
