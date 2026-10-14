@@ -1,0 +1,28 @@
+#!/bin/sh
+# agent-hooks/pre-commit -- the repository's committed-data guard, run before the
+# commit instead of after the push.
+#
+# The rule lives once, in `backend/tests/test_committed_data_guard.py`; this
+# script only calls it, so a byte of the rule never has a second home here. Its
+# docstring names the limit this closes: CI runs after the push, so the guard
+# stops a merge rather than the push.
+#
+#   CI half:    .github/workflows/ci.yml, step
+#               "Fail on a committed secret, resume or database file" -- after the
+#               push, stops a merge.
+#   This half:  before the commit, stops it locally.
+#
+# Install once per clone (this file is committed; `.git/hooks/` is not):
+#   git config core.hooksPath agent-hooks
+#
+# Git runs a pre-commit hook from the working tree root, so `cd backend` is the
+# backend beside this checkout. The check needs only `uv` and `git`.
+set -eu
+
+# A guardrail that passes when its tool is missing is not one: say so and refuse.
+if ! command -v uv >/dev/null 2>&1; then
+	echo "pre-commit: uv is not on PATH, so the committed-data guard cannot run; install it: https://docs.astral.sh/uv/getting-started/installation/" >&2
+	exit 1
+fi
+
+cd backend && uv run pytest tests/test_committed_data_guard.py -q
