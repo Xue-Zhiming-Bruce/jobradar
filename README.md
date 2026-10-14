@@ -21,6 +21,23 @@ dismissed.
 The full plan -- the behaviour spec, the non-goals and the constraints -- is
 `_docs/plan.md`.
 
+## Repository layout
+
+The rubric's expected-contents list names a few things this repository keeps
+under other names. One row each, with the path it lives at here beside it; every
+path below exists, and `backend/tests/test_repo_layout.py` fails naming any that
+does not.
+
+| The rubric lists | Here it is | Why |
+| --- | --- | --- |
+| docs/ | `_docs/` | `_docs/` is the plan, the process and the team prompts, read by people only; the root `docs/` is the agent-extension pack. |
+| product-spec.md | `_docs/plan.md` | The same document: the behaviour spec, the non-goals and the constraints. |
+| openapi.yaml | `backend/openapi.json` | The OpenAPI specification, exported from the app rather than written by hand. |
+| docker-compose.yml | `compose.yaml` | The same file, which Compose v2 reads by that name; no command changes. |
+| mcp-server/ | `mcp/` | The MCP server, a uv project of its own, named for MCP already. |
+| security/ | `security/` | The security scan, the change audit, the extension notes and the data policy. |
+| ops/ | `ops/` | The two written-up incidents, each with the test that pins it. |
+
 ## Architecture
 
 Six pieces. The rest of this file is the detail behind them.
