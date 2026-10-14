@@ -782,11 +782,11 @@ committed.
 
 `AGENTS.md` is what an agent reads first and `_docs/process.md` is the rule book;
 `_docs/team/` holds one prompt per role, written to the template in
-`_docs/team/task-template.md`. Together they say:
+`_docs/task-template.md`. Together they say:
 
 1. **Grooming first.** A task is a GitHub issue, and it is groomed before anyone
    implements it: the PM (`_docs/team/pm.md`) rewrites it against
-   `_docs/team/task-template.md` — goal, acceptance criteria that can be checked
+   `_docs/task-template.md` — goal, acceptance criteria that can be checked
    by looking at the result, out of scope with a link per moved item, constraints.
 2. **One issue at a time, lowest number first.**
 3. **The engineer implements it.** `_docs/team/software-engineer.md`: implement
@@ -818,8 +818,9 @@ committed.
   `_docs/decisions/jev-verdicts.json`, and the outcome is in
   `_docs/decisions/2026-10-11-deploy-and-repo.md`.
 - **The MCP server in `mcp/`** is the same idea pointed at the product instead of
-  at the build: five bounded tools over the app, so an AI client can add a
-  company, list the watchlist, list matches, start a run and read that run.
+  at the build: seven bounded tools over the app, so an AI client can add a
+  company, list the watchlist, list matches, start a run, read that run, remove a
+  company and set a match's state.
 
 ### Two answers were escalated, not accepted
 
