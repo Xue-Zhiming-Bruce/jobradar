@@ -30,6 +30,7 @@ jobradar-mcp = { path = "../mcp", editable = true }
 [dependency-groups]
 dev = [
     "pytest>=8.0,<9.0",
+    "ruff>=0.14,<0.15",
 ]
 
 # The backend is an application, not a distributable package: uv installs
