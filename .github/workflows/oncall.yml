@@ -1,0 +1,127 @@
+# On-call: one GitHub issue labelled `alert` wakes one responder run, once.
+#
+# This is the responder half of #92. `alert.yml` opens at most one open issue
+# labelled `alert` when its hourly impact check finds user impact; this file wakes
+# `ops/oncall/responder.py` on that issue. The responder diagnoses from the
+# deployed app's own signals, takes at most one bounded action -- a same-origin
+# `POST /internal/tick`, or `ops/rollback.sh` (#89) -- verifies the effect, and
+# comments on the issue. It closes the issue only when the effect is verified.
+# The whole decision, the action set and the redaction rule are in
+# `ops/oncall/responder.py`'s docstring; this file is the trigger, the credential
+# guard and the one-run rule.
+#
+# Triggers are the `issues` event alone, and nothing else: no `schedule`, no
+# `workflow_dispatch`, no `pull_request`. The `opened` action covers an issue that
+# is created already labelled `alert`, and `labeled` covers a label added later;
+# the job's `if` admits only an issue that carries the label, so no other issue
+# event starts a wake. No secret value is in this file -- every one arrives as
+# `${{ secrets.* }}` at runtime -- and no step enables shell tracing, so no value
+# can reach the log.
+#
+# One wake, one responder run. `concurrency` serialises the deliveries of a single
+# alert under the issue's own number with `cancel-in-progress: false`, and the
+# responder refuses an issue that already carries its comment marker, so the
+# `opened` and `labeled` deliveries of one alert cannot remediate twice. The
+# responder writes at most one comment and re-adds no label, so a wake cannot
+# cascade.
+#
+# The credential is what the repository already has: `RENDER_API_KEY`,
+# `RENDER_SERVICE_ID` and `JOBRADAR_URL` (the same three `deploy.yml` checks),
+# `GITHUB_TOKEN` from this run with `issues: write` and `contents: read`, and the
+# optional `LLM_API_KEY`. With `LLM_API_KEY` unset the responder uses its
+# documented deterministic rule and the wake still succeeds -- an unconfigured
+# model is not a failure. A required value that is unset fails the job with a
+# `::error::` naming it, the way `deploy.yml` does, rather than skipping: a wake
+# that quietly does nothing is indistinguishable from one nobody noticed had
+# stopped working.
+#
+# The local equivalent, with the app on port 8123 (8000 belongs to compose), a
+# scratch issue labelled `alert`, and `RENDER_API_KEY`, `RENDER_SERVICE_ID` and
+# `GH_TOKEN` exported in your own shell (the way `ops/rollback.sh` documents its two):
+#
+#   JOBRADAR_URL=http://127.0.0.1:8123 ISSUE_NUMBER=<n> \
+#     python3 ops/oncall/responder.py
+#
+# and the responder's own offline test, no app and no credential:
+#
+#   uv run --project backend pytest ops/oncall
+#
+# That the YAML itself is valid -- empty output and exit 0:
+#
+#   python3 -c 'import yaml, sys; [yaml.safe_load(open(path)) for path in sys.argv[1:]]' .github/workflows/*.yml
+#
+# The stronger check, which knows Actions' own schema:
+#
+#   docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest .github/workflows/*.yml
+#
+# The trigger carries one named limit: an `issues`-event workflow only fires once
+# its file is on the default branch, so a wake cannot be recorded from the branch
+# that adds this file -- it starts working when this file reaches `main`.
+
+name: On-call
+
+on:
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: oncall-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  oncall:
+    runs-on: ubuntu-latest
+    # `ops/rollback.sh` allows 5 minutes to be listed and 15 to `live`, then the
+    # responder waits up to 5 more for `/healthz`; 30 is `deploy.yml`'s own cap.
+    timeout-minutes: 30
+    # Only an `alert` issue wakes the responder. The label is spelled once here;
+    # `alert.yml` applies the same one.
+    if: contains(github.event.issue.labels.*.name, 'alert')
+    steps:
+      - uses: actions/checkout@v7
+
+      # The three values a wake needs are checked before anything is read, so an
+      # unconfigured repository is loudly red instead of quietly doing nothing.
+      # Each annotation names the input that is missing; a failing step stops the
+      # job, so the responder never runs with a value it needs unset.
+      - name: Require JOBRADAR_URL, RENDER_API_KEY and RENDER_SERVICE_ID
+        env:
+          JOBRADAR_URL: ${{ vars.JOBRADAR_URL }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          missing=0
+          if [ -z "${JOBRADAR_URL}" ]; then
+            echo "::error::The repository variable JOBRADAR_URL is unset or empty."
+            missing=1
+          fi
+          if [ -z "${RENDER_API_KEY}" ]; then
+            echo "::error::The repository secret RENDER_API_KEY is unset or empty."
+            missing=1
+          fi
+          if [ -z "${RENDER_SERVICE_ID}" ]; then
+            echo "::error::The repository secret RENDER_SERVICE_ID is unset or empty."
+            missing=1
+          fi
+          if [ "${missing}" -ne 0 ]; then
+            echo "::error::No wake was made. Set all three under Settings > Secrets and variables > Actions. LLM_API_KEY is optional: unset means the deterministic path."
+            exit 1
+          fi
+
+      # The one wake. The responder reads the issue's own body and comments on it,
+      # so `GITHUB_TOKEN` is the only GitHub credential it is handed, and it is
+      # handed no `X-Tick-Secret`: a retrigger passes the app's own same-origin
+      # admission, so no second secret exists.
+      - name: Wake the on-call responder
+        env:
+          JOBRADAR_URL: ${{ vars.JOBRADAR_URL }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: python3 ops/oncall/responder.py
