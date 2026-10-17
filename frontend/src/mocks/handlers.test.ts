@@ -126,4 +126,34 @@ describe('the mock answers the shapes the contract requires', () => {
     expect(row.id).toBe(1)
     expect(row.state).toBe('dismissed')
   })
+
+  it('GET /telemetry/metrics answers RouteMetric rows', async () => {
+    const response = await api('/telemetry/metrics')
+
+    expect(response.status).toBe(200)
+    const rows = (await response.json()) as unknown[]
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) {
+      expect(Object.keys(row as Record<string, unknown>).sort()).toEqual(requiredKeys('RouteMetric'))
+    }
+  })
+
+  it('GET /telemetry/traces answers TraceSummary rows, each with SpanSummary spans', async () => {
+    const response = await api('/telemetry/traces')
+
+    expect(response.status).toBe(200)
+    const traces = (await response.json()) as { spans: unknown[] }[]
+    expect(traces.length).toBeGreaterThan(0)
+    for (const trace of traces) {
+      expect(Object.keys(trace).sort()).toEqual(requiredKeys('TraceSummary'))
+      // A span carries the same seven keys whether or not it is an HTTP request:
+      // the run's own span is one of these rows, with a null route, method and status.
+      expect(trace.spans.length).toBeGreaterThan(0)
+      for (const span of trace.spans) {
+        expect(Object.keys(span as Record<string, unknown>).sort()).toEqual(
+          requiredKeys('SpanSummary'),
+        )
+      }
+    }
+  })
 })
