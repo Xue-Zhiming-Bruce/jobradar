@@ -18,10 +18,12 @@ set -euo pipefail
 port="${1:?make test passes the PostgreSQL port the Makefile fixes}"
 shift
 
-export TEST_DATABASE_URL="postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:${port}/jobradar"
+# The throwaway credentials ci.yml's own ephemeral container publishes.
+dsn="postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:${port}/jobradar"
+export TEST_DATABASE_URL="$dsn"
 
 if ! command -v docker >/dev/null 2>&1; then
-  echo "error: docker is required: make test starts a PostgreSQL for the backend passes" >&2
+  echo "error: docker is required: make test starts its own PostgreSQL" >&2
   exit 1
 fi
 

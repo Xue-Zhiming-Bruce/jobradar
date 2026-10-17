@@ -69,6 +69,8 @@ def test_the_recipe_keeps_a_failure_past_a_failing_step() -> None:
     assert recipe and recipe[0].startswith(ENTRY), (
         f"the `test` target does not run {ENTRY}: {recipe[:1]}"
     )
-    ignored = [line for line in recipe if line.startswith("-") or line.endswith("|| true")]
+    ignored = [
+        line for line in recipe if line.startswith("-") or line.endswith("|| true")
+    ]
     assert ignored == [], f"the recipe ignores a failure: {ignored}"
     assert "set -euo pipefail" in SCRIPT.read_text(encoding="utf-8")
