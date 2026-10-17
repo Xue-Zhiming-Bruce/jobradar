@@ -45,12 +45,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-# The runs page this check reads. It mirrors `RUNS_DEFAULT_LIMIT` in
-# `backend/app/routes/runs.py` rather than importing it -- this script is run
-# from the repository root and does not import the app -- and `RUNS_MAX_LIMIT`
-# is that route's own ceiling, the largest page it will answer.
+# The runs page this check reads, the default `GET /runs` answers with, and so
+# the page the on-call check and the runs screen read: it spans more than 26
+# hours of the daily schedule, so a success inside the stall window is on it. It
+# mirrors `RUNS_DEFAULT_LIMIT` in `backend/app/routes/runs.py` rather than
+# importing it -- this script is run from the repository root and does not import
+# the app.
 RUNS_LIMIT = 50
-RUNS_MAX_LIMIT = 200
 
 # The matches page this check reads, the ceiling `MATCHES_MAX_LIMIT` in
 # `backend/app/routes/matches.py` puts on that read.
