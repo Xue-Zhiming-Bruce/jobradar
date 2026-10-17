@@ -777,6 +777,66 @@ variables — need the owner's own Render and Neon accounts and are #16. None of
 them was performed to write this file, and the file therefore states no URL: #46
 adds the deployed-instance evidence once #16 exists.
 
+### Rollback
+
+A bad green `main` deploys itself: `deploy.yml` deploys the revision CI passed, so
+undoing one is two moves — get production off the bad revision, then make that
+permanent in git. Both need `RENDER_API_KEY` and `RENDER_SERVICE_ID` exported in
+your own shell; no value, no service id and no hostname is written in this file.
+
+1. **Put the last known-good commit back.** `ops/rollback.sh` reads Render's
+   newest 20 deploys, takes the `commit.id` of the newest `live` deploy as the
+   commit being served, and picks as its target the newest deploy that is both
+   another commit and one whose build succeeded — status `live`, or `deactivated`
+   for a superseded deploy. It prints those two shas, deploys the target with the
+   same call `deploy.yml` makes, and exits 0 only once that deploy is `live`
+   (5 minutes to be listed, 15 to `live`, the bounds `deploy.yml` documents); a
+   deploy that ends `canceled`, `deactivated`, `build_failed`, `update_failed` or
+   `pre_deploy_failed`, or one that never gets there, exits non-zero naming the
+   status. It deploys no git ref, no branch tip and no sha you pass in: the target
+   is a commit Render itself lists as a successful deploy of this service, because
+   an untested revision is what this path exists to avoid.
+
+   `ops/rollback.sh --dry-run` makes the same selection, prints the two shas and
+   sends no deploy request — that is how you see which commit the rollback would
+   deploy without touching the service. By hand, with `<target>` the sha the
+   dry run printed, the read first — `GET /services/{id}/deploys?limit=20`, newest
+   first, each item wrapped as `{"deploy": {"id", "status", "commit": {"id"}}}`:
+
+       curl -sS --header "Authorization: Bearer ${RENDER_API_KEY}" \
+         "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys?limit=20"
+
+   and then the deploy — `POST /services/{id}/deploys` with that commit as the
+   body:
+
+       curl -sS --request POST \
+         --header "Authorization: Bearer ${RENDER_API_KEY}" \
+         --header "Content-Type: application/json" \
+         --data '{"commitId": "<target>"}' \
+         "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys"
+
+   That POST answers an empty body and no `Location` header, so the deploy it
+   starts names no id to poll: it is found in the next read of the list, which is
+   what the script waits on. A sha that is not in that list gets a refusal rather
+   than a deploy — the script reads the newest 20 and refuses instead of paging.
+
+2. **Require the instance to serve.** A `live` deploy is not a working app, so the
+   rollback is done only when `GET {JOBRADAR_URL}/healthz` answers 200:
+
+       curl -sSf "${JOBRADAR_URL%/}/healthz"
+
+   Retry it for a few minutes before calling it a failure: a free instance spins
+   down after 15 minutes idle and takes about a minute to wake, so the first
+   request after a deploy can be slow rather than wrong.
+
+3. **Make it permanent in git.** `git revert <bad sha>`, push, and the revert
+   reaches production the way every other commit does: it is a new commit, CI runs
+   it, and `deploy.yml` deploys it. Without this step the next green `main`
+   deploys the bad revision again, because the rollback changed what Render serves
+   and not what `main` holds. A bad deploy that was a merge commit needs
+   `git revert -m 1 <sha>`, which keeps the first parent — the branch that was
+   merged into — and drops the merge's other side.
+
 ## Known limitations
 
 Each with what it costs, because a limitation without a consequence is a slogan.
