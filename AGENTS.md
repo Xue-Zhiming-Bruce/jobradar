@@ -1,6 +1,7 @@
 # JobRadar
 
 Commands
+- Whole test surface (backend unit + integration, frontend, mcp): `make test`, from the repository root
 - Backend deps: `cd backend && uv sync`
 - Backend tests: `cd backend && uv run pytest`
 - Backend dev server: `cd backend && uv run uvicorn app.main:app --reload`
