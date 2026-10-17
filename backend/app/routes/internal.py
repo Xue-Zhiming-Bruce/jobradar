@@ -74,6 +74,14 @@ place of the walk and the digest -- `pipeline.rematch_stored_postings` over a fr
 `LlmScorer`, through `get_rematch()`, the second `Pipeline` provider. It asks no
 board and sends no email; what it re-decides and what it protects is that
 function's own business.
+
+`#90` gives the run the request's trace id. `_start_run` reads
+`telemetry.current_trace_id()` while the request is being served and hands it to
+the work as a value, and `_run` binds it for the run: the run's log lines and its
+own span -- named `run`, with no route, method or status code -- carry the same id
+as the `POST /internal/tick` request's frame and span, so one trace holds the
+request and the run together. Neither is stored on the row: the `run` table gains
+no column for it (#102).
 """
 
 import hmac
@@ -88,7 +96,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, select
 
-from app import db
+from app import db, telemetry
 from app.matching.scorer import LlmScorer
 from app.models import Company, Run, RunCompany
 from app.routes.runs import RunSummary, run_summary
@@ -250,6 +258,11 @@ def _start_on_a_daemon_thread(work: Callable[[], None]) -> None:
     joins it: the request has already answered `202`, and the row is what a client
     reads. This one line is what keeps the endpoint's promise, instead of the work
     running inside the request where a client waits for the whole pipeline.
+
+    The work it is handed already carries everything it needs, the trace id (#90)
+    included: a thread's context starts empty, so a value the work read here
+    instead of receiving as an argument would be `None` on this path and set on a
+    test's synchronous starter, which is the difference this shape removes.
     """
     threading.Thread(target=work, daemon=True).start()
 
@@ -396,7 +409,7 @@ def _end_run(run_id: int, status: str, error: str | None) -> None:
         run.error = _without_the_secret(error)
 
 
-def _run(run_id: int, pipeline: Pipeline) -> None:
+def _run(run_id: int, pipeline: Pipeline, trace_id: str | None) -> None:
     """Run the pipeline for that row, record how it ended, and free the guard.
 
     Everything the pipeline raises lands on the row instead of on a thread nobody
@@ -406,17 +419,24 @@ def _run(run_id: int, pipeline: Pipeline) -> None:
     afterwards: `failed` when any company it attempted failed, and `succeeded` only
     when none did. The release is in a `finally` after that write, so no path
     through a run leaves the guard held.
+
+    The whole of it is under `telemetry.run_span(trace_id)` (#90): the value the
+    tick's request handed over binds this thread's log lines to the request's
+    trace, and the run's own span -- named `run`, with no route, method or status
+    code -- is written on the way out under the same id. A run a caller started
+    with no trace id at all gets one of its own rather than no span.
     """
-    try:
-        pipeline(run_id)
-    except Exception as error:  # the work's whole failure family is the row's business
-        _end_run(run_id, FAILED, str(error))
-    else:
-        failure = _recorded_failure(run_id)
-        _end_run(run_id, FAILED if failure else SUCCEEDED, failure)
-    finally:
-        logger.info("Run %s is over", run_id)
-        _run_in_progress.release()
+    with telemetry.run_span(trace_id):
+        try:
+            pipeline(run_id)
+        except Exception as error:  # the work's whole failure family is the row's business
+            _end_run(run_id, FAILED, str(error))
+        else:
+            failure = _recorded_failure(run_id)
+            _end_run(run_id, FAILED if failure else SUCCEEDED, failure)
+        finally:
+            logger.info("Run %s is over", run_id)
+            _run_in_progress.release()
 
 
 def _start_run(request: Request, starter: RunStarter, pipeline: Pipeline) -> RunSummary:
@@ -431,6 +451,10 @@ def _start_run(request: Request, starter: RunStarter, pipeline: Pipeline) -> Run
     the guard held: a row that cannot be written, like work that cannot be started,
     is a `500` and gives the guard back, so an endpoint recovers instead of refusing
     every later call.
+
+    The trace id this request is being served under is read here and handed over as
+    a value (#90): the starter may run the work on a thread of its own, whose
+    context starts empty, so a value read inside the work would be no value at all.
     """
     _require_admitted_caller(request)
 
@@ -447,8 +471,9 @@ def _start_run(request: Request, starter: RunStarter, pipeline: Pipeline) -> Run
             status_code=500, detail="The run could not be recorded in the database"
         ) from error
 
+    trace_id = telemetry.current_trace_id()
     try:
-        starter(lambda: _run(run.id, pipeline))
+        starter(lambda: _run(run.id, pipeline, trace_id))
     except Exception as error:
         _run_in_progress.release()
         raise HTTPException(status_code=500, detail="The run could not be started") from error

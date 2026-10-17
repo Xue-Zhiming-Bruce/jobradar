@@ -58,6 +58,8 @@ _CONTRACT_REQUESTS = [
     ("GET", "/runs/1", None, 404, {"detail": "There is no run with id 1"}),
     ("GET", "/matches", None, 200, []),
     ("PATCH", "/matches/1", {"state": "saved"}, 404, {"detail": "There is no match with id 1"}),
+    ("GET", "/telemetry/metrics", None, 200, []),
+    ("GET", "/telemetry/traces", None, 200, []),
 ]
 
 

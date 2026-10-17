@@ -426,7 +426,7 @@ def test_a_refused_connection_names_the_route_and_never_the_password(
     assert _lines_holding_the_credential(everywhere, KNOWN_PASSWORD) == []
 
 
-def test_init_db_creates_the_six_tables(
+def test_init_db_creates_the_seven_tables(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _point_at_a_scratch_file(tmp_path, monkeypatch)

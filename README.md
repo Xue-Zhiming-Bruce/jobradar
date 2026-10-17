@@ -372,7 +372,7 @@ here, because 5432 is taken on this machine:
 
 `compose.yaml` is not a test harness: the container above is the database those
 tests run against, and `docker rm -f jobradar-test-db` throws it away. The engine
-matrix asserts that this server holds exactly the six tables the models declare,
+matrix asserts that this server holds exactly the seven tables the models declare,
 so pointing `alembic` at it by hand — `DATABASE_URL=<that URL> uv run alembic
 upgrade head` — leaves alembic's own `alembic_version` table behind and the next
 `uv run pytest` fails on that assertion until it is dropped:
@@ -465,9 +465,9 @@ file byte for byte identically, and running it twice leaves `git status` clean.
 ### Changing the schema
 
 `backend/app/models.py` is the only place the schema is declared. `init_db()`
-creates the six tables in a database that does not exist yet; the revision
+creates the seven tables in a database that does not exist yet; the revision
 history in `backend/migrations/versions/` brings a database that already holds
-rows to the same six tables, and `backend/tests/test_migrations.py` holds the
+rows to the same seven tables, and `backend/tests/test_migrations.py` holds the
 two to each other, on SQLite and on PostgreSQL.
 
 The sequence for a change to the models, from `backend/`:
@@ -503,7 +503,7 @@ environment reads — unset, the command would run against the local SQLite file
 container, `docker compose exec api alembic current` says the same for the compose
 volume. On a database that already holds rows it creates only what is missing and
 leaves every row as it was, so it is safe to re-run. `uv run alembic downgrade
-base` drops all six tables: it is destructive, and it is meant for the disposable
+base` drops all seven tables: it is destructive, and it is meant for the disposable
 databases of local development.
 
 ## Frontend
@@ -865,7 +865,7 @@ Each with what it costs, because a limitation without a consequence is a slogan.
   inactivity, so a late or missing digest is expected rather than a fault. That is
   why the in-app **"Run digest now"** button is the reliable path, and why the
   demo uses it (`_docs/decisions/2026-10-11-deploy-and-repo.md`).
-- **`downgrade base` is destructive.** It drops the six tables and every row in
+- **`downgrade base` is destructive.** It drops the seven tables and every row in
   them, which is acceptable only while the databases in existence are disposable:
   the local SQLite file and the compose volume this file calls a throwaway.
 - **The free tier sleeps.** `_docs/plan.md`'s "Known constraints" records that a
