@@ -1,5 +1,13 @@
 import { http, HttpResponse } from 'msw'
-import { companies, matches, resumeUploaded, runSummary, runSucceeded } from './fixtures'
+import {
+  companies,
+  matches,
+  resumeUploaded,
+  routeMetrics,
+  runSummary,
+  runSucceeded,
+  traces,
+} from './fixtures'
 
 /** The mock backend: one handler per method-and-path pair in `backend/openapi.json`. */
 export const handlers = [
@@ -42,4 +50,8 @@ export const handlers = [
     const row = matches.find((match) => match.id === id) ?? matches[0]
     return HttpResponse.json({ ...row, id, state })
   }),
+
+  http.get('/telemetry/metrics', () => HttpResponse.json(routeMetrics)),
+
+  http.get('/telemetry/traces', () => HttpResponse.json(traces)),
 ]
