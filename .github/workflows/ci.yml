@@ -70,6 +70,16 @@
 # `xml` parse of untrusted data -- turns it red. The scope and the dispositions
 # are `security/scan.md`.
 #
+# The `backend` job also runs the on-call responder's offline test (#93), at the
+# repository root so `uv run --project backend` uses the environment the `uv sync`
+# above already built -- the pattern the security scan uses:
+#
+#   uv run --project backend pytest ops/oncall
+#
+# The test drives `ops/oncall/responder.py` over a fake app, a fake model and a
+# fake Render API, so it needs no `.env`, no socket and no credential; its own
+# step keeps the responder from rotting unseen.
+#
 # That the YAML itself is valid -- empty output and exit 0 on both files:
 #
 #   python3 -c 'import yaml, sys; [yaml.safe_load(open(path)) for path in sys.argv[1:]]' .github/workflows/ci.yml .github/workflows/tick.yml
@@ -129,6 +139,8 @@ jobs:
       # green with 369 skipped.
       - name: Fail on a new security scan finding
         run: uv run --project backend ruff check --select S --output-format concise backend/app mcp/jobradar_mcp
+      - name: Run the on-call responder's offline test
+        run: uv run --project backend pytest ops/oncall
       - name: Run the whole suite against the throwaway PostgreSQL
         working-directory: backend
         env:
