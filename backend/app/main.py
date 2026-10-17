@@ -29,6 +29,15 @@ slash), from `app.mcp`: the same seven `mcp/` tools over streamable HTTP, on thi
 origin and behind the bearer guard. Its routes are registered after the API
 routers and before the UI mount, and its transport is started in the lifespan
 below.
+
+`#90` makes the journey visible: `app.telemetry` is installed here and nowhere
+else. The JSON log format goes on at import, before anything can log; the
+telemetry middleware goes on after the bearer guard, so it is the outermost of
+this app's middleware and every response -- the guard's `401`, a `404`, the UI's
+-- carries the trace id back; the two telemetry reads are registered with the
+other routers, above the UI mount, so the mount at `/` cannot swallow them; and
+the prune of spans past their retention runs once per process start in the
+lifespan beside `reap_stale_runs()`.
 """
 
 import os
@@ -44,7 +53,7 @@ from pydantic import BaseModel
 from starlette.routing import Route
 from starlette.types import Scope
 
-from app import mcp
+from app import mcp, telemetry
 from app.db import init_db
 from app.routes.internal import router as internal_router
 from app.routes.matches import router as matches_router
@@ -97,28 +106,42 @@ class Health(BaseModel):
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Create the missing tables, finish stranded runs, start the MCP endpoint, and serve.
+    """Create the missing tables, finish stranded runs, prune old spans, start MCP, and serve.
 
     The reap comes after `init_db()`, because the table it writes has to exist,
     and before the yield, because it is what makes "no `run` row reads `running`"
     true of every request this process will answer: a tick's guard is the
     process's own, so a `running` row found here is a row no process is running.
-    The hosted MCP endpoint (#43) starts its transport here too, because a
-    mounted ASGI app's own lifespan is not entered by Starlette; one reap per
-    process start, and no other startup work.
+    The prune of spans past `telemetry.SPAN_RETENTION` is beside it for the same
+    two reasons and is the only deleter of spans (`#90`), so the window the two
+    telemetry reads answer over is bounded without a scheduled job. The hosted
+    MCP endpoint (#43) starts its transport here too, because a
+    mounted ASGI app's own lifespan is not entered by Starlette; one reap and one
+    prune per process start, and no other startup work.
     """
     init_db()
     reap_stale_runs()
+    telemetry.prune_spans()
     async with mcp.endpoint.lifespan():
         yield
 
 
 app = FastAPI(title=API_TITLE, version=API_VERSION, lifespan=lifespan)
 
+# The app's own log format, installed once at process start (#90), before any
+# request is served and before anything logs: one JSON object per line, with the
+# line's trace id in a field of its own. `uvicorn` configures its loggers before
+# it imports this module, so its handlers are re-pointed at the same format here.
+telemetry.configure_logging()
+
 # The one guard the hosted MCP endpoint has (#43): the bearer token is read per
 # request and an unset one refuses every request, so the endpoint is off unless an
 # operator configures it.
 app.add_middleware(mcp.BearerAuthMiddleware)
+
+# Added after that guard, so it is the outermost of this app's middleware and is
+# handed every response the app produces, the guard's `401` included (#90).
+app.add_middleware(telemetry.TelemetryMiddleware)
 
 
 @app.exception_handler(RequestValidationError)
@@ -148,6 +171,7 @@ app.include_router(watchlist_router)
 app.include_router(internal_router)
 app.include_router(runs_router)
 app.include_router(matches_router)
+app.include_router(telemetry.router)
 
 # The hosted MCP endpoint (#43): the `mcp/` tools over streamable HTTP, on this
 # origin and behind the bearer guard, so one container serves the API, the UI and

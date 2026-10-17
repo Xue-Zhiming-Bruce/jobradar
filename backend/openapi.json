@@ -661,6 +661,81 @@
           }
         }
       }
+    },
+    "/telemetry/metrics": {
+      "get": {
+        "tags": [
+          "telemetry"
+        ],
+        "summary": "Read one window of per-route metrics",
+        "description": "One object per route with a span in the last `METRICS_WINDOW`, ordered by route.\n\nThe window is `datetime.now(UTC) - METRICS_WINDOW` and a span that started\nbefore it is not counted, so the same window read twice answers the same body\nand a span that ages out of it stops being counted. Every span of a route in\nthe window is one of its `count`, the ones whose status code is >= 500 are its\n`errors`, and `p95_ms` is the nearest-rank 95th percentile of its durations.\n\nThe run's own span has no route and is not a route's: it is stored, and read by\n`GET /telemetry/traces`, but it is not counted here. A path no route matched is\ncounted under `UNMATCHED_ROUTE`, so a caller walking a 404 is visible too.",
+        "operationId": "read_metrics_telemetry_metrics_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RouteMetric"
+                  },
+                  "type": "array",
+                  "title": "Response Read Metrics Telemetry Metrics Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/telemetry/traces": {
+      "get": {
+        "tags": [
+          "telemetry"
+        ],
+        "summary": "Read the newest traces, each with its spans",
+        "description": "The newest traces grouped by trace id, newest first, and `[]` when there are none.\n\n`limit` counts traces and not spans: the newest N trace ids and every span each\none holds. Absent means every stored trace, which `SPAN_RETENTION` bounds --\nthe prune keeps the table finite, so this read is finite too -- and a limit of\n`0`, a negative one or more than `TRACES_MAX_LIMIT` is refused as `422` before\nthis function runs.\n\nA trace is as new as its latest span, and its spans are ordered by the instant\nthey started: a run's span starts after the request's own, so the two read in\nthe order the journey happened. Two traces whose latest spans share an instant\n-- and two spans of one trace that do -- are ordered by id under it, so one\nwindow reads the same body twice.",
+        "operationId": "read_traces_telemetry_traces_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 200,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TraceSummary"
+                  },
+                  "title": "Response Read Traces Telemetry Traces Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The limit is not a whole number of traces this read answers"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -992,6 +1067,35 @@
         "title": "ResumeUploaded",
         "description": "Body of a successful upload: which resume is now the active one."
       },
+      "RouteMetric": {
+        "properties": {
+          "route": {
+            "type": "string",
+            "title": "Route"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          },
+          "errors": {
+            "type": "integer",
+            "title": "Errors"
+          },
+          "p95_ms": {
+            "type": "integer",
+            "title": "P95 Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "route",
+          "count",
+          "errors",
+          "p95_ms"
+        ],
+        "title": "RouteMetric",
+        "description": "One route's window, as `GET /telemetry/metrics` answers it.\n\nFour fields and no fifth: `count` is every span of that route in the window,\n`errors` those whose status code is 500 or more, and `p95_ms` the duration\nbelow which 95% of them fall. The route is the stored template -- `UNMATCHED_ROUTE`\nfor a path no route matched -- and never a path a caller chose."
+      },
       "RunCompanyOutcome": {
         "properties": {
           "company_id": {
@@ -1131,6 +1235,94 @@
         ],
         "title": "RunSummary",
         "description": "One `run` row as this API renders it: its ten columns and its per-company outcomes.\n\nThe same body a `202` from `POST /internal/tick` carries. `finished_at` and\n`error` are absent until the run ends, and the two counts the walk earns are\n0 from the moment the row is written: what the boards returned and how many\nmatches `record_score` wrote (#34), never a score computed here.\n`matches_emailed` is the third: how many matches this run's own digest emailed\n(#36), NULL until that digest records it -- which is the honest value for a\nrun still in flight, a row written before the column existed, and a run whose\nsend failed, and a different answer from a run that really did email none.\n`companies_not_fetched` is NULL for a run the board-call budget did not stop,\nwhich includes a run still in flight, and holds the count of active companies\nthe walk left for a later run when it did (#56). `postings_not_rematched` is\nthe same shape for a re-match: NULL for every tick and every row written\nbefore the column existed, `0` for a re-match that decided every candidate it\nfound, and a positive count of the passers its cap left for a later run (#64).\n`company_outcomes` is one entry per company the run attempted and is empty for\na run that has not attempted one yet -- the `202`'s fresh row -- so a client\nreads the same shape from both routes at every point in a run's life."
+      },
+      "SpanSummary": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
+          },
+          "method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Method"
+          },
+          "status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Code"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "title": "Duration Ms"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "route",
+          "method",
+          "status_code",
+          "duration_ms",
+          "started_at"
+        ],
+        "title": "SpanSummary",
+        "description": "One span as the trace read renders it: the row's own facts, minus the trace id.\n\nThe id belongs to the trace this span is listed under, so it is not repeated\nhere, and `route`, `method` and `status_code` are `None` on a run's span."
+      },
+      "TraceSummary": {
+        "properties": {
+          "trace_id": {
+            "type": "string",
+            "title": "Trace Id"
+          },
+          "spans": {
+            "items": {
+              "$ref": "#/components/schemas/SpanSummary"
+            },
+            "type": "array",
+            "title": "Spans"
+          }
+        },
+        "type": "object",
+        "required": [
+          "trace_id",
+          "spans"
+        ],
+        "title": "TraceSummary",
+        "description": "One trace: the id its spans share, and those spans in the order they started.\n\nThese two key names are what #91 renders and what #92 and #93 quote when they\nname a trace id, so neither may be renamed here."
       },
       "ValidationError": {
         "properties": {
