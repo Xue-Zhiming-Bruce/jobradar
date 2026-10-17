@@ -104,10 +104,6 @@ FAILED = "failed"
 # second delivery reads the first's comment.
 COMMENT_MARKER = "<!-- jobradar-oncall -->"
 
-# The label the `alert` issue carries (#92). Named once here and once in
-# `oncall.yml`.
-ALERT_LABEL = "alert"
-
 # The run id #92's `Report.body` names, as `- id `<n>`, status `<status>``.
 RUN_ID_IN_BODY = re.compile(r"- id `(\d+)`")
 
@@ -148,10 +144,6 @@ SECRET_VARIABLES = (
     "TICK_SECRET",
     "DATABASE_URL",
 )
-
-
-class ResponderError(Exception):
-    """The responder cannot run: a required input is unset or the issue cannot be read."""
 
 
 @dataclass(frozen=True)
@@ -259,7 +251,6 @@ class Config:
 App = Callable[[str, str, Mapping[str, str]], Answer]
 Complete = Callable[[str], str | None]
 Rollback = Callable[[], tuple[int, str]]
-ReadIssue = Callable[[int], Issue]
 Comment = Callable[[int, str], None]
 CloseIssue = Callable[[int], None]
 
@@ -827,9 +818,8 @@ def secrets_from_environment() -> tuple[str, ...]:
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main() -> int:
     """Read the environment, wake once, and print a redacted one-line outcome."""
-    del argv  # no arguments: every input arrives through the environment
     base_url = os.environ.get("JOBRADAR_URL", "").strip()
     if not base_url:
         print("responder: JOBRADAR_URL is unset or empty, so no alert can be answered.", file=sys.stderr)
