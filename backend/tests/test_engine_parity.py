@@ -24,7 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import db
-from app.models import Base, Company, Match, Posting, Resume, Run
+from app.models import Base, Company, Match, Posting, Resume, Run, TelemetrySpan
 
 # A known instant in the past, so `datetime.now(UTC) - stored` is a positive
 # delta on both engines instead of the TypeError SQLite used to raise.
@@ -45,7 +45,7 @@ _LONG_TEXT_COLUMNS = [
     (Run, "error"),
 ]
 
-# Every timestamp column in the six tables: each one has to round-trip.
+# Every timestamp column in the seven tables: each one has to round-trip.
 _TIMESTAMP_COLUMNS = [
     (Resume, "uploaded_at"),
     (Company, "created_at"),
@@ -56,6 +56,7 @@ _TIMESTAMP_COLUMNS = [
     (Match, "notified_at"),
     (Run, "started_at"),
     (Run, "finished_at"),
+    (TelemetrySpan, "started_at"),
 ]
 
 # Test data is synthetic on purpose: the repository is public and holds no
@@ -95,13 +96,24 @@ def _add_company_with_posting(
     return company, posting
 
 
-def test_create_read_update_delete_round_trip_over_all_six_tables(engine: Engine) -> None:
+def test_create_read_update_delete_round_trip_over_all_seven_tables(engine: Engine) -> None:
     assert set(inspect(engine).get_table_names()) == set(Base.metadata.tables)
 
     with db.session_scope() as session:
         _, posting = _add_company_with_posting(session)
         session.add(Match(posting_id=posting.id, score=87, reason="Python and SQL fit"))
         session.add(Run(status="running"))
+        session.add(
+            TelemetrySpan(
+                trace_id="2f1c9a5b7d3e4f60",
+                name="http",
+                route="/matches/{id}",
+                method="GET",
+                status_code=200,
+                duration_ms=12,
+                started_at=KNOWN_UTC,
+            )
+        )
         session.add(
             Resume(
                 filename="synthetic-resume.txt",
@@ -117,6 +129,7 @@ def test_create_read_update_delete_round_trip_over_all_six_tables(engine: Engine
         match = session.scalars(select(Match)).one()
         run = session.scalars(select(Run)).one()
         resume = session.scalars(select(Resume)).one()
+        span = session.scalars(select(TelemetrySpan)).one()
 
         assert (company.name, company.slug) == ("Acme", "acme")
         assert posting.company_id == company.id  # the link through company_id holds
@@ -126,6 +139,8 @@ def test_create_read_update_delete_round_trip_over_all_six_tables(engine: Engine
         assert (match.score, match.reason) == (87, "Python and SQL fit")
         assert run.status == "running"
         assert resume.text == SYNTHETIC_RESUME_TEXT
+        assert (span.name, span.route, span.method) == ("http", "/matches/{id}", "GET")
+        assert (span.status_code, span.duration_ms) == (200, 12)
 
         # Columns where absence is legitimate stay unset, and come back as None
         # on both engines rather than as an empty string.
@@ -136,6 +151,7 @@ def test_create_read_update_delete_round_trip_over_all_six_tables(engine: Engine
         assert match.notified_at is None
         assert run.finished_at is None
         assert run.error is None
+        assert session.scalars(select(TelemetrySpan)).one().started_at is not None
 
     with db.session_scope() as session:
         session.scalars(select(Company)).one().name = "Acme Renamed"
@@ -143,6 +159,7 @@ def test_create_read_update_delete_round_trip_over_all_six_tables(engine: Engine
         session.scalars(select(Match)).one().state = "saved"
         session.scalars(select(Run)).one().status = "succeeded"
         session.scalars(select(Resume)).one().is_active = False
+        session.scalars(select(TelemetrySpan)).one().status_code = 404
 
     with db.session_scope() as session:
         assert session.scalars(select(Company)).one().name == "Acme Renamed"
@@ -150,13 +167,14 @@ def test_create_read_update_delete_round_trip_over_all_six_tables(engine: Engine
         assert session.scalars(select(Match)).one().state == "saved"
         assert session.scalars(select(Run)).one().status == "succeeded"
         assert session.scalars(select(Resume)).one().is_active is False
+        assert session.scalars(select(TelemetrySpan)).one().status_code == 404
 
     with db.session_scope() as session:
-        for model in (Match, Posting, Company, Resume, Run):
+        for model in (Match, Posting, Company, Resume, Run, TelemetrySpan):
             session.delete(session.scalars(select(model)).one())
 
     with db.session_scope() as session:
-        for model in (Match, Posting, Company, Resume, Run):
+        for model in (Match, Posting, Company, Resume, Run, TelemetrySpan):
             assert session.scalars(select(model)).all() == []
 
 
@@ -214,6 +232,14 @@ def test_timestamps_round_trip_as_the_same_aware_instant(engine: Engine) -> None
         )
         session.add(Run(status="succeeded", started_at=KNOWN_UTC, finished_at=KNOWN_UTC))
         session.add(
+            TelemetrySpan(
+                trace_id="2f1c9a5b7d3e4f60",
+                name="run",
+                duration_ms=41,
+                started_at=KNOWN_UTC,
+            )
+        )
+        session.add(
             Resume(
                 filename="synthetic-resume.txt",
                 content_type="text/plain",
@@ -226,7 +252,7 @@ def test_timestamps_round_trip_as_the_same_aware_instant(engine: Engine) -> None
     with db.session_scope() as session:
         rows = {
             model.__tablename__: session.scalars(select(model)).one()
-            for model in (Resume, Company, Posting, Match, Run)
+            for model in (Resume, Company, Posting, Match, Run, TelemetrySpan)
         }
 
         for model, column in _TIMESTAMP_COLUMNS:

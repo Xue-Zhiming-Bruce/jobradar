@@ -1,14 +1,15 @@
 """The migration path, measured against the models on both engines.
 
-`app.db.init_db()` creates the six tables in an empty database; the revisions in
-`migrations/versions/` bring a database that already exists to the same six
+`app.db.init_db()` creates the seven tables in an empty database; the revisions in
+`migrations/versions/` bring a database that already exists to the same seven
 tables -- the baseline, then the column #26 added, then the source column and
 check #28 added, then the outcome column, its check and its backfill #30 added,
 then the model and prompt-version columns #32 added, then the run's emailed
 count #36 added, then the two board-validator columns #55 added, then the run's
 unfetched-company count #56 added, then the company key widened from `slug`
 to `(source, slug)` #57, then the per-company outcome table #59 added, then the
-re-match's cap count #64 added, then the re-match's resume position #76 added. Two
+re-match's cap count #64 added, then the re-match's resume position #76 added,
+then the span table #90 added. Two
 paths to one schema
 can drift, so nothing here assumes a revision is right: every test runs `alembic
 upgrade head` -- in-process, through `alembic.command.upgrade` -- against the
@@ -44,8 +45,8 @@ What is measured, in the order the guarantees build:
 One reading of a criterion is recorded here because the code depends on it: an
 `upgrade head` that adopts an existing database still creates alembic's own
 `alembic_version` table, which is how `alembic current` can report `head` at all.
-"Creates nothing" therefore means none of the six tables, and the assertions
-below name the six rather than counting statements.
+"Creates nothing" therefore means none of the seven tables, and the assertions
+below name the seven rather than counting statements.
 """
 
 import copy
@@ -76,7 +77,7 @@ ALEMBIC_INI = BACKEND_ROOT / "alembic.ini"
 REVISIONS_DIR = BACKEND_ROOT / "migrations" / "versions"
 
 # The readable revision ids, in the order they apply, and the files that hold
-# them. The head is the last of the twelve.
+# them. The head is the last of the thirteen.
 BASELINE_REVISION = "0001_baseline"
 BASELINE_REVISION_FILE = "0001_baseline_five_tables.py"
 PARSED_FIELDS_REVISION = "0002_parsed_fields"
@@ -101,6 +102,8 @@ POSTINGS_NOT_REMATCHED_REVISION = "0011_run_postings_not_rematched"
 POSTINGS_NOT_REMATCHED_REVISION_FILE = "0011_run_postings_not_rematched.py"
 REMATCH_CURSOR_REVISION = "0012_run_rematch_cursor"
 REMATCH_CURSOR_REVISION_FILE = "0012_run_rematch_cursor.py"
+TELEMETRY_SPAN_REVISION = "0013_telemetry_span"
+TELEMETRY_SPAN_REVISION_FILE = "0013_telemetry_span.py"
 THE_REVISION_FILES = (
     BASELINE_REVISION_FILE,
     PARSED_FIELDS_REVISION_FILE,
@@ -114,15 +117,16 @@ THE_REVISION_FILES = (
     RUN_COMPANY_REVISION_FILE,
     POSTINGS_NOT_REMATCHED_REVISION_FILE,
     REMATCH_CURSOR_REVISION_FILE,
+    TELEMETRY_SPAN_REVISION_FILE,
 )
-HEAD_REVISION = REMATCH_CURSOR_REVISION
+HEAD_REVISION = TELEMETRY_SPAN_REVISION
 
 # Alembic's own bookkeeping table: one row per applied revision. It is not one of
-# the six the models declare, and `alembic current` reads it.
+# the seven the models declare, and `alembic current` reads it.
 ALEMBIC_VERSION_TABLE = "alembic_version"
 
-# The six tables `Base.metadata` holds, sorted so a failure reads in one order.
-THE_SIX_TABLES = tuple(sorted(Base.metadata.tables))
+# The seven tables `Base.metadata` holds, sorted so a failure reads in one order.
+THE_SEVEN_TABLES = tuple(sorted(Base.metadata.tables))
 
 # The one live index this schema declares, and the DDL both dialects render it as.
 # The predicate is what keeps a second *inactive* resume legal.
@@ -166,7 +170,7 @@ def database(engine: Engine) -> Iterator[Engine]:
     database that still says it is at `head` -- the PostgreSQL test database after
     an earlier test, or after an earlier run of the suite -- would make
     `upgrade head` a no-op and the comparison below vacuous. It has to go after one
-    too: `tests/conftest.py` drops the six tables and promises to leave the server
+    too: `tests/conftest.py` drops the seven tables and promises to leave the server
     as it was found.
     """
     _drop_alembic_version(engine)
@@ -177,7 +181,7 @@ def database(engine: Engine) -> Iterator[Engine]:
 def _migrate(engine: Engine) -> None:
     """Empty the fixture's database and let the baseline revision build it instead.
 
-    `init_db()` has already created the same six tables in it: dropping them is
+    `init_db()` has already created the same seven tables in it: dropping them is
     what makes what follows evidence about the *revision* rather than about the
     models' own `create_all`.
     """
@@ -196,9 +200,9 @@ def _dialect_of(engine: Engine) -> Dialect:
 
 
 def _reflected_tables(engine: Engine) -> MetaData:
-    """The six tables as the engine itself reports them, not as the models declare them."""
+    """The seven tables as the engine itself reports them, not as the models declare them."""
     metadata = MetaData()
-    metadata.reflect(bind=engine, only=list(THE_SIX_TABLES))
+    metadata.reflect(bind=engine, only=list(THE_SEVEN_TABLES))
     return metadata
 
 
@@ -560,10 +564,10 @@ def _company_with_posting(session: Session, slug: str = "acme") -> tuple[Company
 # exists" insufficient.
 
 
-def test_the_migrated_schema_holds_the_six_tables_and_alembics_own(database: Engine) -> None:
+def test_the_migrated_schema_holds_the_seven_tables_and_alembics_own(database: Engine) -> None:
     _migrate(database)
 
-    assert set(inspect(database).get_table_names()) == set(THE_SIX_TABLES) | {
+    assert set(inspect(database).get_table_names()) == set(THE_SEVEN_TABLES) | {
         ALEMBIC_VERSION_TABLE
     }
     assert _applied_revisions(database) == [HEAD_REVISION]
@@ -581,8 +585,8 @@ def test_every_migrated_column_matches_the_model_by_name_type_and_nullability(
     _migrate(database)
     dialect = _dialect_of(database)
 
-    assert {name: _reflected_columns(database, name) for name in THE_SIX_TABLES} == {
-        name: _model_columns(Base.metadata.tables[name], dialect) for name in THE_SIX_TABLES
+    assert {name: _reflected_columns(database, name) for name in THE_SEVEN_TABLES} == {
+        name: _model_columns(Base.metadata.tables[name], dialect) for name in THE_SEVEN_TABLES
     }
 
 
@@ -644,7 +648,7 @@ def test_the_foreign_keys_cascade_on_the_migrated_schema(database: Engine) -> No
 
     assert {
         (table_name, key["constrained_columns"][0]): key["options"].get("ondelete")
-        for table_name in THE_SIX_TABLES
+        for table_name in THE_SEVEN_TABLES
         for key in inspect(database).get_foreign_keys(table_name)
     } == {
         ("posting", "company_id"): "CASCADE",
@@ -654,7 +658,7 @@ def test_the_foreign_keys_cascade_on_the_migrated_schema(database: Engine) -> No
     }
 
 
-def test_the_migrated_schema_renders_the_six_tables_for_both_dialects(database: Engine) -> None:
+def test_the_migrated_schema_renders_the_seven_tables_for_both_dialects(database: Engine) -> None:
     """The DDL-compile pattern of `test_models.py`, pointed at the migrated schema."""
     _migrate(database)
     reflected = _reflected_tables(database)
@@ -664,7 +668,7 @@ def test_the_migrated_schema_renders_the_six_tables_for_both_dialects(database: 
             str(CreateTable(table).compile(dialect=dialect)) for table in reflected.sorted_tables
         )
 
-        assert all(re.search(rf'CREATE TABLE "?{name}"? \(', ddl) for name in THE_SIX_TABLES)
+        assert all(re.search(rf'CREATE TABLE "?{name}"? \(', ddl) for name in THE_SEVEN_TABLES)
         assert ddl.count("ON DELETE CASCADE") == 4
 
 
@@ -809,9 +813,9 @@ def test_a_database_init_db_built_and_filled_is_adopted_by_upgrade_head(database
         database, lambda: command.upgrade(upgrade_config, "head")
     )
 
-    # None of the six tables is created or dropped: only alembic's own
+    # None of the seven tables is created or dropped: only alembic's own
     # `alembic_version`, which is how `current` below can report `head` at all.
-    assert [line for line in statements if any(name in line for name in THE_SIX_TABLES)] == []
+    assert [line for line in statements if any(name in line for name in THE_SEVEN_TABLES)] == []
     assert _written_rows(database) == before
 
     current_config = _config()
@@ -1222,7 +1226,7 @@ def test_the_four_documented_commands_do_what_they_say(database: Engine, tmp_pat
 
     command.upgrade(config, "head")
 
-    assert set(inspect(database).get_table_names()) == set(THE_SIX_TABLES) | {
+    assert set(inspect(database).get_table_names()) == set(THE_SEVEN_TABLES) | {
         ALEMBIC_VERSION_TABLE
     }
     assert _applied_revisions(database) == [HEAD_REVISION]
@@ -1244,7 +1248,7 @@ def test_the_four_documented_commands_do_what_they_say(database: Engine, tmp_pat
     # `init_db()` is still what creates the tables in an empty database.
     db.init_db()
 
-    assert set(inspect(database).get_table_names()) == set(THE_SIX_TABLES) | {
+    assert set(inspect(database).get_table_names()) == set(THE_SEVEN_TABLES) | {
         ALEMBIC_VERSION_TABLE
     }
     assert _applied_revisions(database) == []
