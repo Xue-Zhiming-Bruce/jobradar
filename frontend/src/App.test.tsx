@@ -19,6 +19,23 @@ describe('the app', () => {
     expect(await screen.findByText('Globex: Data engineer')).toBeDefined()
     expect(screen.getByRole('button', { name: 'Run digest now' })).toBeDefined()
     expect(screen.getByRole('button', { name: 'Re-match stored postings' })).toBeDefined()
+    expect(await screen.findByRole('heading', { name: 'Telemetry' })).toBeDefined()
+  })
+
+  it('shows a refused telemetry read without hiding the rest of the page (#91 AC4)', async () => {
+    const detail = 'The metrics could not be read'
+    server.use(
+      http.get('/telemetry/metrics', () => HttpResponse.json({ detail }, { status: 500 })),
+      http.get('/telemetry/traces', () => HttpResponse.json({ detail }, { status: 500 })),
+    )
+    render(<App />)
+
+    expect(await screen.findAllByRole('alert')).toHaveLength(2)
+    // The two failed reads sit beside the other sections, which are still there.
+    expect(screen.getByLabelText('Resume file')).toBeDefined()
+    expect(screen.getByText('Acme (acme)')).toBeDefined()
+    expect(screen.getByText('Globex: Data engineer')).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Run digest now' })).toBeDefined()
   })
 
   it('shows a refused tick as an error and leaves the rest of the screen usable', async () => {

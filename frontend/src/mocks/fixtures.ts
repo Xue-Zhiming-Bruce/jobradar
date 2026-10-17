@@ -48,6 +48,59 @@ export const runSucceeded = {
   ],
 }
 
+/** One route's window, as `GET /telemetry/metrics` answers it: `RouteMetric`, four keys. */
+export const routeMetrics = [
+  { route: '/matches', count: 12, errors: 0, p95_ms: 41 },
+  { route: '/internal/tick', count: 3, errors: 1, p95_ms: 128 },
+]
+
+/**
+ * The traces `GET /telemetry/traces` answers with, newest first as the route orders
+ * them. The first is the one trace id `#90` writes for a "Run digest now" press:
+ * the tick's own request span, and the run's span under the same id -- so the
+ * request and the run read together. The run's span is not an HTTP request, so
+ * it carries no route, method or status code (all three null).
+ */
+export const traces = [
+  {
+    trace_id: '4bf92f3577b34da6a3ce929d0e0e4736',
+    spans: [
+      {
+        id: 1,
+        name: 'http',
+        route: '/internal/tick',
+        method: 'POST',
+        status_code: 202,
+        duration_ms: 4,
+        started_at: '2026-01-01T09:01:00+00:00',
+      },
+      {
+        id: 2,
+        name: 'run',
+        route: null,
+        method: null,
+        status_code: null,
+        duration_ms: 3012,
+        started_at: '2026-01-01T09:01:00.004000+00:00',
+      },
+    ],
+  },
+  {
+    trace_id: '0af7651916cd43dd8448eb211c80319c',
+    spans: [
+      {
+        id: 3,
+        name: 'http',
+        route: '/matches',
+        method: 'GET',
+        status_code: 200,
+        duration_ms: 41,
+        started_at: '2026-01-01T09:00:00+00:00',
+      },
+    ],
+  },
+]
+
 /** A run the board-call budget stopped before it reached every active company (#56). */
 export const runBudgetStopped = {
   ...runSucceeded,
