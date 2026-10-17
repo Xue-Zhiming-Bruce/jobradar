@@ -23,7 +23,7 @@ so the contract does not move.
 """
 
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +37,7 @@ from app.main import app
 from app.models import Company, Match, Posting, Resume, Run, RunCompany
 from app.routes import internal
 from app.routes.internal import get_pipeline, get_run_starter
-from app.routes.runs import REAPED_RUN_ERROR, reap_stale_runs
+from app.routes.runs import RUNS_DEFAULT_LIMIT, RUNS_MAX_LIMIT, REAPED_RUN_ERROR, reap_stale_runs
 
 # The ten columns of a run plus the per-company outcomes it recorded, and
 # therefore the whole body this route may answer with. A field that is not here is
@@ -299,6 +299,61 @@ def test_the_read_answers_for_the_id_it_was_asked_for(client: TestClient) -> Non
 
     assert read(client, first).json()["id"] == first
     assert read(client, second).json()["id"] == second
+
+
+# `GET /runs`: the newest N runs, newest first, as #92's AC1 asks.
+
+
+def runs(client: TestClient, query: str = "") -> list[dict[str, Any]]:
+    """One read of the runs list, and its status code pinned by the caller's own assertion."""
+    response = client.get(f"/runs{query}")
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_the_runs_read_answers_newest_first_by_started_at_then_id(client: TestClient) -> None:
+    """`started_at` descending, and the id descending under a shared instant.
+
+    Two runs that started in the same instant -- which `started_at`'s default
+    makes possible -- must still have one order, so the newer id is first.
+    """
+    earlier = seed(status="succeeded", started_at=datetime(2026, 10, 1, 9, tzinfo=UTC))
+    later = seed(status="failed", started_at=datetime(2026, 10, 1, 11, tzinfo=UTC))
+    tie_low = seed(status="succeeded", started_at=datetime(2026, 10, 1, 10, tzinfo=UTC))
+    tie_high = seed(status="succeeded", started_at=datetime(2026, 10, 1, 10, tzinfo=UTC))
+
+    body = runs(client)
+
+    assert [run["id"] for run in body] == [later, max(tie_low, tie_high), min(tie_low, tie_high), earlier]
+    assert set(body[0]) == RUN_FIELDS
+
+
+def test_the_runs_read_defaults_to_the_fifty_newest(client: TestClient) -> None:
+    seeded = [
+        seed(status="succeeded", started_at=datetime(2026, 10, 1, 9, tzinfo=UTC) + timedelta(minutes=i))
+        for i in range(RUNS_DEFAULT_LIMIT + 5)
+    ]
+
+    body = runs(client)
+
+    assert len(body) == RUNS_DEFAULT_LIMIT
+    assert [run["id"] for run in body] == list(reversed(seeded))[:RUNS_DEFAULT_LIMIT]
+
+
+def test_a_limit_at_the_bound_is_accepted_and_above_it_is_refused(client: TestClient) -> None:
+    seed(status="succeeded")
+    seed(status="succeeded", started_at=datetime(2026, 10, 1, 10, tzinfo=UTC))
+
+    assert len(runs(client, f"?limit={RUNS_MAX_LIMIT}")) == 2
+    assert len(runs(client, "?limit=1")) == 1
+
+    for value in (RUNS_MAX_LIMIT + 1, 0, -1):
+        assert client.get(f"/runs?limit={value}").status_code == 422
+    assert client.get("/runs?limit=abc").status_code == 422
+
+
+def test_a_repository_with_no_run_answers_an_empty_list(client: TestClient) -> None:
+    assert runs(client) == []
 
 
 def test_an_id_with_no_row_is_404(client: TestClient) -> None:

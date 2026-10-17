@@ -29,7 +29,7 @@ a route -- the app finishes those rows while it starts, before it serves.
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -97,6 +97,16 @@ class RunSummary(BaseModel):
 RUN_NOT_FOUND_RESPONSE = {404: {"description": "No run has that id"}}
 UNUSABLE_ID_RESPONSE = {422: {"description": "The path value is not a run id"}}
 READ_RESPONSES = RUN_NOT_FOUND_RESPONSE | UNUSABLE_ID_RESPONSE
+
+# The most runs one read answers: `?limit=` is bounded by this, so the read
+# cannot be asked for an unbounded page. The same bound `app.routes.matches`
+# puts on its own `?limit=`, spelled as this module's own constant.
+RUNS_MAX_LIMIT = 200
+
+# What `?limit=` is when the caller names none: the page the on-call check and
+# the runs screen read by default. Constant beside `RUNS_MAX_LIMIT` rather than
+# configuration: it is not a deployment's to change.
+RUNS_DEFAULT_LIMIT = 50
 
 
 def run_summary(run: Run) -> RunSummary:
@@ -173,6 +183,28 @@ def reap_stale_runs() -> int:
                 error=REAPED_RUN_ERROR,
             )
         ).rowcount
+
+
+@router.get(
+    "/runs",
+    response_model=list[RunSummary],
+    tags=["runs"],
+    summary="List digest runs, newest first",
+)
+def list_runs(limit: int = Query(RUNS_DEFAULT_LIMIT, ge=1, le=RUNS_MAX_LIMIT)) -> list[RunSummary]:
+    """The newest `limit` runs, newest first, and `[]` when the repository holds none.
+
+    One statement, ordered `started_at` descending with the id descending under it,
+    so two runs that started in the same instant -- which `started_at`'s default
+    makes possible -- still have one order and the newest N is never an arbitrary N.
+    `limit` defaults to `RUNS_DEFAULT_LIMIT` and is bounded by `RUNS_MAX_LIMIT`; `0`,
+    a negative value or one above the bound is refused as `422` before this function
+    runs. The body is the same `RunSummary` `GET /runs/{id}` answers, rendered by the
+    same `run_summary`, so the two routes cannot drift apart.
+    """
+    statement = select(Run).order_by(Run.started_at.desc(), Run.id.desc()).limit(limit)
+    with db.session_scope() as session:
+        return [run_summary(run) for run in session.scalars(statement)]
 
 
 @router.get(

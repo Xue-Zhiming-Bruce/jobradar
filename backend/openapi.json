@@ -463,6 +463,56 @@
         }
       }
     },
+    "/runs": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "List digest runs, newest first",
+        "description": "The newest `limit` runs, newest first, and `[]` when the repository holds none.\n\nOne statement, ordered `started_at` descending with the id descending under it,\nso two runs that started in the same instant -- which `started_at`'s default\nmakes possible -- still have one order and the newest N is never an arbitrary N.\n`limit` defaults to `RUNS_DEFAULT_LIMIT` and is bounded by `RUNS_MAX_LIMIT`; `0`,\na negative value or one above the bound is refused as `422` before this function\nruns. The body is the same `RunSummary` `GET /runs/{id}` answers, rendered by the\nsame `run_summary`, so the two routes cannot drift apart.",
+        "operationId": "list_runs_runs_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RunSummary"
+                  },
+                  "title": "Response List Runs Runs Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/runs/{id}": {
       "get": {
         "tags": [

@@ -62,6 +62,7 @@ def test_contract_lists_every_registered_path_in_registration_order() -> None:
         "/watchlist/{id}",
         "/internal/tick",
         "/internal/rematch",
+        "/runs",
         "/runs/{id}",
         "/matches",
         "/matches/{id}",
