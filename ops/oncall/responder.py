@@ -62,6 +62,7 @@ offline test drives every branch without a socket, a model, a Render service or 
 GitHub token.
 """
 
+import http.client
 import json
 import os
 import re
@@ -118,6 +119,18 @@ _QUOTED_OUTPUT_LIMIT = 600
 # The app is served over HTTP and answers at once; the model may take longer.
 _READ_TIMEOUT = 30
 _MODEL_TIMEOUT = 60
+
+# Every way one `urllib` call can fail without answering: a refused or reset
+# connection (`URLError`/`OSError`), a peer that accepts the connection and then
+# stalls (`TimeoutError`), and a malformed answer (`http.client.HTTPException`).
+# None of them is an answer, and raising one would leave the issue unanswered
+# (AC8). `urllib.error.HTTPError` is an `OSError` too, so it is caught first,
+# where its status is an answer of its own.
+_NETWORK_FAILURES = (OSError, http.client.HTTPException)
+
+# What one model call can additionally fail with: a body that is not JSON, or a
+# JSON body whose shape is not a chat completion.
+_MODEL_FAILURES = _NETWORK_FAILURES + (ValueError, KeyError, IndexError, TypeError)
 
 # How long `retrigger` waits for its run to reach a terminal status, how long
 # `rollback` waits for `/healthz` to answer 200 -- long enough to cover a free
@@ -598,12 +611,61 @@ def respond(
     Answers the `Outcome` it commented, or `None` when `needs_a_response` says the
     issue is already answered or closed -- in which case it touches nothing. Every
     awkward answer (a `409`, an unreachable app, a wait that runs out, a rollback
-    that refuses) becomes `escalate` with the issue left open, so no path lets an
-    unhandled exception stand in for an answer on the issue (AC8).
+    that refuses) becomes `escalate` with the issue left open, and the decision is
+    wrapped so that no failure inside it -- a seam that raises where it should
+    answer, an unexpected error -- lets an exception stand in for an answer on the
+    issue: it becomes an `escalate` `Outcome` naming the error (AC8). The comment
+    is written outside that wrapper, so one path cannot write two, and `close`
+    runs only after it.
     """
     if not needs_a_response(issue):
         return None
+    try:
+        outcome = _decide_and_act(
+            issue,
+            app=app,
+            complete=complete,
+            rollback=rollback,
+            config=config,
+            sleep=sleep,
+            clock=clock,
+        )
+    except Exception as error:  # AC8: an exception must not stand in for an answer
+        outcome = _failure_outcome(error, config)
+    comment(issue.number, comment_body(outcome))
+    if outcome.fixed is True:
+        close(issue.number)
+    return outcome
 
+
+def _failure_outcome(error: Exception, config: Config) -> Outcome:
+    """The one escalation a responder that could not decide still owes the issue (AC8)."""
+    return Outcome(
+        action=ESCALATE,
+        source="error",
+        reason=redact(
+            f"the responder could not complete: {type(error).__name__}: {error}", config.secrets
+        ),
+        found="the responder could not gather the evidence and act on it",
+        performed=None,
+        run_id=None,
+        trace_id=None,
+        fixed=None,
+        owner_action="a human must investigate the alert; the responder could not complete.",
+    )
+
+
+def _decide_and_act(
+    issue: Issue,
+    *,
+    app: App,
+    complete: Complete | None,
+    rollback: Rollback,
+    config: Config,
+    sleep: Callable[[float], None],
+    clock: Callable[[], float],
+) -> Outcome:
+    """Gather the evidence, choose one action, verify it, and answer the `Outcome`."""
     evidence = read_evidence(app, issue.body)
     decision = decide(evidence, complete, config.base_url)
     found = describe_evidence(evidence)
@@ -672,7 +734,7 @@ def respond(
     else:  # escalate: comment only, change nothing
         owner_action = "a human must investigate the alert; the responder changed nothing."
 
-    outcome = Outcome(
+    return Outcome(
         action=action,
         source=decision.source,
         reason=reason,
@@ -683,10 +745,6 @@ def respond(
         fixed=fixed,
         owner_action=owner_action,
     )
-    comment(issue.number, comment_body(outcome))
-    if outcome.fixed is True:
-        close(issue.number)
-    return outcome
 
 
 # --- The real seams ----------------------------------------------------------
@@ -703,7 +761,13 @@ def _json_body(raw: bytes) -> Any:
 
 
 def urllib_app(base_url: str, *, timeout: float = _READ_TIMEOUT) -> App:
-    """The real app read: one `urllib` request, its status, body and headers."""
+    """The real app read: one `urllib` request, its status, body and headers.
+
+    A peer that refuses the connection, resets it or accepts it and then stalls is
+    `Answer(None)` and never an exception: the socket timeout `urllib` raises for a
+    silent peer is a `TimeoutError`, which is not a `URLError`, so it is caught
+    here with the rest (AC8).
+    """
     root = base_url.rstrip("/")
 
     def app(method: str, path: str, headers: Mapping[str, str]) -> Answer:
@@ -722,19 +786,27 @@ def urllib_app(base_url: str, *, timeout: float = _READ_TIMEOUT) -> App:
                     {key: value for key, value in response.headers.items()},
                 )
         except urllib.error.HTTPError as error:
+            try:  # an error body can stall too, and its status is still the answer
+                body = _json_body(error.read())
+            except _NETWORK_FAILURES:
+                body = None
             return Answer(
                 error.code,
-                _json_body(error.read()),
+                body,
                 {key: value for key, value in error.headers.items()},
             )
-        except urllib.error.URLError:
+        except _NETWORK_FAILURES:
             return Answer(None)
 
     return app
 
 
 def llm_complete(api_key: str, model: str, base_url: str, *, timeout: float = _MODEL_TIMEOUT) -> Complete:
-    """The real model call: one chat completion, its text back, or `None` on any failure."""
+    """The real model call: one chat completion, its text back, or `None` on any failure.
+
+    A peer that accepts and then stalls is `None` -- the model failing -- which
+    `decide` reads as the deterministic path, not an exception (AC2, AC8).
+    """
     endpoint = f"{base_url.rstrip('/')}/chat/completions"
 
     def complete(prompt: str) -> str | None:
@@ -754,7 +826,7 @@ def llm_complete(api_key: str, model: str, base_url: str, *, timeout: float = _M
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 body = json.loads(response.read())
             return body["choices"][0]["message"]["content"]
-        except (urllib.error.URLError, ValueError, KeyError, IndexError, TypeError):
+        except _MODEL_FAILURES:
             return None
 
     return complete
@@ -772,6 +844,8 @@ def real_rollback(*, timeout: float = 1500) -> tuple[int, str]:
         )
     except subprocess.TimeoutExpired:
         return 1, f"ops/rollback.sh did not finish within {timeout}s"
+    except OSError as error:
+        return 1, f"ops/rollback.sh could not be run: {type(error).__name__}"
     return completed.returncode, completed.stdout + completed.stderr
 
 
@@ -819,7 +893,13 @@ def secrets_from_environment() -> tuple[str, ...]:
 
 
 def main() -> int:
-    """Read the environment, wake once, and print a redacted one-line outcome."""
+    """Read the environment, wake once, and print a redacted one-line outcome.
+
+    No path leaves an exception in place of an answer: a seam that raises while
+    the issue is being read or answered still gets the one escalation comment
+    (AC8). The two required inputs are the only things that stop before any
+    comment, because without them there is no issue to answer.
+    """
     base_url = os.environ.get("JOBRADAR_URL", "").strip()
     if not base_url:
         print("responder: JOBRADAR_URL is unset or empty, so no alert can be answered.", file=sys.stderr)
@@ -828,8 +908,10 @@ def main() -> int:
     if not number_text.isdigit():
         print("responder: ISSUE_NUMBER is unset or not a number.", file=sys.stderr)
         return 2
+    number = int(number_text)
 
     secrets = secrets_from_environment()
+    config = Config(base_url=base_url, secrets=secrets)
     api_key = os.environ.get("LLM_API_KEY", "").strip()
     complete: Complete | None = None
     if api_key:
@@ -839,7 +921,16 @@ def main() -> int:
             os.environ.get("LLM_BASE_URL", "").strip() or DEFAULT_MODEL_BASE_URL,
         )
 
-    issue = gh_issue(int(number_text))
+    try:
+        issue = gh_issue(number)
+    except Exception as error:  # the issue cannot be read, but it can still be answered
+        gh_comment(number, comment_body(_failure_outcome(error, config)))
+        print(
+            redact(f"responder: could not read the issue: {type(error).__name__}", secrets),
+            file=sys.stderr,
+        )
+        return 1
+
     outcome = respond(
         issue,
         app=urllib_app(base_url),
@@ -847,7 +938,7 @@ def main() -> int:
         rollback=real_rollback,
         comment=gh_comment,
         close=gh_close,
-        config=Config(base_url=base_url, secrets=secrets),
+        config=config,
     )
     if outcome is None:
         print("responder: nothing to do; this alert is already answered or closed.")

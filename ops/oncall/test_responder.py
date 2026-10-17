@@ -1,14 +1,16 @@
 """`ops/oncall/responder.py`'s branches, driven offline over a fake app, model and Render call.
 
 #93's AC5: the responder is exercised with a fake model, a fake app and a fake
-Render API -- no socket, no model, no Render service and no `gh` -- so every
-branch is a fact rather than a hope. The cases cover a remediation that is
-applied and verified, one that is applied and not effective, the unhealthy-app
-rollback, a redaction case, the no-key deterministic rule choosing the same
-action as the fake model on the same evidence, and an answer from outside the
-fixed action set becoming `escalate`. AC8's awkward answers -- a `409`, a wait
-that runs out, an unreachable app, a failing model -- and AC9's fail-closed
-rollback are covered too.
+Render API -- no model, no Render service and no `gh` -- so every branch is a fact
+rather than a hope. The cases cover a remediation that is applied and verified,
+one that is applied and not effective, the unhealthy-app rollback, a redaction
+case, the no-key deterministic rule choosing the same action as the fake model on
+the same evidence, and an answer from outside the fixed action set becoming
+`escalate`. AC8's awkward answers -- a `409`, a wait that runs out, an unreachable
+app, a failing model -- and AC9's fail-closed rollback are covered too. The other
+AC8 case is a peer that accepts the connection and then stalls: those cases drive
+the real `urllib` seams against a local socket so the `TimeoutError` that is not a
+`URLError` is a fact rather than a hope.
 
 The module lives under `ops/`, outside the backend package, so it is loaded by
 path the way `backend/tests/test_impact_check.py` loads `ops/oncall/impact_check.py`:
@@ -17,9 +19,15 @@ it is the real file, not a copy that could drift.
 
 import importlib.util
 import json
-from collections.abc import Callable
+import socketserver
+import threading
+import time
+import urllib.request
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 MODULE_PATH = REPO_ROOT / "ops" / "oncall" / "responder.py"
@@ -114,16 +122,24 @@ def evidence_routes(
 
 
 def make_responder(
-    routes: dict[tuple[str, str], Any],
+    routes: dict[tuple[str, str], Any] | None,
     *,
+    app: Any = None,
+    base_url: str = BASE_URL,
     complete: Callable[[str], str | None] | None = None,
     rollback: Callable[[], tuple[int, str]] | None = None,
     secrets: tuple[str, ...] = (),
     run_wait_seconds: int = responder.RUN_WAIT_SECONDS,
     healthz_wait_seconds: int = responder.HEALTHZ_WAIT_SECONDS,
-) -> tuple[FakeApp, Any, list[tuple[int, str]], list[int], FakeClock]:
-    """A responder harness: the fake app, the outcome, and what it commented and closed."""
-    app = FakeApp(routes)
+) -> tuple[Any, Any, list[tuple[int, str]], list[int], FakeClock]:
+    """A responder harness: the app, the outcome, and what it commented and closed.
+
+    `app` replaces the route-table `FakeApp` when a case drives the real `urllib`
+    seam instead, and `base_url` moves the address the same-origin tick would post
+    to. Both default to the offline fake.
+    """
+    if app is None:
+        app = FakeApp(routes or {})
     comments: list[tuple[int, str]] = []
     closed: list[int] = []
     clock = FakeClock()
@@ -135,7 +151,7 @@ def make_responder(
         comment=lambda number, body: comments.append((number, body)),
         close=closed.append,
         config=responder.Config(
-            base_url=BASE_URL,
+            base_url=base_url,
             run_wait_seconds=run_wait_seconds,
             healthz_wait_seconds=healthz_wait_seconds,
             secrets=secrets,
@@ -144,6 +160,49 @@ def make_responder(
         clock=clock,
     )
     return app, outcome, comments, closed, clock
+
+
+@pytest.fixture
+def stalled_peer(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """A TCP peer that accepts the connection and never answers, and its base URL.
+
+    This is the socket a `urllib` timeout fires on: a peer that is up and silent
+    makes `getresponse` raise `TimeoutError`, which is not a `URLError`, so a read
+    that raised it would leave the issue unanswered (AC8). The handler holds the
+    connection until the client closes it, so no thread outlives the case.
+
+    The opener is installed without proxies, so the silent peer is reached
+    directly rather than through a proxy the machine's own settings carry, which
+    would answer for it and hide the timeout.
+    """
+
+    class Handler(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            self.request.settimeout(1)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    if not self.request.recv(4096):
+                        break  # the client closed the connection
+                except OSError:
+                    continue
+
+    class Server(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        urllib.request.build_opener(urllib.request.ProxyHandler({})).open,
+    )
+    server = Server(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 # AC1, AC3: one wake per alert.
@@ -420,3 +479,67 @@ def test_the_redaction_replaces_values_and_connection_strings() -> None:
 def test_named_run_id_reads_the_line_the_alert_body_writes() -> None:
     assert responder.named_run_id(ALERT_BODY) == 7
     assert responder.named_run_id("no run id here") is None
+
+
+# AC8: a peer that accepts the connection and then stalls must not raise out of
+# the responder -- its `TimeoutError` is not a `URLError`.
+
+
+def test_a_stalled_app_read_is_no_answer_not_an_exception(stalled_peer: str) -> None:
+    app = responder.urllib_app(stalled_peer, timeout=1)
+
+    assert app("GET", responder.HEALTHZ_PATH, {}) == Answer(None)
+
+
+def test_a_stalled_model_call_is_a_failure_not_an_exception(stalled_peer: str) -> None:
+    complete = responder.llm_complete("key", "model", stalled_peer, timeout=1)
+
+    assert complete("prompt") is None
+
+
+def test_a_stalled_app_escalates_and_comments(stalled_peer: str) -> None:
+    """Every app read stalls, so the app is unreachable: one escalation comment."""
+    app = responder.urllib_app(stalled_peer, timeout=1)
+
+    _, outcome, comments, closed, _ = make_responder(None, app=app, base_url=stalled_peer)
+
+    assert outcome is not None
+    assert outcome.action == responder.ESCALATE
+    assert outcome.source == "deterministic"
+    assert outcome.performed is None
+    assert closed == []
+    assert len(comments) == 1
+    assert "no answer" in comments[0][1]
+
+
+def test_a_stalled_model_falls_back_to_the_rule_and_escalates(stalled_peer: str) -> None:
+    """A model that stalls is the model failing: the rule decides, and comments once."""
+    routes = evidence_routes(named_run=Answer(200, run_body(7, "succeeded")))
+    complete = responder.llm_complete("key", "model", stalled_peer, timeout=1)
+
+    _, outcome, comments, closed, _ = make_responder(routes, complete=complete)
+
+    assert outcome is not None
+    assert outcome.source == "deterministic"
+    assert outcome.action == responder.ESCALATE
+    assert closed == []
+    assert len(comments) == 1
+
+
+def test_a_seam_that_raises_still_gets_one_escalation_comment() -> None:
+    """No failure inside the decision lets an exception stand in for an answer."""
+
+    class Boom(RuntimeError):
+        pass
+
+    def raising_app(method: str, path: str, headers: dict[str, str]) -> Any:
+        raise Boom("the seam raised instead of answering")
+
+    _, outcome, comments, closed, _ = make_responder(None, app=raising_app)
+
+    assert outcome is not None
+    assert outcome.action == responder.ESCALATE
+    assert outcome.source == "error"
+    assert closed == []
+    assert len(comments) == 1
+    assert "Boom" in comments[0][1]
