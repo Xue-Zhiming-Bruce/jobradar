@@ -10,9 +10,10 @@
 # database would let the suite write to it, or make the run red for a server it
 # never started.
 #
-# `make test` runs the ordinary `uv run pytest` in each directory, the same
-# command CI runs. The macOS `uv` editable-install trap in AGENTS.md is the
-# environment's, not this script's.
+# The backend's and MCP's suites are the ordinary `uv run pytest` each directory
+# documents, and the frontend's is `npm test`: the same commands CI runs. The
+# macOS `uv` editable-install trap in AGENTS.md is the environment's, not this
+# script's.
 set -euo pipefail
 
 port="${1:?make test passes the PostgreSQL port the Makefile fixes}"
