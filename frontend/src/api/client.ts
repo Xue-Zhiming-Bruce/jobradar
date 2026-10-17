@@ -110,6 +110,40 @@ export type Match = {
 export type MatchState = 'saved' | 'dismissed'
 
 /**
+ * One route's window, as `GET /telemetry/metrics` answers it: `RouteMetric` in the
+ * contract (#90), four fields and no fifth.
+ */
+export type RouteMetric = {
+  route: string
+  count: number
+  errors: number
+  /** The nearest-rank 95th percentile of the route's durations in the window, in ms. */
+  p95Ms: number
+}
+
+/**
+ * One span as its trace lists it: `SpanSummary` in the contract (#90).
+ *
+ * `route` and `statusCode` are `null` on a span that is not an HTTP request --
+ * the run's own, named `run` -- and the screen still renders that row.
+ */
+export type TraceSpan = {
+  id: number
+  name: string
+  route: string | null
+  statusCode: number | null
+  durationMs: number
+  /** Keeps the contract's own name and stays the ISO string it sends, never a `Date`. */
+  startedAt: string
+}
+
+/** One trace: the id its spans share, and those spans in the order they started. */
+export type Trace = {
+  traceId: string
+  spans: TraceSpan[]
+}
+
+/**
  * The two boards a company can be watched on: `CompanySource` in
  * `backend/openapi.json`, whose `WatchedCompany.source` default is the first.
  */
@@ -176,6 +210,28 @@ type WireMatch = {
   created_at: string
 }
 
+type WireRouteMetric = {
+  route: string
+  count: number
+  errors: number
+  p95_ms: number
+}
+
+type WireSpanSummary = {
+  id: number
+  name: string
+  route: string | null
+  method: string | null
+  status_code: number | null
+  duration_ms: number
+  started_at: string
+}
+
+type WireTraceSummary = {
+  trace_id: string
+  spans: WireSpanSummary[]
+}
+
 const decodeCompany = (wire: WireCompany): WatchedCompany => ({
   id: wire.id,
   name: wire.name,
@@ -208,6 +264,28 @@ const decodeRunCompanyOutcome = (wire: WireRunCompanyOutcome): RunCompanyOutcome
   slug: wire.slug,
   outcome: wire.outcome,
   error: wire.error,
+})
+
+const decodeRouteMetric = (wire: WireRouteMetric): RouteMetric => ({
+  route: wire.route,
+  count: wire.count,
+  errors: wire.errors,
+  p95Ms: wire.p95_ms,
+})
+
+/** `method` is the one `SpanSummary` field no screen reads, so it is not carried over. */
+const decodeTraceSpan = (wire: WireSpanSummary): TraceSpan => ({
+  id: wire.id,
+  name: wire.name,
+  route: wire.route,
+  statusCode: wire.status_code,
+  durationMs: wire.duration_ms,
+  startedAt: wire.started_at,
+})
+
+const decodeTrace = (wire: WireTraceSummary): Trace => ({
+  traceId: wire.trace_id,
+  spans: wire.spans.map(decodeTraceSpan),
 })
 
 const decodeRun = (wire: WireRunSummary): RunSummary => ({
@@ -304,4 +382,23 @@ export async function rematch(): Promise<RunSummary> {
 
 export async function getRun(id: number): Promise<RunSummary> {
   return decodeRun(await request<WireRunSummary>(`/runs/${id}`))
+}
+
+/**
+ * Reads one window of per-route metrics. The window is the server's own constant,
+ * so this read takes no parameter, and a window holding no spans answers `[]`.
+ */
+export async function listRouteMetrics(): Promise<RouteMetric[]> {
+  return (await request<WireRouteMetric[]>('/telemetry/metrics')).map(decodeRouteMetric)
+}
+
+/**
+ * Reads the newest traces, each with the spans that share its id.
+ *
+ * The server orders them -- newest trace first, a trace's spans by the instant
+ * they started -- so the screen renders them in the order they arrived. Sorting
+ * again here would fight the server's own tie-break on the row id (#90 AC5).
+ */
+export async function listTraces(): Promise<Trace[]> {
+  return (await request<WireTraceSummary[]>('/telemetry/traces')).map(decodeTrace)
 }

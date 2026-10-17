@@ -6,6 +6,8 @@ import {
   addCompany,
   getRun,
   listMatches,
+  listRouteMetrics,
+  listTraces,
   listWatchlist,
   rematch,
   removeCompany,
@@ -16,6 +18,32 @@ import {
 } from './client'
 
 const refused = 'The slug is already watched'
+
+/** The one trace id `#90` writes the digest journey under, and the two spans that share it. */
+const traceId = '4bf92f3577b34da6a3ce929d0e0e4736'
+const tickTrace = {
+  trace_id: traceId,
+  spans: [
+    {
+      id: 1,
+      name: 'http',
+      route: '/internal/tick',
+      method: 'POST',
+      status_code: 202,
+      duration_ms: 4,
+      started_at: '2026-05-01T09:00:00+00:00',
+    },
+    {
+      id: 2,
+      name: 'run',
+      route: null,
+      method: null,
+      status_code: null,
+      duration_ms: 3012,
+      started_at: '2026-05-01T09:00:00+00:00',
+    },
+  ],
+}
 
 /** One `MatchSummary` as `GET /matches` sends it: all nine fields, in the wire's names. */
 const matchRow = {
@@ -156,6 +184,50 @@ describe('the wire is decoded into the UI', () => {
       contentType: 'text/plain',
       isActive: true,
     })
+  })
+
+  it('listRouteMetrics turns p95_ms into p95Ms and changes nothing else', async () => {
+    server.use(
+      http.get('/telemetry/metrics', () =>
+        HttpResponse.json([
+          { route: '/matches', count: 12, errors: 1, p95_ms: 41 },
+          { route: '<unmatched>', count: 3, errors: 3, p95_ms: 7 },
+        ]),
+      ),
+    )
+
+    expect(await listRouteMetrics()).toEqual([
+      { route: '/matches', count: 12, errors: 1, p95Ms: 41 },
+      { route: '<unmatched>', count: 3, errors: 3, p95Ms: 7 },
+    ])
+  })
+
+  it('listTraces groups the spans under their trace id, route-less span included', async () => {
+    server.use(http.get('/telemetry/traces', () => HttpResponse.json([tickTrace])))
+
+    expect(await listTraces()).toEqual([
+      {
+        traceId: traceId,
+        spans: [
+          {
+            id: 1,
+            name: 'http',
+            route: '/internal/tick',
+            statusCode: 202,
+            durationMs: 4,
+            startedAt: '2026-05-01T09:00:00+00:00',
+          },
+          {
+            id: 2,
+            name: 'run',
+            route: null,
+            statusCode: null,
+            durationMs: 3012,
+            startedAt: '2026-05-01T09:00:00+00:00',
+          },
+        ],
+      },
+    ])
   })
 
   it('listMatches keeps createdAt an ISO string and renames only company_name', async () => {
@@ -412,6 +484,8 @@ describe('a 204 is empty and a non-2xx is an error', () => {
     ['startTick', (): Promise<unknown> => startTick()],
     ['rematch', (): Promise<unknown> => rematch()],
     ['getRun', (): Promise<unknown> => getRun(9)],
+    ['listRouteMetrics', (): Promise<unknown> => listRouteMetrics()],
+    ['listTraces', (): Promise<unknown> => listTraces()],
   ])('%s rejects rather than returning the error body as data', async (_name, call) => {
     server.use(
       http.all('/watchlist', rejecting(500)),
@@ -422,6 +496,8 @@ describe('a 204 is empty and a non-2xx is an error', () => {
       http.all('/internal/tick', rejecting(500)),
       http.all('/internal/rematch', rejecting(500)),
       http.all('/runs/:id', rejecting(500)),
+      http.all('/telemetry/metrics', rejecting(500)),
+      http.all('/telemetry/traces', rejecting(500)),
     )
 
     expect((await rejection(call)).message).toBe(refused)
