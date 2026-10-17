@@ -555,6 +555,46 @@ trigger decision in `_docs/decisions/2026-10-11-deploy-and-repo.md`, and it is w
 the in-app **"Run digest now"** button is the reliable path -- the one the demo
 relies on.
 
+### Alerting on user impact
+
+A third workflow, `alert.yml`, runs hourly (and by hand) and asks one question:
+is the digest journey showing user impact right now? `ops/oncall/impact_check.py`
+reads the deployed app over HTTP and only over HTTP -- `GET /runs?limit=50`,
+`GET /matches?limit=200` and `GET /telemetry/metrics`, all from `JOBRADAR_URL` --
+and classifies the journey through four named predicates:
+
+| Predicate | Fires when |
+| --- | --- |
+| `newest_run_failed` | the newest run ended `failed` (a run still in flight is not a failure) |
+| `model_scored_none` | the newest run finished, stored matches inside its `[started_at, finished_at]` window, and not one of them was scored: the model call failed on every row it reached |
+| `digest_stalled` | no run succeeded within 26 hours, or nothing ran at all in that time |
+| `http_5xx_rate` | the journey's two routes (`POST /internal/tick`, `GET /runs/{id}`) answered 5xx at or above 5% over the metrics window |
+
+When any predicate fires, the workflow opens a GitHub issue labelled `alert`
+whose body names the impact and carries the evidence -- the newest run's id,
+status, counts and timestamps, the values each fired predicate read, and the
+check's own output. It keeps at most one open: a detection while one is open
+comments its new evidence on it, and a run that finds no impact comments the
+healthy verdict on the open issue and closes it, so the one-open rule cannot
+silently swallow the next incident. A `concurrency` group serialises the runs so
+two scheduled ones cannot both pass the open-issue check, and the only
+credential is the workflow's own `GITHUB_TOKEN` with `issues: write` -- no new
+secret. The alert claims no trace id, because no read here links a run to its
+trace (#91).
+
+Nothing private rides along: the alert text names ids, statuses, counts, instants
+and route names, and no resume text, file name, credential, request body, CPU or
+memory number. A read that does not answer `200` is neither a healthy journey nor
+user impact -- the check exits non-zero naming the read, the workflow goes red
+and opens no issue. Alerting when the deployed app is unreachable at all is #99;
+the on-call agent that consumes the alert is #93.
+
+The local equivalent, with the app on port 8123, and the check's own offline
+test:
+
+    JOBRADAR_URL=http://127.0.0.1:8123 python3 ops/oncall/impact_check.py
+    cd backend && uv run pytest tests/test_impact_check.py
+
 ## MCP server
 
 `mcp/` is a uv project, `jobradar_mcp`: a small MCP server that drives the

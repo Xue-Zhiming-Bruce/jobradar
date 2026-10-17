@@ -1,0 +1,129 @@
+# Alert: one hourly read of the deployed journey, and at most one open `alert`
+# issue.
+#
+# #92 asks for an alert that fires on real user impact -- a failed, stalled or
+# model-broken digest journey -- and reaches a channel a person reads. The channel
+# is a GitHub issue, because the repository already has one, needs no new account,
+# and is where the on-call agent (#93) can reply. A third-party pager is #100.
+#
+# `ops/oncall/impact_check.py` does the reading and the classifying; this file is
+# the schedule, the one-open rule and the credential. The check reads the app at
+# `vars.JOBRADAR_URL` over HTTP and only over HTTP -- `GET /runs?limit=50`,
+# `GET /matches?limit=200` and `GET /telemetry/metrics` -- and fires on four named
+# predicates: `newest_run_failed`, `model_scored_none`, `digest_stalled` and
+# `http_5xx_rate`. Its output is one JSON object: `healthy`, `fired`, `title`,
+# `body` and the per-predicate `verdicts`.
+#
+# At most one `alert` issue is open. A detection while one is open comments its
+# new evidence on it; a run that finds no impact comments the healthy verdict on
+# the open issue and closes it, so the one-open rule cannot silently swallow the
+# next incident. The `concurrency` group `alert` serialises the runs, so two
+# scheduled runs cannot both pass the open-issue check and open two issues.
+#
+# The only credential is the workflow's own `GITHUB_TOKEN` with `issues: write`,
+# which is also the token `gh` reads: no new secret, and no value is in this file.
+# A read that does not answer `200` makes the check exit non-zero naming that
+# read; the workflow goes red and opens no issue, because a broken monitor must
+# not read as a healthy journey and must not read as user impact either.
+# Alerting when the deployed app is unreachable at all is #99.
+#
+# The alert claims no trace id: no read here links a run to its trace (#91), so a
+# body that named one would invent it. The body names what the check read -- the
+# newest run's id, status, counts and timestamps, the values each fired predicate
+# read, and the check's own output -- and nothing private: no resume text, file
+# name, credential, request body, CPU or memory number.
+#
+# The local equivalent of the check, with the app on port 8123:
+#
+#   JOBRADAR_URL=http://127.0.0.1:8123 python3 ops/oncall/impact_check.py
+#
+# and the check's own offline test:
+#
+#   cd backend && uv run pytest tests/test_impact_check.py
+#
+# That the YAML itself is valid -- empty output and exit 0:
+#
+#   python3 -c 'import yaml, sys; [yaml.safe_load(open(path)) for path in sys.argv[1:]]' .github/workflows/*.yml
+#
+# The stronger check, which knows Actions' own schema:
+#
+#   docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest .github/workflows/*.yml
+#
+# The schedule is best-effort, like `tick.yml`'s: GitHub Actions cron drifts and
+# can skip a run, and it is disabled after 60 days of repository inactivity
+# (_docs/decisions/2026-10-11-deploy-and-repo.md). A missed hour is a late alert,
+# not a missed incident: the next hour reads the same journey.
+
+name: Alert
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: alert
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The one input this workflow needs, checked before anything is read, so an
+      # unconfigured repository is loudly red instead of quietly green.
+      - name: Require JOBRADAR_URL
+        env:
+          JOBRADAR_URL: ${{ vars.JOBRADAR_URL }}
+        run: |
+          if [ -z "${JOBRADAR_URL}" ]; then
+            echo "::error::The repository variable JOBRADAR_URL is unset or empty, so no read was made. Set it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+      # The check writes its JSON report to `report.json`; a failed read is one
+      # line on stderr and a non-zero exit, and no issue is opened.
+      - name: Run the impact check
+        env:
+          JOBRADAR_URL: ${{ vars.JOBRADAR_URL }}
+        run: |
+          if ! python3 ops/oncall/impact_check.py > report.json 2> check-error.txt; then
+            echo "::error::The impact check could not judge the journey:"
+            cat check-error.txt
+            echo "::error::No alert issue was opened: a broken monitor is not a healthy journey and not user impact either."
+            exit 1
+          fi
+
+      # One open `alert` issue, and `GITHUB_TOKEN` is the only credential: `gh`
+      # reads it from `GH_TOKEN`. A healthy run clears the issue so the next
+      # incident is not swallowed; an impact run comments on the open one or opens
+      # the first.
+      - name: Open, update or close the one open alert issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          healthy=$(jq -r '.healthy' report.json)
+          number=$(gh issue list --label alert --state open --json number --jq '.[0].number // empty')
+          body=$(jq -r '.body' report.json)
+          if [ "${healthy}" = "true" ]; then
+            if [ -n "${number}" ]; then
+              gh issue comment "${number}" --body "${body}"
+              gh issue close "${number}" --reason completed
+              echo "No impact: commented the healthy verdict on alert issue #${number} and closed it."
+            else
+              echo "No impact, and no open alert issue: nothing to do."
+            fi
+            exit 0
+          fi
+          if [ -n "${number}" ]; then
+            gh issue comment "${number}" --body "${body}"
+            echo "Impact: commented the new evidence on open alert issue #${number}."
+          else
+            gh issue create --title "$(jq -r '.title' report.json)" --body "${body}" --label alert
+            echo "Impact: opened a new alert issue."
+          fi
