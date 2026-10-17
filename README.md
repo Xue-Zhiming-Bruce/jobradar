@@ -595,6 +595,56 @@ test:
     JOBRADAR_URL=http://127.0.0.1:8123 python3 ops/oncall/impact_check.py
     cd backend && uv run pytest tests/test_impact_check.py
 
+### On-call response
+
+The `alert` issue #92 opens is also a wake-up call. `.github/workflows/oncall.yml`
+starts `ops/oncall/responder.py` for the `issues` event when an issue carries the
+`alert` label -- whether the label was added later or the issue was opened already
+labelled -- and for no other event: no schedule, no manual dispatch and no pull
+request. It needs no new secret: `RENDER_API_KEY`, `RENDER_SERVICE_ID` and
+`vars.JOBRADAR_URL` are the values `deploy.yml` already uses, `GITHUB_TOKEN` comes
+from the run with `issues: write`, and `LLM_API_KEY` is optional -- unset means the
+deterministic path and is not a failure. A required value that is unset fails the
+job with a `::error::` naming it rather than skipping.
+
+One `alert` issue is one wake. A `concurrency` group keyed on the issue's number
+serialises the deliveries, and the responder refuses an issue that already carries
+its own comment marker, so the `opened` and `labeled` deliveries cannot remediate
+twice. The responder reads the deployed app's own signals -- `GET /healthz`,
+`GET /telemetry/metrics` and `GET /runs/{id}` for the run the alert body names --
+and the issue body, and then chooses one action from a fixed set. With
+`LLM_API_KEY` set the model chooses among those actions and an answer that names
+nothing in the set is not an action; with the key unset, or the model call
+failing, a documented deterministic rule chooses over the same evidence:
+
+| Action | What it does | The deterministic rule chooses it when |
+| --- | --- | --- |
+| `retrigger` | `POST /internal/tick` with the app's own same-origin admission: the `Origin` header set to `JOBRADAR_URL`, no `X-Tick-Secret` and no new secret | the alert's run ended `failed` |
+| `rollback` | runs `ops/rollback.sh` (#89), which owns the selection of the newest known-good `live` commit that is not the one serving | `GET /healthz` answered a status other than `200` |
+| `escalate` | comments and changes nothing | `/healthz` did not answer at all, no rule fits, or an action could not be verified |
+
+After `retrigger` the responder waits for the run the `202` named to reach
+`succeeded` or `failed`, and after `rollback` it waits for `GET /healthz` to answer
+`200` (long enough for a free instance's cold start). It comments once with what it
+found, what it did, the run id and trace id it saw and whether the issue is fixed,
+and closes the issue only when the effect is verified -- otherwise it leaves the
+issue open naming the owner action required. One wake takes at most one action and
+writes at most one comment, and no path edits or pushes code, re-adds the label,
+reopens the issue or schedules another run, so a wake cannot cascade. An awkward
+answer -- a `409`, an unreachable app, a rollback that refuses, a wait that runs
+out -- ends in `escalate`, never an unhandled exception. Nothing it emits carries a
+resume, a file name or a credential: the comment quotes signals, ids and statuses
+only, and the model's reason and the rollback output pass through a redaction step.
+
+The responder's own offline test, no app and no credential:
+
+    uv run --project backend pytest ops/oncall
+
+The one real wake #93 records cannot be made from the branch that adds this
+workflow: an `issues`-event workflow only fires once it is on the default branch,
+so `oncall.yml` starts working when #93 merges to `main`. The wake, its workflow
+run URL and the responder's comment are recorded on #93 once that happens.
+
 ## MCP server
 
 `mcp/` is a uv project, `jobradar_mcp`: a small MCP server that drives the
