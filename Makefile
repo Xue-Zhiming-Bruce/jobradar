@@ -9,8 +9,9 @@
 # interrupt removes it too. Nothing is started by hand.
 #
 # The port is fixed here, and named in README.md's "Running the tests": 5432 is
-# taken on a development machine, and a server already on this one is a failure
-# rather than the server the suites run against.
+# taken on a development machine. A server already on this one is not the server
+# the suites run against -- `scripts/test.sh` moves to the next free port and
+# prints the one it used.
 TEST_DB_PORT = 5433
 
 .PHONY: test

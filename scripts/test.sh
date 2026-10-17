@@ -10,29 +10,44 @@
 # database would let the suite write to it, or make the run red for a server it
 # never started.
 #
+# The port the Makefile fixes is the one used when it is free. Something else on
+# it -- the README's manual `jobradar-test-db`, say -- is neither reused nor a
+# reason to fail: the run moves to the next free port and prints the one it
+# used, so a leftover cannot become the server the suites test against.
+#
 # The backend's and MCP's suites are the ordinary `uv run pytest` each directory
 # documents, and the frontend's is `npm test`: the same commands CI runs. The
 # macOS `uv` editable-install trap in AGENTS.md is the environment's, not this
 # script's.
 set -euo pipefail
 
-port="${1:?make test passes the PostgreSQL port the Makefile fixes}"
+preferred_port="${1:?make test passes the PostgreSQL port the Makefile fixes}"
 shift
-
-# The throwaway credentials ci.yml's own ephemeral container publishes.
-dsn="postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:${port}/jobradar"
-export TEST_DATABASE_URL="$dsn"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "error: docker is required: make test starts its own PostgreSQL" >&2
   exit 1
 fi
 
-# A server already on the port is not this run's server to test against.
-if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
-  echo "error: port ${port} is taken: make test starts its own PostgreSQL there" >&2
+# The preferred port when it is free, another free one when it is not: a server
+# already there is not this run's server to test against.
+port=""
+for candidate in $(seq "$preferred_port" 65535); do
+  if ! (exec 3<>"/dev/tcp/127.0.0.1/${candidate}") 2>/dev/null; then
+    port="$candidate"
+    break
+  fi
+done
+if [ -z "$port" ]; then
+  echo "error: no free port at or above ${preferred_port}:" \
+    "make test needs one for its own PostgreSQL" >&2
   exit 1
 fi
+echo "throwaway PostgreSQL on 127.0.0.1:${port}"
+
+# The throwaway credentials ci.yml's own ephemeral container publishes.
+dsn="postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:${port}/jobradar"
+export TEST_DATABASE_URL="$dsn"
 
 # What a checkout without `node_modules` or the virtual environments is missing,
 # installed the way ci.yml's jobs install it.
@@ -57,11 +72,18 @@ docker run --rm -d --name "$container" \
   -e POSTGRES_USER=jobradar -e POSTGRES_PASSWORD=jobradar-throwaway \
   -e POSTGRES_DB=jobradar postgres:17 >/dev/null
 
+# Readiness over TCP (`-h`), because the entrypoint's temporary initdb server
+# answers on the unix socket alone: the suites connect over TCP, and that is the
+# server this run has to wait for.
+db_ready() {
+  docker exec "$container" pg_isready -h 127.0.0.1 -U jobradar \
+    -d jobradar >/dev/null 2>&1
+}
 for _ in $(seq 1 60); do
-  docker exec "$container" pg_isready -U jobradar -d jobradar >/dev/null 2>&1 && break
+  db_ready && break
   sleep 1
 done
-if ! docker exec "$container" pg_isready -U jobradar -d jobradar >/dev/null 2>&1; then
+if ! db_ready; then
   echo "error: the throwaway PostgreSQL on port ${port} did not become ready" >&2
   exit 1
 fi

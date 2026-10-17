@@ -338,9 +338,10 @@ Docker for the two backend passes, and removes that container when the run ends
 or thrown away by hand. The suites run against that server and not one a
 `TEST_DATABASE_URL` in the shell already names, so an inherited variable cannot
 point the run at a real database. The port is 5433, fixed in the `Makefile` as
-`TEST_DB_PORT` because 5432 is taken on a development machine; a server already
-on 5433 fails the run by naming the port, rather than becoming the server the
-suites test against.
+`TEST_DB_PORT` because 5432 is taken on a development machine. A server already
+on 5433 is not the one the suites test against: the run prints the port it uses,
+moves to the next free one when 5433 is taken, and only when it finds no free
+port does it stop, naming the port.
 
 The run stops at the first suite that fails: `== <suite> ==` heads each suite,
 `error: the <suite> suite failed` follows the one that failed, and the suites
