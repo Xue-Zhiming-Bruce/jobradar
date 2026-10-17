@@ -18,7 +18,7 @@ route, method or status code, because it is not an HTTP request.
 
 Spans are stored in `telemetry_span` (`app.models`) by `store_span()`, the one
 writer, and the table holds seven facts and no eighth: a request body, a query
-string, an `Authorization` value, the `X-Tick-Secret`, `DATABASE_URL`, resume
+string, an `Authorization` value, the `X-Tick-Secret`, the database URL, resume
 text and a resume's file name have nowhere to go. `route` is the matched route's
 *template* and never a path with an id, and a path no route matched is
 `UNMATCHED_ROUTE` rather than the path itself. `record_span()` is the only caller
@@ -292,19 +292,23 @@ class TelemetryMiddleware:
 
         token = _trace_id.set(trace_id)
         try:
-            await self.app(scope, receive, send_with_the_id)
-        except Exception:
-            record_span(self._span(trace_id, scope, ERROR_STATUS_CODE, started, started_at))
-            raise
-        finally:
-            _trace_id.reset(token)
+            try:
+                await self.app(scope, receive, send_with_the_id)
+            except Exception:
+                record_span(self._span(trace_id, scope, ERROR_STATUS_CODE, started, started_at))
+                raise
 
-        # No response start means the request never got an answer -- a client that
-        # went away -- and a span with no status code would be a request the app
-        # did not serve. The exception path above is the other one, and the two
-        # cannot both write a span for one request.
-        if status_code is not None:
-            record_span(self._span(trace_id, scope, status_code, started, started_at))
+            # No response start means the request never got an answer -- a client
+            # that went away -- and a span with no status code would be a request
+            # the app did not serve. The path above is the other one, and the two
+            # cannot both write a span for one request.
+            if status_code is not None:
+                record_span(self._span(trace_id, scope, status_code, started, started_at))
+        finally:
+            # Released after the span is recorded, so a write that failed is logged
+            # while the request's trace id is still this thread's -- the failure and
+            # the request it belongs to then read as one trace.
+            _trace_id.reset(token)
 
     @staticmethod
     def _span(
