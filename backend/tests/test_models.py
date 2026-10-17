@@ -1,4 +1,4 @@
-"""The six tables, declared once, under the column names later tasks read.
+"""The seven tables, declared once, under the column names later tasks read.
 
 `__tablename__` may appear in no module other than `app/models.py`: one place
 declares table structure, so one place has to be migrated (#21) when it changes.
@@ -77,6 +77,16 @@ _EXPECTED_COLUMNS = {
         "rematch_cursor",
     },
     "run_company": {"id", "run_id", "company_id", "outcome", "error"},
+    "telemetry_span": {
+        "id",
+        "trace_id",
+        "name",
+        "route",
+        "method",
+        "status_code",
+        "duration_ms",
+        "started_at",
+    },
 }
 
 # The length of every string column: the budget #2 declared, so a column is not
@@ -108,6 +118,10 @@ _STRING_LENGTHS = {
     ("run", "error"): None,
     ("run_company", "outcome"): 20,
     ("run_company", "error"): None,
+    ("telemetry_span", "trace_id"): 64,
+    ("telemetry_span", "name"): 50,
+    ("telemetry_span", "route"): 255,
+    ("telemetry_span", "method"): 10,
 }
 
 _UNBOUNDED_STRING_COLUMNS = {
@@ -135,6 +149,7 @@ _TIMESTAMP_COLUMNS = {
     ("match", "notified_at"),
     ("run", "started_at"),
     ("run", "finished_at"),
+    ("telemetry_span", "started_at"),
 }
 
 # The columns whose default is a Python callable or literal. `outcome` is not
@@ -179,7 +194,7 @@ def _both_ddl() -> dict[str, str]:
     return {name: _ddl(_dialect(name)) for name in ("sqlite", "postgres")}
 
 
-def test_the_six_tables_are_declared_and_no_others() -> None:
+def test_the_seven_tables_are_declared_and_no_others() -> None:
     assert set(Base.metadata.tables) == set(_EXPECTED_COLUMNS)
 
 
@@ -348,7 +363,7 @@ def test_defaults_are_python_side_except_the_outcome_the_database_fills() -> Non
 
 
 @pytest.mark.parametrize("dialect_name", sorted(_MATCH_TABLE_DDL))
-def test_the_rendered_ddl_creates_the_six_tables(dialect_name: str) -> None:
+def test_the_rendered_ddl_creates_the_seven_tables(dialect_name: str) -> None:
     dialect = sqlite.dialect() if dialect_name == "sqlite" else postgresql.dialect()
 
     ddl = _ddl(dialect)

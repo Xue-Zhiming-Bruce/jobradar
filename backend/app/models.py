@@ -1,4 +1,4 @@
-"""The six tables JobRadar stores, declared once and nowhere else.
+"""The seven tables JobRadar stores, declared once and nowhere else.
 
 `app.db.init_db()` builds every table from these models with SQLAlchemy's
 `create_all`, which creates only what is missing. It never alters a table that
@@ -41,7 +41,7 @@ from sqlalchemy.types import TypeDecorator
 
 
 class Base(DeclarativeBase):
-    """One metadata object holding all six tables, for `create_all`."""
+    """One metadata object holding all seven tables, for `create_all`."""
 
 
 def _utcnow() -> datetime:
@@ -283,6 +283,37 @@ class Run(Base):
     # `services.pipeline._record_not_rematched` beside the count, in the same unit
     # of work; #9 writes neither side.
     rematch_cursor: Mapped[int | None] = mapped_column(Integer)
+
+
+class TelemetrySpan(Base):
+    """One span of one trace: an HTTP request this app answered, or a digest run it did.
+
+    Seven facts and no eighth (#90), which is the whole reason no request body, query
+    string, header value or resume text can reach this table: nothing here holds one.
+    `route` is the matched route's *template* (`/matches/{id}`) and never a raw path,
+    and `method` and `status_code` are NULL on a span that is not an HTTP request --
+    the run's own span, named `run` -- where the other four are still set. Written by
+    `app.telemetry`, the one writer, and read by the two telemetry routes.
+    """
+
+    __tablename__ = "telemetry_span"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # The id the journey shares: the `X-Request-ID` this app adopted or generated, and
+    # the same value on every span and every log line of that request and its run.
+    trace_id: Mapped[str] = mapped_column(String(64))
+    # The small vocabulary the app writes: `http` for a served request, `run` for the
+    # background work a tick started. Both are constants in `app.telemetry`.
+    name: Mapped[str] = mapped_column(String(50))
+    # NULL only on a span that is not an HTTP request. A path no route matched is the
+    # sentinel `app.telemetry.UNMATCHED_ROUTE`, never the requested path itself.
+    route: Mapped[str | None] = mapped_column(String(255))
+    method: Mapped[str | None] = mapped_column(String(10))
+    status_code: Mapped[int | None] = mapped_column(Integer)
+    # Whole milliseconds: a duration is read for a percentile, never for its sub-ms
+    # precision, and an integer orders the same way on both engines.
+    duration_ms: Mapped[int] = mapped_column(Integer)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
 class RunCompany(Base):
