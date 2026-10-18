@@ -22,10 +22,12 @@ so an alert quotes evidence a person can check and not a summary nobody can.
 over synthetic responses -- no app, no socket, no credential -- by
 `backend/tests/test_impact_check.py`.
 
-A read that does not answer `200` raises `ReadFailed`, which `main` prints and
-turns into a non-zero exit. A broken monitor must not read as a healthy journey,
-and must not read as user impact either, so the workflow opens no `alert` issue
-and goes red instead.
+A read that does not answer `200` -- a non-`200` status, a refused connection, a
+DNS failure, or the socket timeout a cold instance raises out of `read()` -- is
+attempted `READ_ATTEMPTS` times and then raises `ReadFailed`, which `main` prints
+and turns into a non-zero exit. A broken monitor must not read as a healthy
+journey, and must not read as user impact either, so the workflow opens no
+`alert` issue and goes red instead.
 
 No secret is read and nothing private is rendered: the body names run ids,
 statuses, counts, instants and the metrics' route names and numbers, and nothing
@@ -38,6 +40,7 @@ the issue.
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
@@ -82,14 +85,33 @@ RUNS_READ = f"/runs?limit={RUNS_LIMIT}"
 MATCHES_READ = f"/matches?limit={MATCHES_MAX_LIMIT}"
 METRICS_READ = "/telemetry/metrics"
 
+# How many times one read is attempted before it is `ReadFailed`. The read is
+# retried at least once -- a cold free instance answers again within a start or
+# two -- and the bound is named so the hourly run's worst case is visible here:
+# `READ_ATTEMPTS * fetch`'s timeout, no more.
+READ_ATTEMPTS = 3
+
+# How long the check waits between two attempts of one read. Long enough to
+# outlast the first refusal of a waking instance, short enough that the hourly
+# run does not notice it.
+RETRY_DELAY_SECONDS = 2.0
+
 
 class ReadFailed(Exception):
     """One read did not answer `200`, so the journey cannot be judged from outside."""
 
-    def __init__(self, path: str, status: int | None) -> None:
+    def __init__(
+        self, path: str, status: int | None, error: BaseException | None = None
+    ) -> None:
         self.path = path
         self.status = status
-        detail = f"HTTP {status}" if status is not None else "no answer"
+        self.error = error
+        if status is not None:
+            detail = f"HTTP {status}"
+        elif error is not None:
+            detail = f"no answer ({error})"
+        else:
+            detail = "no answer"
         super().__init__(f"{path} did not answer 200 ({detail})")
 
 
@@ -97,23 +119,35 @@ def fetch(base_url: str, path: str, *, timeout: float = 30) -> Any:
     """One JSON read of `base_url + path`, or `ReadFailed` if it did not answer `200`.
 
     A `4xx` or `5xx` is an `HTTPError`, a connection that never answered is a
-    `URLError`, and anything that is not `200` is the same refusal: the caller
-    gets the path and the status it saw, and no body is read into the alert.
+    `URLError`, a DNS failure and a refused connection are the same, and a read
+    timeout is the `TimeoutError`/`OSError` `read()` raises on a cold instance.
+    All of them are one refusal: the caller gets the path and the status or the
+    error it saw, and no body is read into the alert. A read that did not answer
+    is attempted `READ_ATTEMPTS` times, `RETRY_DELAY_SECONDS` apart, and only a
+    `200` ends the retries early.
     """
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}{path}", headers={"Accept": "application/json"}
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-            status = response.status
-            body = response.read()
-    except urllib.error.HTTPError as error:
-        raise ReadFailed(path, error.code) from error
-    except urllib.error.URLError as error:
-        raise ReadFailed(path, None) from error
-    if status != 200:
-        raise ReadFailed(path, status)
-    return json.loads(body)
+    failure: BaseException | None = None
+    for attempt in range(READ_ATTEMPTS):
+        if attempt:
+            time.sleep(RETRY_DELAY_SECONDS)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+                status = response.status
+                body = response.read()
+        except urllib.error.HTTPError as error:
+            raise ReadFailed(path, error.code) from error
+        except (urllib.error.URLError, OSError) as error:
+            # `TimeoutError` is an `OSError`, so this is the read that never
+            # answered as well as the connection that was refused or unresolved.
+            failure = error
+            continue
+        if status != 200:
+            raise ReadFailed(path, status)
+        return json.loads(body)
+    raise ReadFailed(path, None, failure) from failure
 
 
 @dataclass(frozen=True)
