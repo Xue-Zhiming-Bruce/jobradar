@@ -38,6 +38,11 @@ this app's middleware and every response -- the guard's `401`, a `404`, the UI's
 other routers, above the UI mount, so the mount at `/` cannot swallow them; and
 the prune of spans past their retention runs once per process start in the
 lifespan beside `reap_stale_runs()`.
+
+`#101` adds the second sink here, beside the log format and for the same reason:
+`telemetry.configure_export()` reads `OTEL_EXPORTER_OTLP_ENDPOINT` once at import
+and builds the one exporter, or none when it is unset -- so a deployment that does
+not configure an endpoint exports nothing and behaves as `#90` left it.
 """
 
 import os
@@ -133,6 +138,11 @@ app = FastAPI(title=API_TITLE, version=API_VERSION, lifespan=lifespan)
 # line's trace id in a field of its own. `uvicorn` configures its loggers before
 # it imports this module, so its handlers are re-pointed at the same format here.
 telemetry.configure_logging()
+
+# The one exporter, built once at process start from `OTEL_EXPORTER_OTLP_ENDPOINT`
+# (#101): one outbound call per stored span when the variable is set, and no
+# exporter at all when it is not.
+telemetry.configure_export()
 
 # The one guard the hosted MCP endpoint has (#43): the bearer token is read per
 # request and an unset one refuses every request, so the endpoint is off unless an

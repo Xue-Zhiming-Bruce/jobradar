@@ -250,6 +250,7 @@ gitignored -- is where the real values go.
 | `DIGEST_MIN_SCORE` | 70 |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `DIGEST_FROM`, `DIGEST_TO` | the digest sends nothing; a digest with a match to send fails, naming the first required variable that is unset |
 | `STATIC_DIR` | `backend/app/static`, beside `app/main.py`, where the image copies the frontend's build |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | no export: the spans stay in `telemetry_span` and the Telemetry screen, and no collector is called |
 
 With none of them set, `docker compose up --build --wait` is still green:
 `/healthz` answers `{"status":"ok"}`, a tick without `TICK_SECRET` is `401`
