@@ -110,12 +110,15 @@ nav a:hover {
 
 main {
   display: grid;
+  /* minmax(0, 1fr): a wide table inside a panel must not widen the page (#114 AC11). */
+  grid-template-columns: minmax(0, 1fr);
   gap: 24px;
   padding-top: 24px;
 }
 
 /* One screen, one card, the same spacing for all six (#114 AC1). */
 .panel {
+  min-width: 0;
   padding: 20px;
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -282,14 +285,10 @@ ul {
   color: var(--text-h);
 }
 
-/* A long name, title or reason wraps inside its own card (#114 AC10). */
+/* A long company name, match title or reason wraps inside its own card (#114 AC10). */
+table.watchlist tbody th,
 .match-title,
 .match-reason,
-.score,
-th,
-td,
-h1,
-h2,
 figcaption {
   overflow-wrap: anywhere;
 }
