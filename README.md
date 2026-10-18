@@ -421,7 +421,8 @@ deterministic path and is not a failure. A required value that is unset fails th
 job with an `::error::` naming it rather than skipping.
 
 A gateway key needs two more **optional repository variables**, `LLM_MODEL` and
-`LLM_BASE_URL`, which the wake's decide step and both proposal steps are handed: a
+`LLM_BASE_URL`, which the wake's decide step, both proposal steps and the scheduled
+re-check are handed: a
 key whose gateway is not OpenAI's would otherwise be sent to OpenAI's own endpoint
 and answer `401` even though the key is valid. Both are unset in a default
 repository, and unset or empty changes nothing — the responder and the proposer
@@ -502,10 +503,11 @@ with a token that may push a branch:
 A wake fires once, when the `alert` label arrives. A remediation that did not hold,
 or an escalation nobody picked up, would therefore stay silent until a person
 looked — so `oncall.yml` also runs **every hour, at half past**, half an hour
-after `alert.yml`'s own hourly check, and starts `ops/oncall/recheck.py`. The
-scheduled job and the two `issues` jobs are the same workflow file; each is guarded
-to its own event, so the schedule starts the re-check and never a wake or a
-proposal.
+after `alert.yml`'s own hourly check, and starts `ops/oncall/recheck.py`. It reads
+the same optional `LLM_MODEL` and `LLM_BASE_URL` as the wake, so a gateway key works
+on the unattended path too. The scheduled job and the two `issues` jobs are the same
+workflow file; each is guarded to its own event, so the schedule starts the re-check
+and never a wake or a proposal.
 
 One scheduled run reads every open `alert` issue and makes **one attempt** per
 incident: it reads the deployed app's own signals again — the same `GET /healthz`,
