@@ -262,6 +262,13 @@ def test_a_retrigger_that_failed_again_is_proposed() -> None:
     assert outcome.proposal is not None
 
 
+def test_an_escalation_is_proposed() -> None:
+    """`Fixed: not verified` is the other incident the bounded action set left unfixed."""
+    outcome, _, _ = propose_offline((responder_answer(None),))
+
+    assert outcome.proposal is not None
+
+
 # AC1: the incidents this path must not propose over.
 
 
