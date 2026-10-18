@@ -198,12 +198,14 @@ rules are in `_docs/process.md`.
 
 **Data rules.** A resume is uploaded to a running instance at runtime — never as
 part of the repository — and is stored outside it, in `UPLOADS_DIR` (a volume
-under compose, `~/.jobradar/uploads` otherwise), so it survives a redeploy. Its
-text is user data: it is never logged, never returned to a client and never
-committed, and neither is the database file. Secrets live in `.env`, which is
-gitignored, and in a deployment they arrive as the platform's environment
-variables (Render) and GitHub repository secrets. The names are the
-Configuration table below; no value ever appears in this file.
+under compose, `~/.jobradar/uploads` otherwise), so it survives a restart there;
+the deployed instance attaches no disk, so a redeploy there loses it. Its text
+is user data: it is never logged, never returned to a client except through the
+app's own `GET /resume/{id}/file`, and never committed, and neither is the
+database file. Secrets live in `.env`, which is gitignored, and in a deployment
+they arrive as the platform's environment variables (Render) and GitHub
+repository secrets. The names are the Configuration table below; no value ever
+appears in this file.
 
 The rule is enforced, not remembered: `backend/tests/test_committed_data_guard.py`
 runs in the default suite — so `uv run pytest` fails locally on it — and as one
@@ -858,21 +860,58 @@ are all this file carries:
     SMTP_HOST  SMTP_PORT  SMTP_USERNAME  SMTP_PASSWORD  DIGEST_FROM  DIGEST_TO
 
 The "Configuration" table above says what each one means and what an unset one
-means. A production instance sets them for real, and points `UPLOADS_DIR` at a
-volume rather than at the repository, because a resume is stored outside the
-repository and has to survive a redeploy.
+means. A production instance sets them for real, and points `UPLOADS_DIR` outside
+the repository rather than into it: a resume is uploaded at runtime, so the
+directory it lands in is not one git tracks.
 
-The remaining steps — creating the service, attaching the database, setting the
-variables — need the owner's own Render and Neon accounts and are #16. None of
-them was performed to write this file, and the file therefore states no URL: #46
-adds the deployed-instance evidence once #16 exists.
+**The instance is live at <https://jobradar-c75b.onrender.com>** — the only new
+address this file states. `GET /` answered `200` with `text/html; charset=utf-8`:
+the frontend build, not a Render error page and not bare JSON (checked
+2026-10-18).
+
+**The uploaded resume and the matches scored against it, on that instance**
+(checked 2026-10-18). `POST /resume` accepted a synthetic resume and answered
+`201`; the active resume row is id 2. No resume text, file name, candidate detail
+or email is quoted here or anywhere else in this file. `GET /matches` on the same
+instance then answered rows scored against it. Read from the deployed database:
+80 `match` rows hold `outcome = 'scored'`, 75 of them a score of 1 or more, over
+the 0 to 30 range the scorer produces, and the rows name the model
+`deepseek/deepseek-v4.1-flash` with prompt version 1 as their provenance. The
+press that wrote them is run id 6 — `succeeded`, `2026-10-18T12:44:56Z` to
+`12:49:35Z`, 50 matches decided. Those 50 keep the `created_at` of the run that
+first scored them, because a re-match updates the `match` row its posting already
+keys rather than inserting one.
+
+**The free tier's spin-down and cold start, as observed.** On 2026-10-17 23:36
++08, after a quiet period with no traffic, the first request failed at 60 s — the
+connection dropped, which is what a spun-down instance does — and the next
+request answered `200` at +62 s: a cold start of about a minute, consistent with
+the 15-minute idle spin-down `_docs/plan.md` records. A restart that changed an
+environment variable was measured the same way on 2026-10-18 20:44 +08:
+`/healthz` answered `200` in 31 s.
+
+**The database is Neon Postgres**, on its `production` branch
+(`_docs/decisions/2026-10-11-deploy-and-repo.md`), and not Render's free Postgres:
+Render deletes that 30 days after creation, which would break a review that opens
+weeks after submission. The deployed instance's environment variables are set in
+Render's dashboard, and no value of any of them appears in this file.
+
+**A resume uploaded there is stored on the instance's ephemeral filesystem.** No
+persistent disk is attached to the service, so the file is written outside the
+repository, is never committed and never logged, does not survive a redeploy — a
+redeploy starts a fresh filesystem — and is reachable only through the app's own
+`GET /resume/{id}/file` route.
+
+The remaining steps of the deployment — creating the service, attaching the
+database, setting the variables — need the owner's own Render and Neon accounts
+and are #16.
 
 ### Rollback
 
 A bad green `main` deploys itself: `deploy.yml` deploys the revision CI passed, so
 undoing one is two moves — get production off the bad revision, then make that
 permanent in git. Both need `RENDER_API_KEY` and `RENDER_SERVICE_ID` exported in
-your own shell; no value, no service id and no hostname is written in this file.
+your own shell; no value of either and no service id is written in this file.
 
 1. **Put the last known-good commit back.** `ops/rollback.sh` reads Render's
    newest 20 deploys, takes the `commit.id` of the newest `live` deploy as the
@@ -961,8 +1000,8 @@ Each with what it costs, because a limitation without a consequence is a slogan.
 - **The free tier sleeps.** `_docs/plan.md`'s "Known constraints" records that a
   Render free instance spins down after 15 minutes idle and takes about a minute
   to wake, so the first request after a quiet period is slow. That is the free
-  tier's documented behaviour rather than an observation made here — #46 owns the
-  observed numbers.
+  tier's documented behaviour, and the deployed instance was observed doing it —
+  the numbers are under **Deploy** above.
 
 ## Security, audit and DevOps artifacts
 
