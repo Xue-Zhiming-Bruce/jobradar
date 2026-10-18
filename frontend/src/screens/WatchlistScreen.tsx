@@ -85,7 +85,7 @@ export default function WatchlistScreen() {
   }
 
   return (
-    <section>
+    <section id="watchlist" className="panel">
       <h2>Watched companies</h2>
       <form onSubmit={add}>
         <label>
@@ -112,51 +112,75 @@ export default function WatchlistScreen() {
       {listError !== null ? (
         <p role="alert">{listError}</p>
       ) : companies === null ? (
-        <p>{LOADING}</p>
+        <p className="state">{LOADING}</p>
       ) : companies.length === 0 ? (
-        <p>{EMPTY}</p>
+        <p className="state">{EMPTY}</p>
       ) : (
-        <ul>
-          {companies.map((company) => (
-            <li key={company.id}>
-              <span>
-                {company.name} ({company.slug})
-              </span>
-              <span>{company.source}</span>
-              {!company.isActive && <span>Inactive</span>}
-              <form onSubmit={(event) => rename(event, company.id)}>
-                <label>
-                  New name
-                  <input name="name" defaultValue={company.name} />
-                </label>
-                <button type="submit">Rename</button>
-              </form>
-              <form onSubmit={(event) => move(event, company.id)}>
-                <label>
-                  New board slug
-                  <input
-                    name="slug"
-                    defaultValue={company.slug}
-                    aria-describedby={`slug-cost-${company.id}`}
-                  />
-                </label>
-                <button type="submit">Move to board</button>
-                <span id={`slug-cost-${company.id}`}>
-                  Moving closes this board's open postings; its matches are kept.
-                </span>
-              </form>
-              <button
-                type="button"
-                onClick={() => edit(company.id, { is_active: !company.isActive })}
-              >
-                {company.isActive ? 'Deactivate' : 'Activate'}
-              </button>
-              <button type="button" onClick={() => remove(company.id)}>
-                Remove
-              </button>
-            </li>
-          ))}
-        </ul>
+        // One row per company, its own controls in its own cells (#114 AC4).
+        <div className="table-scroll">
+          <table className="watchlist">
+            <caption>Watched companies, their boards and their controls</caption>
+            <thead>
+              <tr>
+                <th scope="col">Company</th>
+                <th scope="col">Source</th>
+                <th scope="col">Status</th>
+                <th scope="col">Rename</th>
+                <th scope="col">Move to board</th>
+                <th scope="col">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {companies.map((company) => (
+                <tr key={company.id}>
+                  <th scope="row">
+                    {company.name} ({company.slug})
+                  </th>
+                  <td>{company.source}</td>
+                  <td>{company.isActive ? 'Active' : 'Inactive'}</td>
+                  <td>
+                    <form onSubmit={(event) => rename(event, company.id)}>
+                      <label>
+                        New name
+                        <input name="name" defaultValue={company.name} />
+                      </label>
+                      <button type="submit">Rename</button>
+                    </form>
+                  </td>
+                  <td>
+                    <form onSubmit={(event) => move(event, company.id)}>
+                      <label>
+                        New board slug
+                        <input
+                          name="slug"
+                          defaultValue={company.slug}
+                          aria-describedby={`slug-cost-${company.id}`}
+                        />
+                      </label>
+                      <button type="submit">Move to board</button>
+                      <span id={`slug-cost-${company.id}`} className="hint">
+                        Moving closes this board's open postings; its matches are kept.
+                      </span>
+                    </form>
+                  </td>
+                  <td>
+                    <div className="match-actions">
+                      <button
+                        type="button"
+                        onClick={() => edit(company.id, { is_active: !company.isActive })}
+                      >
+                        {company.isActive ? 'Deactivate' : 'Activate'}
+                      </button>
+                      <button type="button" onClick={() => remove(company.id)}>
+                        Remove
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   )

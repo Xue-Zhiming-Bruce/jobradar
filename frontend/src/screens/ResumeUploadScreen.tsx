@@ -40,7 +40,7 @@ export default function ResumeUploadScreen() {
   }
 
   return (
-    <section>
+    <section id="resume" className="panel">
       <h2>Resume</h2>
       <form onSubmit={upload}>
         <label>
@@ -53,13 +53,13 @@ export default function ResumeUploadScreen() {
         </label>
         <button type="submit">Upload resume</button>
       </form>
-      {active !== null && <p>Active resume: {active.filename}</p>}
+      {active !== null && <p className="state">Active resume: {active.filename}</p>}
       {error !== null ? (
         <p role="alert">{error}</p>
       ) : uploading ? (
-        <p>{LOADING}</p>
+        <p className="state">{LOADING}</p>
       ) : active === null ? (
-        <p>{EMPTY}</p>
+        <p className="state">{EMPTY}</p>
       ) : null}
     </section>
   )

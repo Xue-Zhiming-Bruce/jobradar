@@ -235,7 +235,7 @@ export default function TelemetryChart({ traces, readAt }: { traces: Trace[]; re
     .flatMap((trace) => trace.spans)
     .filter((span) => insideWindow(span, firstMinute, lastMinute))
 
-  if (spans.length === 0) return <p>{EMPTY_CHART}</p>
+  if (spans.length === 0) return <p className="state">{EMPTY_CHART}</p>
 
   const buckets = bucketsOf(spans, firstMinute)
 

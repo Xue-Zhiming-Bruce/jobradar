@@ -31,7 +31,7 @@ export default function RunDigestNow() {
   const traceId = run?.traceId ?? null
 
   return (
-    <section>
+    <section id="digest" className="panel">
       <h2>Digest</h2>
       <button type="button" onClick={press}>
         Run digest now
@@ -66,7 +66,7 @@ export default function RunDigestNow() {
       {failedBoards.length > 0 && (
         <>
           <p>Boards the run could not fetch:</p>
-          <ul>
+          <ul className="boards">
             {failedBoards.map((board) => (
               <li key={board.companyId}>
                 {board.error === null ? board.slug : `${board.slug}: ${board.error}`}

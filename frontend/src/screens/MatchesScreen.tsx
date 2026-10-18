@@ -17,26 +17,39 @@ const GROUPS = [
   { state: 'dismissed', title: 'Dismissed matches' },
 ]
 
+/**
+ * One match, as a card of its own: who and what, the score, the reason, the gaps
+ * as chips and the two verdict controls (#114 AC3). The gaps are chips and not a
+ * nested list, so a row holds no list of its own.
+ */
 function MatchRow({ match, judge }: { match: Match; judge: (state: MatchState) => void }) {
   return (
-    <li>
-      <p>
-        {match.companyName}: {match.title}
-      </p>
-      <p>Score: {match.score}</p>
-      <p>{match.reason}</p>
-      <ul>
-        {match.gaps.map((gap) => (
-          <li key={gap}>{gap}</li>
-        ))}
-      </ul>
+    <li className="match">
+      <div className="match-head">
+        <p className="match-title">
+          {match.companyName}: {match.title}
+        </p>
+        <span className="score">Score: {match.score}</span>
+      </div>
+      <p className="match-reason">{match.reason}</p>
+      {match.gaps.length > 0 && (
+        <p className="chips">
+          {match.gaps.map((gap) => (
+            <span className="chip" key={gap}>
+              {gap}
+            </span>
+          ))}
+        </p>
+      )}
       <p>State: {match.state}</p>
-      <button type="button" onClick={() => judge('saved')}>
-        Save
-      </button>
-      <button type="button" onClick={() => judge('dismissed')}>
-        Dismiss
-      </button>
+      <div className="match-actions">
+        <button type="button" onClick={() => judge('saved')}>
+          Save
+        </button>
+        <button type="button" onClick={() => judge('dismissed')}>
+          Dismiss
+        </button>
+      </div>
     </li>
   )
 }
@@ -82,20 +95,20 @@ export default function MatchesScreen() {
   }
 
   return (
-    <section>
+    <section id="matches" className="panel">
       <h2>Matches</h2>
       {verdictError !== null && <p role="alert">{verdictError}</p>}
       {listError !== null ? (
         <p role="alert">{listError}</p>
       ) : matches === null ? (
-        <p>{LOADING}</p>
+        <p className="state">{LOADING}</p>
       ) : matches.length === 0 ? (
-        <p>{EMPTY}</p>
+        <p className="state">{EMPTY}</p>
       ) : (
         GROUPS.map((group) => (
           <section key={group.state}>
             <h3>{group.title}</h3>
-            <ul aria-label={group.title}>
+            <ul className="matches" aria-label={group.title}>
               {matches
                 .filter((match) => match.state === group.state)
                 .map((match) => (
