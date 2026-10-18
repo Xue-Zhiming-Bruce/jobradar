@@ -7,13 +7,13 @@
   --accent: #aa3bff;
   --accent-bg: rgba(170, 59, 255, 0.1);
   --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
+  --danger: #b3261e;
+  --danger-bg: #fdecea;
   --shadow:
     rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
 
   --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
   --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
 
   font: 18px/145% var(--sans);
   letter-spacing: 0.18px;
@@ -40,25 +40,16 @@
     --accent: #c084fc;
     --accent-bg: rgba(192, 132, 252, 0.15);
     --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
+    --danger: #f2b8b5;
+    --danger-bg: rgba(242, 184, 181, 0.12);
     --shadow:
       rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
   }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
 }
 
-#root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
@@ -66,56 +57,363 @@ body {
   margin: 0;
 }
 
+/* The one page: a bounded readable column, left-aligned, data included (#114 AC1). */
+#root {
+  max-width: 1126px;
+  margin: 0 auto;
+  padding: 0 20px 64px;
+  min-height: 100svh;
+  text-align: left;
+}
+
+/*
+ * The nav's own fragment shows the screen it names -- and the screen an in-page
+ * link lands in -- while the page with no fragment shows all six (#114 AC2).
+ */
+main:has(:target) > .panel:not(:target):not(:has(:target)) {
+  display: none;
+}
+
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 20px;
+  padding: 16px 0 12px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+nav a {
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 15px;
+  text-decoration: none;
+}
+
+nav a:hover {
+  color: var(--text-h);
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+}
+
+main {
+  display: grid;
+  gap: 24px;
+  padding-top: 24px;
+}
+
+/* One screen, one card, the same spacing for all six (#114 AC1). */
+.panel {
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: var(--shadow);
+  /* The sticky header would otherwise cover the heading a fragment lands on. */
+  scroll-margin-top: 76px;
+}
+
 h1,
 h2 {
   font-family: var(--heading);
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-h);
 }
 
 h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
+  font-size: 26px;
+  letter-spacing: -0.52px;
+  margin: 0;
 }
+
 h2 {
-  font-size: 24px;
+  font-size: 20px;
   line-height: 118%;
   letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
+  margin: 0 0 12px;
 }
+
+h3 {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text);
+  margin: 20px 0 8px;
+}
+
 p {
   margin: 0;
 }
 
-code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
+/* The three outcomes of a read, legible inside the panel that owns them (#114 AC9). */
+.state {
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+/* Locked down last, because a state can also be a refusal (#114 AC9). */
+[role='alert'] {
+  padding: 8px 10px;
+  border: 1px solid var(--danger);
+  border-left-width: 4px;
+  border-radius: 8px;
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: 14px;
+}
+
+/* One visual language for every control, with its own hover, focus and disabled state (#114 AC7). */
+form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 14px;
+}
+
+input,
+select {
+  font: inherit;
+  font-size: 15px;
+  min-width: 0;
+  padding: 6px 8px;
+  color: var(--text-h);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+input[type='file'] {
+  padding: 5px;
+  background: var(--code-bg);
+}
+
+button {
+  font: inherit;
+  font-size: 15px;
+  padding: 7px 14px;
+  color: var(--text-h);
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+input:hover:not(:disabled),
+select:hover:not(:disabled),
+button:hover:not(:disabled) {
+  border-color: var(--accent-border);
+}
+
+button:hover:not(:disabled) {
+  background: var(--accent-bg);
+}
+
+button:disabled,
+input:disabled,
+select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* A board the run could not fetch, one line each (#114 AC9). */
+.boards {
+  display: grid;
+  gap: 4px;
+  font-size: 15px;
+}
+
+/* One match per card: its company and title, its score, its reason and its chips (#114 AC3). */
+.matches {
+  display: grid;
+  gap: 10px;
+}
+
+.match {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.match-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+
+.match-title {
+  font-weight: 600;
   color: var(--text-h);
 }
 
-code {
+/* A long name, title or reason wraps inside its own card (#114 AC10). */
+.match-title,
+.match-reason,
+.score,
+th,
+td,
+h1,
+h2,
+figcaption {
+  overflow-wrap: anywhere;
+}
+
+.score {
+  font-size: 20px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-h);
+  white-space: nowrap;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  padding: 2px 8px;
+  font-size: 12px;
+  color: var(--text-h);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+}
+
+.match-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* A table wider than its panel scrolls inside the panel, never the page (#114 AC11). */
+.table-scroll {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
   font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
+}
+
+/* Six columns of controls: the panel scrolls them rather than crushing them. */
+table.watchlist {
+  min-width: 40rem;
+}
+
+caption {
+  padding-bottom: 8px;
+  font-size: 14px;
+  text-align: left;
+  color: var(--text);
+}
+
+th,
+td {
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+}
+
+thead th {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--text-h);
+}
+
+tbody th {
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+/* A row's own rename and move controls stack, so a narrow column cannot clip them. */
+td form {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+tbody tr:hover {
   background: var(--code-bg);
+}
+
+.table-scroll + .table-scroll {
+  margin-top: 12px;
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--text);
+}
+
+figure {
+  margin: 16px 0 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+figcaption {
+  margin-bottom: 8px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+/* The plot scales to its panel instead of pushing the page sideways (#114 AC10, AC11). */
+figure svg {
+  display: block;
+  width: 100%;
+  height: auto;
 }
 
 /* The chart's legend: each series named beside its own color (#94 AC7). */
 .chart-legend {
   display: flex;
-  justify-content: center;
-  gap: 16px;
-  margin: 0;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 8px 0 0;
   padding: 0;
   list-style: none;
 }
@@ -131,4 +429,20 @@ code {
   width: 10px;
   height: 10px;
   border-radius: 2px;
+}
+
+@media (max-width: 700px) {
+  #root {
+    padding: 0 12px 48px;
+  }
+
+  .panel {
+    padding: 14px;
+  }
+
+  /* Wrapped onto three lines, the header stops being worth a fixed slice. */
+  .site-header {
+    position: static;
+    padding: 12px 0 8px;
+  }
 }

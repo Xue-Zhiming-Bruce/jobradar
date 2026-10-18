@@ -80,33 +80,35 @@ export default function TelemetryScreen() {
   }, [])
 
   return (
-    <section>
+    <section id="telemetry" className="panel">
       <h2>Telemetry</h2>
       <section>
         <h3>Route metrics</h3>
         {metricsError !== null ? (
           <p role="alert">{metricsError}</p>
         ) : metrics === null ? (
-          <p>{LOADING_METRICS}</p>
+          <p className="state">{LOADING_METRICS}</p>
         ) : metrics.length === 0 ? (
-          <p>{EMPTY_METRICS}</p>
+          <p className="state">{EMPTY_METRICS}</p>
         ) : (
-          <table>
-            <caption>Requests, errors and p95 duration per route in the window</caption>
-            <thead>
-              <tr>
-                <th scope="col">Route</th>
-                <th scope="col">Requests</th>
-                <th scope="col">Errors</th>
-                <th scope="col">p95</th>
-              </tr>
-            </thead>
-            <tbody>
-              {metrics.map((metric) => (
-                <MetricRow key={metric.route} metric={metric} />
-              ))}
-            </tbody>
-          </table>
+          <div className="table-scroll">
+            <table>
+              <caption>Requests, errors and p95 duration per route in the window</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Route</th>
+                  <th scope="col">Requests</th>
+                  <th scope="col">Errors</th>
+                  <th scope="col">p95</th>
+                </tr>
+              </thead>
+              <tbody>
+                {metrics.map((metric) => (
+                  <MetricRow key={metric.route} metric={metric} />
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
       {/*
@@ -120,30 +122,32 @@ export default function TelemetryScreen() {
         {tracesError !== null ? (
           <p role="alert">{tracesError}</p>
         ) : traces === null ? (
-          <p>{LOADING_TRACES}</p>
+          <p className="state">{LOADING_TRACES}</p>
         ) : traces.rows.length === 0 ? (
-          <p>{EMPTY_TRACES}</p>
+          <p className="state">{EMPTY_TRACES}</p>
         ) : (
           // Newest first, and each trace's spans in start order: the route's own
           // order, rendered as it arrived. Each table carries the anchor the run
           // screen's fragment names, so a run reaches its own trace (#95 AC2).
           traces.rows.map((trace) => (
-            <table key={trace.traceId} id={traceAnchorId(trace.traceId)}>
-              <caption>Trace {trace.traceId}</caption>
-              <thead>
-                <tr>
-                  <th scope="col">Span</th>
-                  <th scope="col">Route</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">Duration</th>
-                </tr>
-              </thead>
-              <tbody>
-                {trace.spans.map((span) => (
-                  <SpanRow key={span.id} span={span} />
-                ))}
-              </tbody>
-            </table>
+            <div className="table-scroll" key={trace.traceId}>
+              <table id={traceAnchorId(trace.traceId)}>
+                <caption>Trace {trace.traceId}</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Span</th>
+                    <th scope="col">Route</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Duration</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trace.spans.map((span) => (
+                    <SpanRow key={span.id} span={span} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
           ))
         )}
       </section>

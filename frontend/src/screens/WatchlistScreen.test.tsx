@@ -17,8 +17,8 @@ function withheld() {
   return { promise, release }
 }
 
-/** The list row a company is rendered in, so a button is clicked on its own row. */
-const row = (text: string) => screen.getByText(text).closest('li') as HTMLElement
+/** The table row a company is rendered in, so a button is clicked on its own row. */
+const row = (text: string) => screen.getByText(text).closest('tr') as HTMLElement
 
 /** The two rows the edit cases start from: Acme on Greenhouse, Globex on Lever. */
 const twoRows = [
@@ -498,7 +498,7 @@ describe("the watchlist screen's board move", () => {
     })
     moveRow('Acme (acme)', 'acme-corp')
 
-    const movedRow = (await screen.findByText('Acme (acme-corp)')).closest('li') as HTMLElement
+    const movedRow = (await screen.findByText('Acme (acme-corp)')).closest('tr') as HTMLElement
     expect(await within(movedRow).findByText('Inactive')).toBeDefined()
     expect(within(movedRow).getByText('lever')).toBeDefined()
     expect(within(movedRow).getByRole('button', { name: 'Activate' })).toBeDefined()
@@ -524,13 +524,13 @@ describe("the watchlist screen's board move", () => {
       )
       render(<WatchlistScreen />)
       await screen.findByText('Acme (acme)')
-      const before = screen.getAllByRole('listitem').map((listItem) => listItem.outerHTML)
+      const before = screen.getAllByRole('row').map((tableRow) => tableRow.outerHTML)
 
       moveRow('Acme (acme)', 'acme-corp')
 
       expect((await screen.findByRole('alert')).textContent).toBe(detail)
       expect(written).toEqual([{ path: '/watchlist/1', body: { slug: 'acme-corp' } }])
-      expect(screen.getAllByRole('listitem').map((listItem) => listItem.outerHTML)).toEqual(before)
+      expect(screen.getAllByRole('row').map((tableRow) => tableRow.outerHTML)).toEqual(before)
       // The refused slug stays in the field, so it can be corrected.
       expect(
         (within(row('Acme (acme)')).getByLabelText('New board slug') as HTMLInputElement).value,

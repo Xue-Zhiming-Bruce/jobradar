@@ -12,7 +12,7 @@ export default function RematchStoredPostings() {
   const notRematched = run?.postingsNotRematched ?? 0
 
   return (
-    <section>
+    <section id="rematch" className="panel">
       <h2>Re-match</h2>
       <button type="button" onClick={press}>
         Re-match stored postings
