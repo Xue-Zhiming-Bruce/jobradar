@@ -6,6 +6,7 @@ import {
   type Trace,
   type TraceSpan,
 } from '../api/client'
+import TelemetryChart from './TelemetryChart'
 
 /*
  * Three outcomes a reader can tell apart, per read: not read yet, read and
@@ -48,22 +49,33 @@ function SpanRow({ span }: { span: TraceSpan }) {
   )
 }
 
+/** The traces read's answer, and the instant it answered: the chart's window ends at that minute. */
+type TracesRead = {
+  rows: Trace[]
+  readAt: number
+}
+
 /** The metrics and the recent traces `#90` stores, read from the two telemetry routes. */
 export default function TelemetryScreen() {
   // `null` is "not read yet" for each read alone, so loading and empty stay two
   // screens, and one read's outcome never stands in for the other's.
   const [metrics, setMetrics] = useState<RouteMetric[] | null>(null)
   const [metricsError, setMetricsError] = useState<string | null>(null)
-  const [traces, setTraces] = useState<Trace[] | null>(null)
+  const [traces, setTraces] = useState<TracesRead | null>(null)
   const [tracesError, setTracesError] = useState<string | null>(null)
 
   useEffect(() => {
     listRouteMetrics().then(setMetrics, (failure: unknown) => {
       setMetricsError(failure instanceof Error ? failure.message : String(failure))
     })
-    listTraces().then(setTraces, (failure: unknown) => {
-      setTracesError(failure instanceof Error ? failure.message : String(failure))
-    })
+    // The rows and the instant they answered are set together: the chart's window
+    // ends at that minute and does not slide under a reader (#94 AC1).
+    listTraces().then(
+      (rows) => setTraces({ rows, readAt: Date.now() }),
+      (failure: unknown) => {
+        setTracesError(failure instanceof Error ? failure.message : String(failure))
+      },
+    )
   }, [])
 
   return (
@@ -96,18 +108,24 @@ export default function TelemetryScreen() {
           </table>
         )}
       </section>
+      {/*
+       * Under the per-route table and over the trace list: the window's series,
+       * derived from the traces read and never a read of its own. A refused read
+       * never settles `traces`, so it draws no chart beside its own alert (#94 AC8).
+       */}
+      {traces !== null && <TelemetryChart traces={traces.rows} readAt={traces.readAt} />}
       <section>
         <h3>Recent traces</h3>
         {tracesError !== null ? (
           <p role="alert">{tracesError}</p>
         ) : traces === null ? (
           <p>{LOADING_TRACES}</p>
-        ) : traces.length === 0 ? (
+        ) : traces.rows.length === 0 ? (
           <p>{EMPTY_TRACES}</p>
         ) : (
           // Newest first, and each trace's spans in start order: the route's own
           // order, rendered as it arrived.
-          traces.map((trace) => (
+          traces.rows.map((trace) => (
             <table key={trace.traceId}>
               <caption>Trace {trace.traceId}</caption>
               <thead>
