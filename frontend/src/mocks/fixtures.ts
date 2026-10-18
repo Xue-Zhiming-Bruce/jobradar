@@ -26,6 +26,9 @@ export const runSummary = {
   matches_emailed: null,
   companies_not_fetched: null,
   postings_not_rematched: null,
+  // The trace of the request that started this run (#102): the id `traces` below
+  // holds the tick's own span and the run's under.
+  trace_id: '4bf92f3577b34da6a3ce929d0e0e4736',
   // No company has been attempted yet, so the list the `202` answers with is empty.
   company_outcomes: [],
 }
@@ -42,6 +45,8 @@ export const runSucceeded = {
   matches_emailed: 3,
   companies_not_fetched: null,
   postings_not_rematched: null,
+  // The same request's trace as `runSummary` above: the mock's one press (#102).
+  trace_id: '4bf92f3577b34da6a3ce929d0e0e4736',
   company_outcomes: [
     { company_id: 1, slug: 'acme', outcome: 'fetched', error: null },
     { company_id: 2, slug: 'globex', outcome: 'not_modified', error: null },
