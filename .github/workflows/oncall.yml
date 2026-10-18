@@ -1,6 +1,6 @@
-# On-call: one GitHub issue labelled `alert` wakes one responder run, and -- when the
-# incident it answers is not fixed -- one path that proposes a code fix behind a human
-# review gate.
+# On-call: one GitHub issue labelled `alert` wakes one responder run, an hourly schedule
+# re-checks a still-open incident without anyone watching, and -- when the incident it
+# answers is not fixed -- one path that proposes a code fix behind a human review gate.
 #
 # This is the responder half of #92. `alert.yml` opens at most one open issue
 # labelled `alert` when its hourly impact check finds user impact; this file wakes
@@ -37,6 +37,22 @@
 # that quietly does nothing is indistinguishable from one nobody noticed had
 # stopped working.
 #
+# The `recheck` job is #97's scheduled half, and it is what makes the agent unattended.
+# A wake fires once, when the label arrives; a remediation that did not hold, or an
+# escalation nobody picked up, would otherwise stay silent until a person looked. So the
+# workflow also runs hourly, half an hour after `alert.yml`'s own hourly check, and
+# `ops/oncall/recheck.py` re-reads every open `alert` issue: it reads the deployed app's
+# own signals again and answers again, through the responder's own evidence read, action
+# set and escalation rule (`responder.decide_and_act`) rather than a second copy of
+# either, and its comment quotes the responder's own answer verbatim. It is bounded: at
+# most `MAX_ATTEMPTS` attempts per incident, the last one's comment carrying the single
+# notice that names it stopped and what a person must do, and every later run does
+# nothing at all. It cannot trigger itself -- no path schedules, dispatches, labels or
+# reopens anything, a comment fires `issue_comment` rather than the `issues` event the
+# wake reads, and this job is granted no `actions: write`, so no run of it can start
+# another. The two `issues` jobs below are therefore guarded to the `issues` event alone:
+# the schedule starts `recheck` and nothing else.
+#
 # The second job is #96's proposal path. It runs after the wake, on the same `alert`
 # issue, and declines anything the responder verified as fixed (`- **Fixed:** yes`),
 # anything the responder has not answered, a closed issue, and an incident it has
@@ -65,6 +81,11 @@
 #   JOBRADAR_URL=http://127.0.0.1:8123 ISSUE_NUMBER=<n> \
 #     python3 ops/oncall/responder.py
 #
+# and, for the scheduled re-check alone -- the open `alert` issues of the repository
+# `gh` is authenticated against, one attempt each:
+#
+#   JOBRADAR_URL=http://127.0.0.1:8123 GH_TOKEN=${GH_TOKEN} python3 ops/oncall/recheck.py
+#
 # and, for the proposal path alone -- a login whose review is requested, and
 # `LLM_API_KEY` and `GH_TOKEN` from your own shell (the latter with `contents: write`
 # and `pull-requests: write`):
@@ -87,18 +108,29 @@
 # The trigger carries one named limit: an `issues`-event workflow only fires once
 # its file is on the default branch, so neither the wake nor the proposal below can be
 # recorded from the branch that adds this file -- both start working when it reaches
-# `main`.
+# `main`. The same is true of the `schedule` above (#97): a cron only starts once the
+# workflow is on the default branch, so the first scheduled re-check happens after
+# `oncall.yml` merges, and #97's own recorded run waits for that.
 
 name: On-call
 
 on:
   issues:
     types: [opened, labeled]
+  # #97's unattended re-check: half an hour after `alert.yml`'s own hourly check, so the
+  # re-check sees the state a wake has already acted on. The schedule is best-effort,
+  # like `tick.yml`'s and `alert.yml`'s: cron drifts, a run can be skipped, and the
+  # schedule is disabled after 60 days of repository inactivity.
+  schedule:
+    - cron: "30 * * * *"
 
 permissions:
   contents: read
   issues: write
 
+# One issue number is one group, so the `opened` and `labeled` deliveries of one alert
+# serialise; a scheduled run carries no issue number, so the scheduled runs serialise
+# among themselves under this same group.
 concurrency:
   group: oncall-${{ github.event.issue.number }}
   cancel-in-progress: false
@@ -109,9 +141,10 @@ jobs:
     # `ops/rollback.sh` allows 5 minutes to be listed and 15 to `live`, then the
     # responder waits up to 5 more for `/healthz`; 30 is `deploy.yml`'s own cap.
     timeout-minutes: 30
-    # Only an `alert` issue wakes the responder. The label is spelled once here;
+    # Only an `alert` issue wakes the responder, and only the `issues` event: the
+    # `schedule` above must never start a wake. The label is spelled once here;
     # `alert.yml` applies the same one.
-    if: contains(github.event.issue.labels.*.name, 'alert')
+    if: github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'alert')
     steps:
       - uses: actions/checkout@v7
 
@@ -171,7 +204,7 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
-    if: contains(github.event.issue.labels.*.name, 'alert')
+    if: github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'alert')
     steps:
       - uses: actions/checkout@v7
 
@@ -208,3 +241,55 @@ jobs:
           PROPOSAL_REVIEWER: ${{ github.repository_owner }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 ops/oncall/proposer.py
+
+  # #97's scheduled re-check. It runs for the `schedule` event alone -- never for an
+  # `issues` event, which the wake and the proposal above already answer -- on every open
+  # `alert` issue, and `ops/oncall/recheck.py` makes at most one bounded attempt each.
+  # Its `permissions` are the smallest this path needs and deliberately no larger: it
+  # reads the repository and the app, comments and closes an issue, and is granted no
+  # `actions: write`, so it cannot start a run of its own, and no `contents: write`, so it
+  # cannot push. The comment it writes fires `issue_comment`, not the `issues` event
+  # above, and it re-adds no label, so a re-check cannot wake the responder either.
+  recheck:
+    runs-on: ubuntu-latest
+    # A re-check makes at most one attempt per open issue, and an attempt is bounded by
+    # the same `ops/rollback.sh` and `/healthz` waits a wake is; 30 matches the wake's cap.
+    timeout-minutes: 30
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v7
+
+      # The same three values the wake needs, for the same reason: a re-check reads the
+      # app and can roll it back, so an unset one is a loud red run with an annotation
+      # naming it rather than a re-check that quietly reports nothing. `LLM_API_KEY` is
+      # optional here exactly as it is for a wake: unset means the deterministic path.
+      - name: Require JOBRADAR_URL, RENDER_API_KEY and RENDER_SERVICE_ID
+        env:
+          JOBRADAR_URL: ${{ vars.JOBRADAR_URL }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          missing=0
+          for name in JOBRADAR_URL RENDER_API_KEY RENDER_SERVICE_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::${name} is unset or empty, so the scheduled re-check cannot read the app or roll it back."
+              missing=1
+            fi
+          done
+          if [ "${missing}" -ne 0 ]; then
+            echo "::error::No re-check was made. Set all three under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+      # One attempt per open `alert` issue: the app's signals read again, one action from
+      # the responder's own fixed set, and one comment carrying the attempt count, the run
+      # URL and the responder's own answer. At `MAX_ATTEMPTS` the attempt comment is the
+      # one that names the re-check stopped; a fixed incident is closed, as a wake closes it.
+      - name: Re-check every open alert issue
+        env:
+          JOBRADAR_URL: ${{ vars.JOBRADAR_URL }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 ops/oncall/recheck.py
