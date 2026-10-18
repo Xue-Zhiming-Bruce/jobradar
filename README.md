@@ -327,7 +327,7 @@ mount or not, and the mount never answers one of those.
 ## Running the tests
 
 One command runs the whole test surface -- backend unit, backend integration,
-frontend and MCP, in that order:
+frontend, MCP and the on-call responder's offline test, in that order:
 
     make test
 
@@ -351,6 +351,15 @@ after it do not run. A suite whose summary reports no passed case, or any skippe
 case, fails the run too -- a `[postgres]` parameter or the MCP `live` case that
 skipped is a half-run, not the suite's green. `make test` needs `uv`, `npm` and
 `docker` on `PATH`.
+
+The on-call responder's offline test is the one suite outside a project
+directory. It runs at the repository root, the command CI reaches through
+`make test-oncall`, over the responder's fake app, model and Render API:
+
+    uv run --project backend pytest ops/oncall
+
+It needs no `.env`, no socket and no key, and reads no database: the throwaway
+PostgreSQL the two backend passes use is not its.
 
 Each suite also runs on its own, which the rest of this section documents.
 

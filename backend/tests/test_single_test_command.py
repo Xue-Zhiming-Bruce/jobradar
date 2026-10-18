@@ -6,7 +6,7 @@ it, with the throwaway PostgreSQL's port, to `scripts/test.sh`. Nothing else in
 the suite reads either file, so the failure mode is rot: a suite quietly dropped
 from the command, or a failure swallowed so that `make test` finishes green
 having run less than it says. This module reads the two files as text and pins
-what the recipe is -- the four suites, by the command that runs each, and the two
+what the recipe is -- the suites, by the command that runs each, and the two
 sides of the fail-fast: the script's `set -euo pipefail`, and a `test` target
 that ignores no error.
 
@@ -29,6 +29,7 @@ EXPECTED_SUITES = {
     "integration": "cd backend && uv run pytest -m integration",
     "frontend": "cd frontend && npm test",
     "mcp": "cd mcp && uv run pytest",
+    "oncall": "uv run --project backend pytest ops/oncall",
 }
 
 # The one command the target runs: the script that starts the throwaway

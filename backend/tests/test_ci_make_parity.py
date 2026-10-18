@@ -1,23 +1,23 @@
 """`ci.yml` and `make test` run the same suites: drift on either side is red here.
 
-The root `Makefile`'s `test` target names the four suites the rubric's Testing
-criterion asks for (#88) and runs them in one local invocation through
-`scripts/test.sh`. `.github/workflows/ci.yml` reaches each of the four through
-the `Makefile`'s own target for that suite -- `make test-backend`,
-`make test-integration`, `make test-frontend`, `make test-mcp` (#107) -- because
-each job keeps its own service container and its own verdict. That is what makes
-the four commands spelled once, in the `Makefile`, rather than again in a job's
-`run:`. This module reads both files as text and compares the suites each side
-runs, matched by the command and the directory it runs in -- not by job, step or
-line, whose counts move with every unrelated change -- so a suite dropped from
-one side and left on the other, a job that stops reaching its suite through the
-`Makefile`, or a suite re-spelled as a step is a red build rather than a
-reviewer's catch.
+The root `Makefile`'s `test` target names every suite the rubric's Testing
+criterion asks for (#88, plus the on-call responder's test #106) and runs them in
+one local invocation through `scripts/test.sh`. `.github/workflows/ci.yml`
+reaches each of them through the `Makefile`'s own target for that suite --
+`make test-backend`, `make test-integration`, `make test-frontend`,
+`make test-mcp` (#107) and `make test-oncall` -- because each suite keeps its own
+service container and its own verdict. That is what makes the commands spelled
+once, in the `Makefile`, rather than again in a job's `run:`. This module reads
+both files as text and compares the suites each side runs, matched by the command
+and the directory it runs in -- not by job, step or line, whose counts move with
+every unrelated change -- so a suite dropped from one side and left on the other,
+a job that stops reaching its suite through the `Makefile`, or a suite re-spelled
+as a step is a red build rather than a reviewer's catch.
 
 Each side is read the way its own file names things, never from prose. The
 `Makefile` side is `test_single_test_command.py`'s reading of the `test` target's
-recipe, reused so that the local command is pinned in one spelling: the four
-suite names and commands it holds are the vocabulary the failures below use. The
+recipe, reused so that the local command is pinned in one spelling: the suite
+names and commands it holds are the vocabulary the failures below use. The
 `ci.yml` side is each job's own steps -- a step's `run:` line and the
 `working-directory:` it runs in -- so the header comment's own command lines are
 prose, not steps. The per-suite targets are read the same way the `test` target
@@ -27,11 +27,11 @@ naming different commands is red too. `scripts/test.sh` is
 
 The checks `ci.yml` runs that `make test` deliberately does not are data below
 (`CI_ONLY_CHECKS`): the difference is on purpose (#88 leaves the security scan to
-CI, #106 owns the responder's test), and a guard that asked for parity on them
-would be asking for a change to one of the two files. A test command left in a
-step that is neither a suite reached through a `Makefile` target nor one of those
-entries is red, and so is an entry whose command has left the file it was read
-from. Neither file is modified by this module: the two are what is compared.
+CI), and a guard that asked for parity on them would be asking for a change to
+one of the two files. A test command left in a step that is neither a suite
+reached through a `Makefile` target nor one of those entries is red, and so is an
+entry whose command has left the file it was read from. Neither file is modified
+by this module: the two are what is compared.
 """
 
 import re
@@ -46,12 +46,10 @@ CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 # The checks `ci.yml` runs that `make test` deliberately does not, one entry per
 # check: the command text and the workflow file it was read from. The committed
 # data guard (#19) is a subset of the backend suite, kept on its own step as
-# CI's faster verdict; the on-call responder's offline test (#93) is run locally
-# by #106, not here; the security scan's scope and dispositions are
+# CI's faster verdict; the security scan's scope and dispositions are
 # `security/scan.md` (#82).
 CI_ONLY_CHECKS = [
     ("uv run pytest tests/test_committed_data_guard.py", CI),
-    ("uv run --project backend pytest ops/oncall", CI),
     (
         "uv run --project backend ruff check --select S --output-format concise"
         " backend/app mcp/jobradar_mcp",
@@ -205,7 +203,7 @@ def ci_make_targets() -> list[str]:
     return targets
 
 
-def test_each_of_the_four_suites_is_named_by_the_local_command() -> None:
+def test_each_suite_is_named_by_the_local_command() -> None:
     """A suite the criterion names, dropped from the recipe, fails here, by name."""
     local = local_suites()
 
@@ -221,7 +219,7 @@ def test_each_of_the_four_suites_is_named_by_the_local_command() -> None:
 def test_each_suite_target_runs_what_the_local_command_names() -> None:
     """A target and the recipe's line for its suite, naming different commands, fails.
 
-    The four commands live twice inside the `Makefile` -- in the `test` target's
+    The commands live twice inside the `Makefile` -- in the `test` target's
     recipe and in the per-suite targets `ci.yml` calls -- so this is the pin that
     keeps those two spellings one.
     """
@@ -238,7 +236,7 @@ def test_each_suite_target_runs_what_the_local_command_names() -> None:
     )
 
 
-def test_each_of_the_four_suites_is_reached_in_ci_through_its_target() -> None:
+def test_each_suite_is_reached_in_ci_through_its_target() -> None:
     """A suite whose `make test-<suite>` call left a job fails here, by name."""
     targets = ci_make_targets()
 
@@ -274,7 +272,7 @@ def test_the_two_surfaces_run_the_same_suites() -> None:
 def test_ci_spells_no_suite_invocation() -> None:
     """A suite re-spelled as a step, instead of reached through the `Makefile`, fails.
 
-    The four jobs name no suite command and no suite's working directory: the
+    The suite steps name no suite command and no suite's working directory: the
     command is the `Makefile` target's. A test command in a step is the guard's
     own fast verdict or another recorded check.
     """

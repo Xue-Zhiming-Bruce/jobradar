@@ -1,4 +1,4 @@
-# CI: this repository's own runners run the four suites, the committed-data
+# CI: this repository's own runners run the five suites, the committed-data
 # guard, the security scan and the stale-contract check, in five jobs. There is
 # no deploy step -- deploying a green `main` is #45, which needs #16's Render
 # service and Neon database. Nothing in this file reaches a credential beyond the throwaway
@@ -8,7 +8,7 @@
 # The four suite jobs reach their suite through the root `Makefile`'s own
 # target for it -- `make test-backend`, `make test-integration`,
 # `make test-frontend` and `make test-mcp`, the per-suite counterparts of the
-# `test` target that runs all four in one local invocation (#88) -- so the four
+# `test` target that runs every suite in one local invocation (#88) -- so the
 # commands are spelled in the `Makefile` and not a second time here. Each job
 # keeps its own service container, its own parallelism and its own verdict.
 #
@@ -78,11 +78,13 @@
 # `xml` parse of untrusted data -- turns it red. The scope and the dispositions
 # are `security/scan.md`.
 #
-# The `backend` job also runs the on-call responder's offline test (#93), at the
-# repository root so `uv run --project backend` uses the environment the `uv sync`
-# above already built -- the pattern the security scan uses:
+# The `backend` job also runs the on-call responder's offline test (#93), through
+# the `test-oncall` target, so the command is spelled in the `Makefile` and not a
+# second time here. That target runs it at the repository root, where
+# `uv run --project backend` uses the environment the `uv sync` above already
+# built -- the pattern the security scan uses:
 #
-#   uv run --project backend pytest ops/oncall
+#   make test-oncall          # uv run --project backend pytest ops/oncall
 #
 # The test drives `ops/oncall/responder.py` over a fake app, a fake model and a
 # fake Render API, so it needs no `.env`, no socket and no credential; its own
@@ -148,7 +150,7 @@ jobs:
       - name: Fail on a new security scan finding
         run: uv run --project backend ruff check --select S --output-format concise backend/app mcp/jobradar_mcp
       - name: Run the on-call responder's offline test
-        run: uv run --project backend pytest ops/oncall
+        run: make test-oncall
       - name: Run the whole suite against the throwaway PostgreSQL
         env:
           TEST_DATABASE_URL: postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:5432/jobradar
