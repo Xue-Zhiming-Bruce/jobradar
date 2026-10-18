@@ -51,7 +51,7 @@
 # reopens anything, a comment fires `issue_comment` rather than the `issues` event the
 # wake reads, and this job is granted no `actions: write`, so no run of it can start
 # another. The two `issues` jobs below are therefore guarded to the `issues` event alone:
-# the schedule starts `recheck` and nothing else.
+# the schedule and the dispatch start `recheck` and nothing else.
 #
 # The second job is #96's proposal path. It runs after the wake, on the same `alert`
 # issue, and declines anything the responder verified as fixed (`- **Fixed:** yes`),
@@ -84,8 +84,8 @@
 #   JOBRADAR_URL=http://127.0.0.1:8123 ISSUE_NUMBER=<n> \
 #     python3 ops/oncall/responder.py
 #
-# and, for the scheduled re-check alone -- the open `alert` issues of the repository
-# `gh` is authenticated against, one attempt each:
+# and, for the re-check alone -- the open `alert` issues of the repository
+# `gh` is authenticated against, one attempt each; a dispatch runs this same path:
 #
 #   JOBRADAR_URL=http://127.0.0.1:8123 GH_TOKEN=${GH_TOKEN} python3 ops/oncall/recheck.py
 #
@@ -113,7 +113,10 @@
 # recorded from the branch that adds this file -- both start working when it reaches
 # `main`. The same is true of the `schedule` above (#97): a cron only starts once the
 # workflow is on the default branch, so the first scheduled re-check happens after
-# `oncall.yml` merges, and #97's own recorded run waits for that.
+# `oncall.yml` merges, and #97's own recorded run waits for that. The
+# `workflow_dispatch` above (#115) is an on-demand *trigger*, not an exemption from
+# this: GitHub only offers a dispatch for a workflow on the default branch, so #115's
+# recorded dispatch also waits for the merge.
 
 name: On-call
 
