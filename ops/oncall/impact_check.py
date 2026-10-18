@@ -2,9 +2,9 @@
 
 This is the input the on-call agent wakes on (#93) and the thing the hourly
 `alert.yml` runs (#92). It touches the deployed app over HTTP and only over HTTP
--- `GET /runs?limit=50`, `GET /matches?limit=200` and `GET /telemetry/metrics`,
-all from `JOBRADAR_URL` -- and classifies the journey through four named
-predicates:
+-- `GET /healthz`, `GET /runs?limit=50`, `GET /matches?limit=200` and
+`GET /telemetry/metrics`, all from `JOBRADAR_URL` -- and classifies the journey
+through five named predicates:
 
 - `newest_run_failed` -- the newest run ended `failed`.
 - `model_scored_none` -- the newest run finished, stored matches inside its
@@ -15,6 +15,9 @@ predicates:
 - `http_5xx_rate` -- the journey's two route templates (`POST /internal/tick`
   and `GET /runs/{id}`) answered 5xx at or above `FIVE_XX_THRESHOLD` over the
   window `GET /telemetry/metrics` reports.
+- `app_unreachable` -- the app itself never answered `200` to `GET /healthz`
+  and then `GET /runs?limit=1`, so the outage is reported as user impact: the
+  liveness path is silent and a real journey read is silent too.
 
 Each predicate returns a `Verdict`: whether it fired and the raw values it read,
 so an alert quotes evidence a person can check and not a summary nobody can.
@@ -22,22 +25,28 @@ so an alert quotes evidence a person can check and not a summary nobody can.
 over synthetic responses -- no app, no socket, no credential -- by
 `backend/tests/test_impact_check.py`.
 
-A read that does not answer `200` raises `ReadFailed`, which `main` prints and
-turns into a non-zero exit. A broken monitor must not read as a healthy journey,
-and must not read as user impact either, so the workflow opens no `alert` issue
-and goes red instead.
+A read that does not answer `200` -- a non-`200` status, a refused connection, a
+DNS failure, or the socket timeout a cold instance raises out of `read()` -- is
+attempted `READ_ATTEMPTS` times and then raises `ReadFailed`. On a journey read
+that is a broken monitor: `main` prints it and turns it into a non-zero exit, so
+the workflow opens no `alert` issue and goes red instead. A broken monitor must
+not read as a healthy journey, and must not read as user impact either. The two
+probes are the exception: `check` catches their `ReadFailed`s and hands them to
+`app_unreachable`, which fires only when both never answered, so one read that
+did not answer is a cold free instance and not an alert.
 
 No secret is read and nothing private is rendered: the body names run ids,
 statuses, counts, instants and the metrics' route names and numbers, and nothing
 else, so no resume text, file name, credential or request body can reach an
-issue. The standard library is the whole dependency -- `urllib` for the three
-reads, `json` for the bodies -- and the workflow's own `gh` steps are what open
-the issue.
+issue. The standard library is the whole dependency -- `urllib` for the reads,
+`json` for the bodies -- and the workflow's own `gh` steps are what open the
+issue.
 """
 
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
@@ -76,20 +85,49 @@ JOURNEY_ROUTES = ("/internal/tick", "/runs/{id}")
 # The reason prefix `app.matching.scorer` writes on a row it could not score.
 NOT_SCORED_PREFIX = "Not scored: "
 
-# The three reads, spelled once so a failure names the same path the workflow's
-# prose does.
+# The three journey reads, spelled once so a failure names the same path the
+# workflow's prose does.
 RUNS_READ = f"/runs?limit={RUNS_LIMIT}"
 MATCHES_READ = f"/matches?limit={MATCHES_MAX_LIMIT}"
 METRICS_READ = "/telemetry/metrics"
+
+# The two probes `app_unreachable` reads, in the order it reads them: the app's
+# own liveness path, and -- only when that one did not answer -- the smallest
+# journey read there is. An outage needs both silent: the liveness path alone
+# refusing is a waking instance, and a journey read alone failing is a broken
+# monitor.
+HEALTHZ_READ = "/healthz"
+UNREACHABLE_RUNS_READ = "/runs?limit=1"
+APP_PROBES = (HEALTHZ_READ, UNREACHABLE_RUNS_READ)
+
+# How many times one read is attempted before it is `ReadFailed`. The read is
+# retried at least once -- a cold free instance answers again within a start or
+# two -- and the bound is named so the hourly run's worst case is visible here:
+# `READ_ATTEMPTS * fetch`'s timeout per read, and two reads when the first probe
+# did not answer and `app_unreachable` probes `/runs?limit=1` after it.
+READ_ATTEMPTS = 3
+
+# How long the check waits between two attempts of one read. Long enough to
+# outlast the first refusal of a waking instance, short enough that the hourly
+# run does not notice it.
+RETRY_DELAY_SECONDS = 2.0
 
 
 class ReadFailed(Exception):
     """One read did not answer `200`, so the journey cannot be judged from outside."""
 
-    def __init__(self, path: str, status: int | None) -> None:
+    def __init__(
+        self, path: str, status: int | None, error: BaseException | None = None
+    ) -> None:
         self.path = path
         self.status = status
-        detail = f"HTTP {status}" if status is not None else "no answer"
+        self.error = error
+        if status is not None:
+            detail = f"HTTP {status}"
+        elif error is not None:
+            detail = f"no answer ({error})"
+        else:
+            detail = "no answer"
         super().__init__(f"{path} did not answer 200 ({detail})")
 
 
@@ -97,23 +135,35 @@ def fetch(base_url: str, path: str, *, timeout: float = 30) -> Any:
     """One JSON read of `base_url + path`, or `ReadFailed` if it did not answer `200`.
 
     A `4xx` or `5xx` is an `HTTPError`, a connection that never answered is a
-    `URLError`, and anything that is not `200` is the same refusal: the caller
-    gets the path and the status it saw, and no body is read into the alert.
+    `URLError`, a DNS failure and a refused connection are the same, and a read
+    timeout is the `TimeoutError`/`OSError` `read()` raises on a cold instance.
+    All of them are one refusal: the caller gets the path and the status or the
+    error it saw, and no body is read into the alert. A read that did not answer
+    is attempted `READ_ATTEMPTS` times, `RETRY_DELAY_SECONDS` apart, and only a
+    `200` ends the retries early.
     """
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}{path}", headers={"Accept": "application/json"}
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-            status = response.status
-            body = response.read()
-    except urllib.error.HTTPError as error:
-        raise ReadFailed(path, error.code) from error
-    except urllib.error.URLError as error:
-        raise ReadFailed(path, None) from error
-    if status != 200:
-        raise ReadFailed(path, status)
-    return json.loads(body)
+    failure: BaseException | None = None
+    for attempt in range(READ_ATTEMPTS):
+        if attempt:
+            time.sleep(RETRY_DELAY_SECONDS)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+                status = response.status
+                body = response.read()
+        except urllib.error.HTTPError as error:
+            raise ReadFailed(path, error.code) from error
+        except (urllib.error.URLError, OSError) as error:
+            # `TimeoutError` is an `OSError`, so this is the read that never
+            # answered as well as the connection that was refused or unresolved.
+            failure = error
+            continue
+        if status != 200:
+            raise ReadFailed(path, status)
+        return json.loads(body)
+    raise ReadFailed(path, None, failure) from failure
 
 
 @dataclass(frozen=True)
@@ -287,9 +337,42 @@ def http_5xx_rate(metrics: Sequence[Mapping[str, Any]]) -> Verdict:
     )
 
 
+def app_unreachable(failures: Sequence[ReadFailed]) -> Verdict:
+    """Fires when every `APP_PROBES` read still failed to answer `200`.
+
+    Each probe is already retried `READ_ATTEMPTS` times inside `fetch` (#108), so
+    one probe that never answered is a free-tier cold instance refusing the first
+    read of the hour, not an outage, and it does not fire. The app is unreachable
+    when `GET /healthz` and then `GET /runs?limit=1` both still fail -- a refused
+    connection, a DNS failure, the socket timeout a waking instance raises, or a
+    `5xx` -- and the evidence names each read with the status or the error it
+    answered, and nothing out of a body.
+    """
+    return Verdict(
+        "app_unreachable",
+        len(failures) == len(APP_PROBES),
+        {
+            "probes": list(APP_PROBES),
+            "probes_failed": len(failures),
+            "failed_reads": [
+                {
+                    "path": failure.path,
+                    "status": failure.status,
+                    "error": None if failure.error is None else str(failure.error),
+                }
+                for failure in failures
+            ],
+        },
+    )
+
+
 @dataclass(frozen=True)
 class Report:
-    """The four verdicts, the newest runs page, and the alert text they make."""
+    """The verdicts, the newest runs page, and the alert text they make.
+
+    An unreachable app makes one verdict and no runs page: no journey read could
+    be made, so no other predicate is judged and none is invented.
+    """
 
     verdicts: list[Verdict]
     runs: list[Mapping[str, Any]]
@@ -324,7 +407,15 @@ class Report:
             named = ", ".join(f"`{name}`" for name in self.fired)
             lines += [f"User impact detected: {named}.", "", "### The newest run", ""]
             if newest is None:
-                lines += ["- no run has been recorded", ""]
+                lines += [
+                    "- "
+                    + (
+                        "none was read: the app did not answer"
+                        if "app_unreachable" in self.fired
+                        else "no run has been recorded"
+                    ),
+                    "",
+                ]
             else:
                 lines += [
                     f"- id `{newest['id']}`, status `{newest['status']}`",
@@ -369,13 +460,29 @@ class Report:
 def check(
     read: Callable[[str], Any], now: datetime
 ) -> Report:
-    """Read the three paths through `read` and classify the journey.
+    """Read the app through `read` and classify the journey.
 
     `read(path)` answers the parsed JSON of one read or raises `ReadFailed`; it is
     the only thing that touches the network, which is what lets the tests drive
-    this over synthetic responses. A `ReadFailed` propagates: the caller names the
-    read and exits non-zero, and no verdict is invented from a read that failed.
+    this over synthetic responses. The two `APP_PROBES` are read first, the
+    second only when the first did not answer: an app that never answered either
+    is `app_unreachable`, and no journey read is attempted after it -- there is
+    nothing to classify from, so the report carries that one verdict and no runs.
+    A probe that did answer, and a `ReadFailed` on a journey read, propagate: the
+    caller names the read and exits non-zero, and no verdict is invented from a
+    read that failed.
     """
+    failures: list[ReadFailed] = []
+    for path in APP_PROBES:
+        try:
+            read(path)
+        except ReadFailed as failure:
+            failures.append(failure)
+            continue
+        break
+    if len(failures) == len(APP_PROBES):
+        return Report(verdicts=[app_unreachable(failures)], runs=[])
+
     runs = read(RUNS_READ)
     matches = read(MATCHES_READ)
     metrics = read(METRICS_READ)
@@ -385,6 +492,7 @@ def check(
             model_scored_none(runs, matches),
             digest_stalled(runs, now),
             http_5xx_rate(metrics),
+            app_unreachable(failures),
         ],
         runs=runs,
     )

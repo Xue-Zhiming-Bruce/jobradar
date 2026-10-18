@@ -636,7 +636,7 @@ def respond(
     if not needs_a_response(issue):
         return None
     try:
-        outcome = _decide_and_act(
+        outcome = decide_and_act(
             issue,
             app=app,
             complete=complete,
@@ -646,15 +646,19 @@ def respond(
             clock=clock,
         )
     except Exception as error:  # AC8: an exception must not stand in for an answer
-        outcome = _failure_outcome(error, config)
+        outcome = failure_outcome(error, config)
     comment(issue.number, comment_body(outcome))
     if outcome.fixed is True:
         close(issue.number)
     return outcome
 
 
-def _failure_outcome(error: Exception, config: Config) -> Outcome:
-    """The one escalation a responder that could not decide still owes the issue (AC8)."""
+def failure_outcome(error: Exception, config: Config) -> Outcome:
+    """The one escalation a responder that could not decide still owes the issue (AC8).
+
+    Public because `ops/oncall/recheck.py` (#97) owes a still-open incident the same
+    answer when its own scheduled attempt could not complete.
+    """
     return Outcome(
         action=ESCALATE,
         source="error",
@@ -670,7 +674,7 @@ def _failure_outcome(error: Exception, config: Config) -> Outcome:
     )
 
 
-def _decide_and_act(
+def decide_and_act(
     issue: Issue,
     *,
     app: App,
@@ -680,7 +684,12 @@ def _decide_and_act(
     sleep: Callable[[float], None],
     clock: Callable[[], float],
 ) -> Outcome:
-    """Gather the evidence, choose one action, verify it, and answer the `Outcome`."""
+    """Gather the evidence, choose one action, verify it, and answer the `Outcome`.
+
+    Public because `ops/oncall/recheck.py` (#97) re-checks a still-open incident through
+    this same evidence read, action set and verification rather than a second copy of
+    either: the re-check reads the app's own signals again and answers the issue again.
+    """
     evidence = read_evidence(app, issue.body)
     decision = decide(evidence, complete, config.base_url)
     found = describe_evidence(evidence)
@@ -939,7 +948,7 @@ def main() -> int:
     try:
         issue = gh_issue(number)
     except Exception as error:  # the issue cannot be read, but it can still be answered
-        gh_comment(number, comment_body(_failure_outcome(error, config)))
+        gh_comment(number, comment_body(failure_outcome(error, config)))
         print(
             redact(f"responder: could not read the issue: {type(error).__name__}", secrets),
             file=sys.stderr,

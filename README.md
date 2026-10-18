@@ -571,9 +571,9 @@ relies on.
 
 A third workflow, `alert.yml`, runs hourly (and by hand) and asks one question:
 is the digest journey showing user impact right now? `ops/oncall/impact_check.py`
-reads the deployed app over HTTP and only over HTTP -- `GET /runs?limit=50`,
-`GET /matches?limit=200` and `GET /telemetry/metrics`, all from `JOBRADAR_URL` --
-and classifies the journey through four named predicates:
+reads the deployed app over HTTP and only over HTTP -- `GET /healthz`,
+`GET /runs?limit=50`, `GET /matches?limit=200` and `GET /telemetry/metrics`, all
+from `JOBRADAR_URL` -- and classifies the journey through five named predicates:
 
 | Predicate | Fires when |
 | --- | --- |
@@ -581,6 +581,7 @@ and classifies the journey through four named predicates:
 | `model_scored_none` | the newest run finished, stored matches inside its `[started_at, finished_at]` window, and not one of them was scored: the model call failed on every row it reached |
 | `digest_stalled` | no run succeeded within 26 hours, or nothing ran at all in that time |
 | `http_5xx_rate` | the journey's two routes (`POST /internal/tick`, `GET /runs/{id}`) answered 5xx at or above 5% over the metrics window |
+| `app_unreachable` | `GET /healthz` and then `GET /runs?limit=1` both still fail to answer `200` (a connection error, a timeout or a 5xx) after the reads' own retries: one failed read is a cold free-tier start, not an outage |
 
 When any predicate fires, the workflow opens a GitHub issue labelled `alert`
 whose body names the impact and carries the evidence -- the newest run's id,
@@ -596,16 +597,45 @@ trace (#91).
 
 Nothing private rides along: the alert text names ids, statuses, counts, instants
 and route names, and no resume text, file name, credential, request body, CPU or
-memory number. A read that does not answer `200` is neither a healthy journey nor
-user impact -- the check exits non-zero naming the read, the workflow goes red
-and opens no issue. Alerting when the deployed app is unreachable at all is #99;
-the on-call agent that consumes the alert is #93.
+memory number. An app that never answered `200` to `GET /healthz` and then to
+`GET /runs?limit=1` is `app_unreachable`, and that alert goes through the same
+one-open-issue path: the outage is reported as user impact, naming each read with
+the status or the error it answered, instead of as a red workflow nobody watches.
+An unreachable app answers no journey read, so that report carries the one
+verdict. A read that did not answer while the app did -- one probe of the two, or
+a journey read after the probes answered -- is neither a healthy journey nor user
+impact: the check exits non-zero naming the read, the workflow goes red and opens
+no issue, because one un-answered read is a cold free-tier start. The on-call
+agent that consumes the alert is #93.
 
 The local equivalent, with the app on port 8123, and the check's own offline
 test:
 
     JOBRADAR_URL=http://127.0.0.1:8123 python3 ops/oncall/impact_check.py
     cd backend && uv run pytest tests/test_impact_check.py
+
+The GitHub issue is the channel a person reads; it can also wake someone on a
+third-party pager. `alert.yml`'s last step runs `ops/oncall/notifier.py` after the
+issue step, and sends that report's own title and body -- the same evidence the
+issue carries, and no more. The pager is opt-in through repository secrets:
+
+| Secret | What it is |
+| --- | --- |
+| `PAGER_URL` | the pager's HTTPS endpoint: one JSON `POST` of `{"title": ..., "body": ...}` |
+| `PAGER_TOKEN` | the credential, sent as `Authorization: Bearer <token>`; optional |
+
+`PAGER_URL` unset or empty is a **documented no-op**: no call is made and the step
+succeeds, so a repository that reads GitHub alone is unchanged. The call is bounded
+-- one timeout and at most one retry -- and the title and body pass through the
+responder's redaction, so no resume text, file name, API key, connection string or
+request body reaches the pager. A page that fails after its retry is an `::error::`
+and a red step, and the `alert` issue the previous step opened stays open -- a page
+that did not arrive cannot lose it. A healthy run pages nobody.
+
+Its offline test is in the responder's suite, over a fake pager endpoint with no
+socket and no credential:
+
+    uv run --project backend pytest ops/oncall
 
 ### On-call response
 
@@ -703,6 +733,45 @@ Like the wake above, this path only fires once `oncall.yml` is on the default
 branch, so the one real proposal #96 records -- with its pull request link and
 whether the reviewer approved, changed or rejected it -- is recorded on #96 once
 that happens.
+
+### The unattended re-check
+
+A wake fires once, when the `alert` label arrives. A remediation that did not hold,
+or an escalation nobody picked up, would therefore stay silent until a person
+looked -- so `oncall.yml` also runs **every hour, at half past**, half an hour
+after `alert.yml`'s own hourly check, and starts `ops/oncall/recheck.py`. The
+scheduled job and the two `issues` jobs are the same workflow file; each is guarded
+to its own event, so the schedule starts the re-check and never a wake or a
+proposal.
+
+One scheduled run reads every open `alert` issue and makes **one attempt** per
+incident: it reads the deployed app's own signals again -- the same `GET /healthz`,
+`GET /telemetry/metrics` and `GET /runs/{id}` -- and takes at most one action again
+from #93's fixed set, through the responder's own action set and escalation rule
+(`responder.decide_and_act`) rather than a second copy of either. Its comment carries
+the attempt number, the run's own URL and the responder's own answer verbatim, so
+what it found, what it attempted and whether the issue is fixed read the same way a
+wake's answer does, and a verified fix closes the issue exactly as a wake closes it.
+
+It is bounded, and the bound is read off the issue itself: at most
+`MAX_ATTEMPTS` (3) attempts per incident, counted from the re-check's own comments,
+so it holds across runs. The last attempt's comment carries the one notice that says
+the re-check has stopped and what a person must do, and every later run touches
+nothing. It cannot trigger itself either: no path here schedules, dispatches or
+labels anything -- the job is granted no `actions: write`, and its only writes are
+one comment and, on a verified fix, a close. A comment fires `issue_comment`, not
+the `issues` event the wake reads, and the re-check re-adds no `alert` label, so a
+re-check cannot cascade into a wake.
+
+    JOBRADAR_URL=http://127.0.0.1:8123 GH_TOKEN=${GH_TOKEN} python3 ops/oncall/recheck.py
+    uv run --project backend pytest ops/oncall
+
+Its own test is `ops/oncall/test_recheck.py`, in the same offline suite, and it
+needs no credential and no socket. Nothing it emits carries a resume, a file name or
+a credential: it reuses #93's comment and #93's redaction. The one named limit is the
+same as the wake's -- a `schedule` only starts once `oncall.yml` is on the default
+branch -- so the run #97 records, with its workflow run URL, the signals it read and
+the attempt count it reached, is recorded on #97 once this merges to `main`.
 
 ## MCP server
 

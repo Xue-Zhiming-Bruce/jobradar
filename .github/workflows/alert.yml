@@ -4,7 +4,10 @@
 # #92 asks for an alert that fires on real user impact -- a failed, stalled or
 # model-broken digest journey -- and reaches a channel a person reads. The channel
 # is a GitHub issue, because the repository already has one, needs no new account,
-# and is where the on-call agent (#93) can reply. A third-party pager is #100.
+# and is where the on-call agent (#93) can reply. The third-party pager (#100) is
+# the last step: after the issue carries the evidence, `ops/oncall/notifier.py`
+# sends the same title and body to one configured pager, and a repository where
+# `PAGER_URL` is unset makes no call at all.
 #
 # `ops/oncall/impact_check.py` does the reading and the classifying; this file is
 # the schedule, the one-open rule and the credential. The check reads the app at
@@ -127,3 +130,16 @@ jobs:
             gh issue create --title "$(jq -r '.title' report.json)" --body "${body}" --label alert
             echo "Impact: opened a new alert issue."
           fi
+
+      # The pager channel (#100), after the issue above carries the evidence. The
+      # notifier reads the same `report.json` the issue was written from, so its
+      # payload is that evidence and no more, and a healthy report pages nobody.
+      # `PAGER_URL` unset is a documented no-op and not a failed step, so an
+      # unconfigured repository is green and unchanged. A pager call that fails
+      # after its one retry is an `::error::` and a non-zero step, and the alert
+      # issue above stays open: a page that did not arrive cannot lose it.
+      - name: Notify the configured pager
+        env:
+          PAGER_URL: ${{ secrets.PAGER_URL }}
+          PAGER_TOKEN: ${{ secrets.PAGER_TOKEN }}
+        run: python3 ops/oncall/notifier.py report.json
