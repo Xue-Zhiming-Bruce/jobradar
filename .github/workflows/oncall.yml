@@ -37,6 +37,16 @@
 # that quietly does nothing is indistinguishable from one nobody noticed had
 # stopped working.
 #
+# `LLM_API_KEY` may be a gateway key, so every step here that calls the model under
+# `LLM_API_KEY` -- the wake's decide step, the proposal step and the re-check below --
+# plus the proposal's configuration check, is handed the optional repository variables
+# `LLM_MODEL` and `LLM_BASE_URL` (#116): a key whose model and endpoint are not
+# OpenAI's otherwise answers HTTP 401 even though the key itself is valid. Both are
+# unset in a default repository, and unset or empty changes nothing -- the Python falls
+# back to its own `gpt-4o-mini` at `https://api.openai.com/v1`, so an OpenAI key works
+# as before. Neither is a credential: a model name and a URL are the only two values
+# this adds to the log, and no `::add-mask::` is needed for them.
+#
 # The `recheck` job is #97's scheduled half, and it is what makes the agent unattended.
 # A wake fires once, when the label arrives; a remediation that did not hold, or an
 # escalation nobody picked up, would otherwise stay silent until a person looked. So the
@@ -197,6 +207,10 @@ jobs:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
           RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          # #116: a gateway key needs its own model and endpoint. Both are optional and
+          # unset by default, and the responder keeps its OpenAI defaults when either is.
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: python3 ops/oncall/responder.py
@@ -229,6 +243,11 @@ jobs:
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           PROPOSAL_REVIEWER: ${{ github.repository_owner }}
+          # #116: handed here as well, so the dry run of this check prints the model and
+          # endpoint the proposal below will really use, and the two `env:` blocks cannot
+          # drift apart.
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
         run: |
           # Whitespace-only resolves the same as unset, exactly as `proposer.main` strips it.
           configured=true
@@ -240,6 +259,9 @@ jobs:
             echo "::notice::PROPOSAL_REVIEWER (the repository owner) is empty, so no review can be requested and this proposal is skipped."
             configured=false
           fi
+          # The proof that the two optional variables arrived (#116): a model name and a URL,
+          # not a credential, and unset or empty means the proposer's own OpenAI default.
+          echo "::notice::The proposal calls LLM_MODEL='${LLM_MODEL:-unset}' at LLM_BASE_URL='${LLM_BASE_URL:-unset}'; unset or empty keeps the proposer's OpenAI default."
           echo "configured=${configured}" >> "$GITHUB_OUTPUT"
 
       # One proposal attempt per incident. The proposer reads the alert issue and the
@@ -252,6 +274,10 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           PROPOSAL_REVIEWER: ${{ github.repository_owner }}
+          # #116: the same two optional variables the check above reads, so a gateway key
+          # drafts the patch against the gateway instead of OpenAI's defaults.
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 ops/oncall/proposer.py
 
@@ -305,5 +331,10 @@ jobs:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
           RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          # #116: the scheduled path calls the model too, through `responder.llm_complete`,
+          # so a gateway key needs its own model and endpoint here as well; unset or empty
+          # keeps the responder's OpenAI defaults.
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 ops/oncall/recheck.py
