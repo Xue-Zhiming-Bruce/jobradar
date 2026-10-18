@@ -1,4 +1,5 @@
 import { startTick } from '../api/client'
+import { traceAnchorId } from './traceAnchor'
 import useRun from './useRun'
 
 /** Starts one digest run and shows how it ended, reading the run row until it does. */
@@ -22,6 +23,13 @@ export default function RunDigestNow() {
   // sentence, while `0` is the answer "ran and emailed nothing".
   const emailed = run?.matchesEmailed ?? null
 
+  // The trace this run ran under, read off the row itself: the `202`'s fresh row
+  // and every poll after it carry it, running or terminal. `null` is a row written
+  // before migration `0014_run_trace_id` (#102): no id, so no link -- never the
+  // word `null`, and never a guessed id (#95 AC3). The link is a fragment to the
+  // trace's own anchor in the Telemetry section, because the app has no router (#95 AC2).
+  const traceId = run?.traceId ?? null
+
   return (
     <section>
       <h2>Digest</h2>
@@ -42,6 +50,11 @@ export default function RunDigestNow() {
           {emailed === 0
             ? 'Digest emailed: no matches.'
             : `Digest emailed: ${emailed} ${emailed === 1 ? 'match' : 'matches'}.`}
+        </p>
+      )}
+      {traceId !== null && (
+        <p>
+          Trace: <a href={`#${traceAnchorId(traceId)}`}>{traceId}</a>
         </p>
       )}
       {notFetched > 0 && (

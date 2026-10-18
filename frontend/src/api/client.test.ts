@@ -58,6 +58,34 @@ const matchRow = {
   created_at: '2026-05-01T09:00:00+00:00',
 }
 
+/**
+ * One `RunSummary` as `GET /runs/{id}` sends it: every required field, in the
+ * wire's names, with the trace of the request that started the run (#102).
+ */
+const runRow = (over: Record<string, unknown> = {}) => ({
+  id: 7,
+  status: 'failed',
+  started_at: '2026-05-01T10:00:00+00:00',
+  finished_at: '2026-05-01T10:00:04+00:00',
+  error: "1 of 2 companies failed: 'beta'",
+  postings_seen: 12,
+  matches_created: 4,
+  matches_emailed: 3,
+  companies_not_fetched: 3,
+  postings_not_rematched: 2,
+  trace_id: traceId,
+  company_outcomes: [
+    { company_id: 1, slug: 'acme', outcome: 'fetched', error: null },
+    {
+      company_id: 2,
+      slug: 'beta',
+      outcome: 'failed',
+      error: "The board for company 'beta' could not be fetched: HTTP 503",
+    },
+  ],
+  ...over,
+})
+
 const rejecting = (status: number, message = refused) => () =>
   HttpResponse.json({ detail: message }, { status })
 
@@ -112,31 +140,7 @@ describe('the wire is decoded into the UI', () => {
   })
 
   it('getRun turns matches_created into matchesCreated and decodes the company outcomes', async () => {
-    server.use(
-      http.get('/runs/7', () =>
-        HttpResponse.json({
-          id: 7,
-          status: 'failed',
-          started_at: '2026-05-01T10:00:00+00:00',
-          finished_at: '2026-05-01T10:00:04+00:00',
-          error: "1 of 2 companies failed: 'beta'",
-          postings_seen: 12,
-          matches_created: 4,
-          matches_emailed: 3,
-          companies_not_fetched: 3,
-          postings_not_rematched: 2,
-          company_outcomes: [
-            { company_id: 1, slug: 'acme', outcome: 'fetched', error: null },
-            {
-              company_id: 2,
-              slug: 'beta',
-              outcome: 'failed',
-              error: "The board for company 'beta' could not be fetched: HTTP 503",
-            },
-          ],
-        }),
-      ),
-    )
+    server.use(http.get('/runs/7', () => HttpResponse.json(runRow())))
 
     expect(await getRun(7)).toEqual({
       id: 7,
@@ -149,6 +153,7 @@ describe('the wire is decoded into the UI', () => {
       matchesEmailed: 3,
       companiesNotFetched: 3,
       postingsNotRematched: 2,
+      traceId,
       companyOutcomes: [
         { companyId: 1, slug: 'acme', outcome: 'fetched', error: null },
         {
@@ -159,6 +164,12 @@ describe('the wire is decoded into the UI', () => {
         },
       ],
     })
+  })
+
+  it('getRun copies a null trace_id as null, so a pre-0014 row gets no guessed id', async () => {
+    server.use(http.get('/runs/7', () => HttpResponse.json(runRow({ trace_id: null }))))
+
+    expect((await getRun(7)).traceId).toBeNull()
   })
 
   it('uploadResume posts a multipart form and decodes the answer', async () => {

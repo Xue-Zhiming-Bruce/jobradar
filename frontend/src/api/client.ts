@@ -74,6 +74,12 @@ export type RunSummary = {
   postingsNotRematched: number | null
   /** What this run did with each company it attempted: `RunCompanyOutcome` in the contract. */
   companyOutcomes: RunCompanyOutcome[]
+  /**
+   * The trace this run ran under, so the run screen can link to it: the contract's
+   * own `string | null`, `null` on a row written before migration `0014_run_trace_id`
+   * (#102). Never substituted with a guessed id (#95).
+   */
+  traceId: string | null
 }
 
 /**
@@ -195,6 +201,7 @@ type WireRunSummary = {
   matches_emailed: number | null
   companies_not_fetched: number | null
   postings_not_rematched: number | null
+  trace_id: string | null
   company_outcomes: WireRunCompanyOutcome[]
 }
 
@@ -302,6 +309,9 @@ const decodeRun = (wire: WireRunSummary): RunSummary => ({
   companiesNotFetched: wire.companies_not_fetched,
   // Copied verbatim, never `?? 0`: `null` and `0` are two different answers (#64).
   postingsNotRematched: wire.postings_not_rematched,
+  // Copied verbatim, never a guessed id: `null` is "unknown", and the screen
+  // renders no link for it instead (#95 AC3).
+  traceId: wire.trace_id,
   companyOutcomes: wire.company_outcomes.map(decodeRunCompanyOutcome),
 })
 

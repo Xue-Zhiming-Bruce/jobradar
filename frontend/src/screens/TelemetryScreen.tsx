@@ -7,6 +7,7 @@ import {
   type TraceSpan,
 } from '../api/client'
 import TelemetryChart from './TelemetryChart'
+import { traceAnchorId } from './traceAnchor'
 
 /*
  * Three outcomes a reader can tell apart, per read: not read yet, read and
@@ -124,9 +125,10 @@ export default function TelemetryScreen() {
           <p>{EMPTY_TRACES}</p>
         ) : (
           // Newest first, and each trace's spans in start order: the route's own
-          // order, rendered as it arrived.
+          // order, rendered as it arrived. Each table carries the anchor the run
+          // screen's fragment names, so a run reaches its own trace (#95 AC2).
           traces.rows.map((trace) => (
-            <table key={trace.traceId}>
+            <table key={trace.traceId} id={traceAnchorId(trace.traceId)}>
               <caption>Trace {trace.traceId}</caption>
               <thead>
                 <tr>

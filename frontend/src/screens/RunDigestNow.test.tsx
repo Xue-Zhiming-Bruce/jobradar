@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { server } from '../mocks/server'
 import { runSummary, runSucceeded, runBudgetStopped, runBudgetStoppedOne, runBudgetStoppedRunning, runBudgetStoppedFailed, runBudgetStoppedZero } from '../mocks/fixtures'
 import RunDigestNow from './RunDigestNow'
+import TelemetryScreen from './TelemetryScreen'
 
 afterEach(() => {
   cleanup()
@@ -432,5 +433,103 @@ describe('the digest emailed line', () => {
     expect(screen.getByText('Digest finished: 4 matches created.')).toBeDefined()
     expect(screen.getByText('Digest emailed: 3 matches.')).toBeDefined()
     expect(screen.queryByText('Digest emailed: 4 matches.')).toBeNull()
+  })
+})
+
+/**
+ * One test per case in #95's AC2-AC4: the trace id the row carries (#102),
+ * rendered as a same-page link to that trace's own anchor in the Telemetry
+ * section -- the app has no router.
+ */
+describe('the run screen links a run to its trace', () => {
+  /** The trace `#90` writes a "Run digest now" press under: the row's, and the traces read's. */
+  const traceId = runSummary.trace_id
+  const fragment = `#trace-${traceId}`
+
+  /** Test helper: installs the fake clock, then answers the tick with the fresh row and the read with `row`. */
+  function useRunReads(row: JsonBodyType) {
+    useTestClock()
+    server.use(
+      http.post('/internal/tick', () => HttpResponse.json(runSummary, { status: 202 })),
+      http.get('/runs/:id', () => HttpResponse.json(row)),
+    )
+  }
+
+  /** The run's own section and the Telemetry section it links into, on one page. */
+  const renderBoth = () =>
+    render(
+      <>
+        <RunDigestNow />
+        <TelemetryScreen />
+      </>,
+    )
+
+  /** Lets the mocked telemetry reads and React's commits run out; `findBy` cannot run on this clock. */
+  const flush = () => act(async () => {})
+
+  it("renders the row's trace id, linked to that trace's anchor in the Telemetry section (AC2)", async () => {
+    useRunReads(runSucceeded)
+    renderBoth()
+
+    // The `202`'s own fresh, still-running row carries the id ...
+    await runNow()
+    await flush()
+    expect(screen.getByText('Digest running...')).toBeDefined()
+    expect(screen.getByRole('link', { name: traceId }).getAttribute('href')).toBe(fragment)
+
+    // ... and so does the terminal row the poll answers after it.
+    await poll()
+    expect(screen.getByText('Digest finished: 4 matches created.')).toBeDefined()
+    expect(screen.getByRole('link', { name: traceId }).getAttribute('href')).toBe(fragment)
+
+    // The fragment names that trace's own table in the Telemetry section, so the
+    // same-page link resolves to the trace this run ran under.
+    expect(
+      document.getElementById(fragment.slice(1))?.querySelector('caption')?.textContent,
+    ).toBe(`Trace ${traceId}`)
+  })
+
+  it("shows the run's own trace id and link when the window has rolled past its trace (AC4)", async () => {
+    useRunReads(runSucceeded)
+    server.use(http.get('/telemetry/traces', () => HttpResponse.json([])))
+    renderBoth()
+
+    await runNow()
+    await poll()
+    await flush()
+
+    expect(screen.getByText('Digest finished: 4 matches created.')).toBeDefined()
+    expect(screen.getByRole('link', { name: traceId }).getAttribute('href')).toBe(fragment)
+    // Nothing on the page to resolve the fragment against, and the run screen does not care.
+    expect(document.getElementById(fragment.slice(1))).toBeNull()
+  })
+
+  it("shows the run's own trace id and link when the traces read failed (AC4)", async () => {
+    const detail = 'The traces could not be read'
+    useRunReads(runSucceeded)
+    server.use(http.get('/telemetry/traces', () => HttpResponse.json({ detail }, { status: 500 })))
+    renderBoth()
+
+    await runNow()
+    await poll()
+    await flush()
+
+    expect(screen.getByRole('link', { name: traceId }).getAttribute('href')).toBe(fragment)
+    // The read's own failure is shown beside the run, which still links its own trace.
+    expect(screen.getByText(detail)).toBeDefined()
+  })
+
+  it('renders no link and no literal null for a row written before the trace id existed (AC3)', async () => {
+    useRunReads({ ...runSucceeded, trace_id: null })
+    render(<RunDigestNow />)
+
+    await runNow()
+    await poll()
+
+    // The rest of the row is unchanged: the same lines, and no trace line at all.
+    expect(screen.getByText('Digest finished: 4 matches created.')).toBeDefined()
+    expect(screen.getByText('Digest emailed: 3 matches.')).toBeDefined()
+    expect(screen.queryByRole('link')).toBeNull()
+    expect(screen.queryByText(/null|undefined/)).toBeNull()
   })
 })
