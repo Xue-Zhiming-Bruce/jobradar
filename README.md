@@ -647,6 +647,53 @@ workflow: an `issues`-event workflow only fires once it is on the default branch
 so `oncall.yml` starts working when #93 merges to `main`. The wake, its workflow
 run URL and the responder's comment are recorded on #93 once that happens.
 
+### Proposing a code fix, behind a review gate
+
+`retrigger` and `rollback` cannot fix a code fault, so the same `alert` issue wakes
+a second path (#96): `oncall.yml`'s `proposal` job runs after the wake, on the same
+issue, and declines anything the responder's own answer says is fixed
+(`- **Fixed:** yes`), anything the responder has not answered, a closed issue, and
+an incident this path has already answered once -- its comment carries its own
+marker, so the `opened` and `labeled` deliveries of one alert cannot push two
+branches.
+
+For an incident it takes, `ops/oncall/proposer.py` asks the model which files under
+`backend/app/` the incident implicates, hands it those files' own contents at
+`HEAD`, and applies the one git unified diff it answers on the new branch
+`oncall/proposal-<issue number>`. It pushes that branch and nothing else, opens it
+as a **draft pull request against `main`**, requests the repository owner's review,
+and comments the link on the alert issue. A patch is applied only when it names at
+least one file, names nothing outside the files the model was handed, renames
+nothing and is bounded, so a proposal cannot reach `.github/workflows/` -- the
+review gate's own workflow included. No path pushes `main`, merges, approves,
+force-pushes or deploys, and `ops/oncall/test_proposer.py` reads every command the
+path can issue back to pin that.
+
+What makes the review *required* is a repository setting this workflow cannot make:
+**Settings > Branches > require a pull request before merging, with at least one
+approving review on `main`** -- recorded here because `deploy.yml` records Render's
+autodeploy setting the same way. Nothing lands on `main` without a human merge, and
+`deploy.yml` deploys only a push to `main`, so no path deploys a commit no human
+approved. The request is opened as a draft as well, which GitHub refuses to merge
+until a human marks it ready for review. The proposal job's token is scoped to it
+(`contents: write` and `pull-requests: write`, where the wake keeps
+`contents: read`), and `LLM_API_KEY` is required there: unset is a red job with a
+`::error::` naming it, not a silent skip. The local equivalent, with a token that
+may push a branch:
+
+    ISSUE_NUMBER=<n> PROPOSAL_REVIEWER=<login> \
+      LLM_API_KEY=${LLM_API_KEY} GH_TOKEN=${GH_TOKEN} python3 ops/oncall/proposer.py
+
+Its offline test -- no model, no `git`, no `gh`, no repository -- runs with the
+responder's:
+
+    uv run --project backend pytest ops/oncall
+
+Like the wake above, this path only fires once `oncall.yml` is on the default
+branch, so the one real proposal #96 records -- with its pull request link and
+whether the reviewer approved, changed or rejected it -- is recorded on #96 once
+that happens.
+
 ## MCP server
 
 `mcp/` is a uv project, `jobradar_mcp`: a small MCP server that drives the

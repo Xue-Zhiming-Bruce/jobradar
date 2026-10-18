@@ -1,4 +1,6 @@
-# On-call: one GitHub issue labelled `alert` wakes one responder run, once.
+# On-call: one GitHub issue labelled `alert` wakes one responder run, and -- when the
+# incident it answers is not fixed -- one path that proposes a code fix behind a human
+# review gate.
 #
 # This is the responder half of #92. `alert.yml` opens at most one open issue
 # labelled `alert` when its hourly impact check finds user impact; this file wakes
@@ -35,14 +37,42 @@
 # that quietly does nothing is indistinguishable from one nobody noticed had
 # stopped working.
 #
-# The local equivalent, with the app on port 8123 (8000 belongs to compose), a
-# scratch issue labelled `alert`, and `RENDER_API_KEY`, `RENDER_SERVICE_ID` and
-# `GH_TOKEN` exported in your own shell (the way `ops/rollback.sh` documents its two):
+# The second job is #96's proposal path. It runs after the wake, on the same `alert`
+# issue, and declines anything the responder verified as fixed (`- **Fixed:** yes`),
+# anything the responder has not answered, a closed issue, and an incident it has
+# already proposed over (its own comment carries a marker, so the two deliveries of one
+# alert cannot push two branches). For an incident it takes, `ops/oncall/proposer.py`
+# drafts a code fix and opens it as a **draft pull request against `main`**, from
+# `oncall/proposal-<issue number>` and with the owner's review requested and the
+# evidence it reasoned from in the body. It pushes that branch and nothing else: no path
+# pushes `main`, merges, approves, force-pushes or deploys, a patch may touch only the
+# application files the model was handed, and `ops/oncall/test_proposer.py` reads every
+# command the path can issue back to pin that. A draft cannot be merged until a human
+# marks it ready, and `deploy.yml` deploys only a push to `main`, which only a human
+# merge makes. The *review* is required by a repository setting this file cannot make --
+# Settings > Branches > require a pull request before merging, with at least one
+# approving review on `main` -- recorded here the way `deploy.yml` records Render's
+# autodeploy setting. This job's `permissions` are job-scoped and larger than the wake's,
+# because pushing a branch needs `contents: write` and opening a pull request needs
+# `pull-requests: write`; the wake above keeps `contents: read`. `LLM_API_KEY` and
+# `PROPOSAL_REVIEWER` are required here, so an unconfigured repository is red with a
+# `::error::` naming the value rather than quietly proposing nothing.
+#
+# The local equivalent, with the app on port 8123 (8000 belongs to compose), a scratch
+# issue labelled `alert`, and `RENDER_API_KEY`, `RENDER_SERVICE_ID` and `GH_TOKEN`
+# exported in your own shell (the way `ops/rollback.sh` documents its two):
 #
 #   JOBRADAR_URL=http://127.0.0.1:8123 ISSUE_NUMBER=<n> \
 #     python3 ops/oncall/responder.py
 #
-# and the responder's own offline test, no app and no credential:
+# and, for the proposal path alone -- a login whose review is requested, and
+# `LLM_API_KEY` and `GH_TOKEN` from your own shell (the latter with `contents: write`
+# and `pull-requests: write`):
+#
+#   ISSUE_NUMBER=<n> PROPOSAL_REVIEWER=<login> \
+#     LLM_API_KEY=${LLM_API_KEY} GH_TOKEN=${GH_TOKEN} python3 ops/oncall/proposer.py
+#
+# and both modules' own offline tests, no app, no model, no `git` and no credential:
 #
 #   uv run --project backend pytest ops/oncall
 #
@@ -55,8 +85,9 @@
 #   docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest .github/workflows/*.yml
 #
 # The trigger carries one named limit: an `issues`-event workflow only fires once
-# its file is on the default branch, so a wake cannot be recorded from the branch
-# that adds this file -- it starts working when this file reaches `main`.
+# its file is on the default branch, so neither the wake nor the proposal below can be
+# recorded from the branch that adds this file -- both start working when it reaches
+# `main`.
 
 name: On-call
 
@@ -125,3 +156,55 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: python3 ops/oncall/responder.py
+
+  # #96's proposal path, after the wake above so the responder's own answer is on the
+  # issue before this job reads it. Its `permissions` are job-scoped: opening a draft
+  # pull request from a new branch needs `contents: write` and `pull-requests: write`,
+  # and the wake above keeps `contents: read`. No path here merges, approves or deploys.
+  proposal:
+    needs: oncall
+    runs-on: ubuntu-latest
+    # Two bounded model calls, one bounded push and one `gh pr create`; nothing here
+    # waits on a service the way a rollback does.
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    if: contains(github.event.issue.labels.*.name, 'alert')
+    steps:
+      - uses: actions/checkout@v7
+
+      # The model drafts the patch and the reviewer is who the pull request is opened
+      # for; neither is optional on this path, so an unconfigured repository is loudly
+      # red with an annotation naming the value instead of quietly proposing nothing.
+      - name: Require LLM_API_KEY and PROPOSAL_REVIEWER
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          PROPOSAL_REVIEWER: ${{ github.repository_owner }}
+        run: |
+          missing=0
+          if [ -z "${LLM_API_KEY}" ]; then
+            echo "::error::The repository secret LLM_API_KEY is unset or empty, so no patch can be drafted. The wake above still answers the alert without it; this job cannot propose without it."
+            missing=1
+          fi
+          if [ -z "${PROPOSAL_REVIEWER}" ]; then
+            echo "::error::PROPOSAL_REVIEWER (the repository owner) is empty, so no review can be requested on the proposal."
+            missing=1
+          fi
+          if [ "${missing}" -ne 0 ]; then
+            echo "::error::No proposal was attempted. Set LLM_API_KEY under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+      # One proposal attempt per incident. The proposer reads the alert issue and the
+      # responder's answer on it, pushes `oncall/proposal-<issue number>` alone, opens
+      # it as a draft against `main` with the owner's review requested, and comments the
+      # link on the issue. A human merges it or rejects it; nothing here does.
+      - name: Propose a fix behind the human review gate
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          PROPOSAL_REVIEWER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 ops/oncall/proposer.py
