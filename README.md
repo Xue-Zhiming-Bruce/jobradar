@@ -704,6 +704,45 @@ branch, so the one real proposal #96 records -- with its pull request link and
 whether the reviewer approved, changed or rejected it -- is recorded on #96 once
 that happens.
 
+### The unattended re-check
+
+A wake fires once, when the `alert` label arrives. A remediation that did not hold,
+or an escalation nobody picked up, would therefore stay silent until a person
+looked -- so `oncall.yml` also runs **every hour, at half past**, half an hour
+after `alert.yml`'s own hourly check, and starts `ops/oncall/recheck.py`. The
+scheduled job and the two `issues` jobs are the same workflow file; each is guarded
+to its own event, so the schedule starts the re-check and never a wake or a
+proposal.
+
+One scheduled run reads every open `alert` issue and makes **one attempt** per
+incident: it reads the deployed app's own signals again -- the same `GET /healthz`,
+`GET /telemetry/metrics` and `GET /runs/{id}` -- and takes at most one action again
+from #93's fixed set, through the responder's own action set and escalation rule
+(`responder.decide_and_act`) rather than a second copy of either. Its comment carries
+the attempt number, the run's own URL and the responder's own answer verbatim, so
+what it found, what it attempted and whether the issue is fixed read the same way a
+wake's answer does, and a verified fix closes the issue exactly as a wake closes it.
+
+It is bounded, and the bound is read off the issue itself: at most
+`MAX_ATTEMPTS` (3) attempts per incident, counted from the re-check's own comments,
+so it holds across runs. The last attempt's comment carries the one notice that says
+the re-check has stopped and what a person must do, and every later run touches
+nothing. It cannot trigger itself either: no path here schedules, dispatches or
+labels anything -- the job is granted no `actions: write`, and its only writes are
+one comment and, on a verified fix, a close. A comment fires `issue_comment`, not
+the `issues` event the wake reads, and the re-check re-adds no `alert` label, so a
+re-check cannot cascade into a wake.
+
+    JOBRADAR_URL=http://127.0.0.1:8123 GH_TOKEN=${GH_TOKEN} python3 ops/oncall/recheck.py
+    uv run --project backend pytest ops/oncall
+
+Its own test is `ops/oncall/test_recheck.py`, in the same offline suite, and it
+needs no credential and no socket. Nothing it emits carries a resume, a file name or
+a credential: it reuses #93's comment and #93's redaction. The one named limit is the
+same as the wake's -- a `schedule` only starts once `oncall.yml` is on the default
+branch -- so the run #97 records, with its workflow run URL, the signals it read and
+the attempt count it reached, is recorded on #97 once this merges to `main`.
+
 ## MCP server
 
 `mcp/` is a uv project, `jobradar_mcp`: a small MCP server that drives the
