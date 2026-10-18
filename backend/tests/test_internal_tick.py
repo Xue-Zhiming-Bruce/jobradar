@@ -308,6 +308,7 @@ def test_a_valid_tick_answers_202_with_the_running_row_it_wrote_before_the_work_
         "matches_emailed",
         "companies_not_fetched",
         "postings_not_rematched",
+        "trace_id",
         "company_outcomes",
     }
     assert body["status"] == "running"
@@ -589,6 +590,7 @@ def test_a_valid_rematch_answers_202_with_the_running_row_before_the_work_starte
         "matches_emailed",
         "companies_not_fetched",
         "postings_not_rematched",
+        "trace_id",
         "company_outcomes",
     }
     assert body["status"] == "running"

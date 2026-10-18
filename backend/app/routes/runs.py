@@ -4,10 +4,11 @@ A tick answers `202` with a run row while the work is still ahead of it, so this
 route is how a client -- the owner's browser, and #12's UI -- reads the rest:
 `running` while the run is in flight, then `succeeded` or `failed` with the
 counts the run earned and the failure's message when there was one. Nothing here
-is computed or invented: the body is the row's own ten columns plus the per-company
+is computed or invented: the body is the row's own columns plus the per-company
 outcomes of the run, because the row is the whole progress record this app keeps,
 and `app.models.Run` and `app.models.RunCompany` are where their meaning is
-declared.
+declared. Nothing here is guessed either: #102's `trace_id` is the request's own
+adopted id or NULL, and never a value read from somewhere else.
 
 No secret is required, because reading one's own run is what the browser does and
 this app has no accounts (`_docs/plan.md`). The body carries what the row holds
@@ -58,7 +59,7 @@ class RunCompanyOutcome(BaseModel):
 
 
 class RunSummary(BaseModel):
-    """One `run` row as this API renders it: its ten columns and its per-company outcomes.
+    """One `run` row as this API renders it: its columns and its per-company outcomes.
 
     The same body a `202` from `POST /internal/tick` carries. `finished_at` and
     `error` are absent until the run ends, and the two counts the walk earns are
@@ -77,6 +78,10 @@ class RunSummary(BaseModel):
     `company_outcomes` is one entry per company the run attempted and is empty for
     a run that has not attempted one yet -- the `202`'s fresh row -- so a client
     reads the same shape from both routes at every point in a run's life.
+    `trace_id` is the trace of the request that started this run (#102), the id the
+    request's own span and the run's span share; NULL means the row names no trace
+    -- a row written before the column existed, or a run a starter was handed
+    without an id -- and is never guessed at.
     """
 
     id: int
@@ -89,6 +94,7 @@ class RunSummary(BaseModel):
     matches_emailed: int | None
     companies_not_fetched: int | None
     postings_not_rematched: int | None
+    trace_id: str | None
     company_outcomes: list[RunCompanyOutcome]
 
 
@@ -141,6 +147,7 @@ def run_summary(run: Run) -> RunSummary:
         matches_emailed=run.matches_emailed,
         companies_not_fetched=run.companies_not_fetched,
         postings_not_rematched=run.postings_not_rematched,
+        trace_id=run.trace_id,
         company_outcomes=outcomes,
     )
 

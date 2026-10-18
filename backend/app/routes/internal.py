@@ -47,9 +47,9 @@ it scored before a real failure go out with the next successful run; a walk that
 recorded a failed board is not that case -- it returned, so its digest still
 emails what the boards that answered produced (#59).
 
-The row's ten columns are the whole progress record, and this module is the only
-writer of `status`, `finished_at` and `error`: the row is inserted `running` with
-both counts 0, the pipeline writes the counts as the run earns them, its own
+The row's columns are the whole progress record, and this module is the only
+writer of `status`, `finished_at`, `error` and `trace_id`: the row is inserted
+`running` with both counts 0, the pipeline writes the counts as the run earns them, its own
 per-company outcome rows and the digest's `matches_emailed`, and the run's end
 writes `succeeded` or `failed`. The status is derived after the pipeline returned:
 `failed` when any `run_company` row of this run is `'failed'`, whether one board
@@ -80,8 +80,15 @@ function's own business.
 the work as a value, and `_run` binds it for the run: the run's log lines and its
 own span -- named `run`, with no route, method or status code -- carry the same id
 as the `POST /internal/tick` request's frame and span, so one trace holds the
-request and the run together. Neither is stored on the row: the `run` table gains
-no column for it (#102).
+request and the run together.
+
+`#102` puts that same value on the row: `_start_run` reads it before the row is
+written and `_claim_run` stores it in the same unit of work that inserts the row,
+so `GET /runs/{id}` names the trace of the request that started a run -- a failed
+one included -- instead of leaving #92's alert and #93's responder to find it by
+timestamp. The value is the one `telemetry.adopted_trace_id` already bounded to
+64 characters of `[A-Za-z0-9._-]`, and a starter handed no id at all writes NULL,
+which is "unknown" rather than a guessed id.
 """
 
 import hmac
@@ -334,15 +341,19 @@ def _require_tick_secret(provided: str | None) -> None:
         )
 
 
-def _claim_run() -> RunSummary:
+def _claim_run(trace_id: str | None) -> RunSummary:
     """Write this run's row, `running` and empty, and read it back with its id.
 
     One session, flushed before it returns, so the id and both counts exist before
     the work is handed over: a client that reads the `202` can read the run, and
-    the work never runs without a row to report on.
+    the work never runs without a row to report on. The request's own trace id goes
+    in with the row, in this same unit of work (#102), so the row and the request's
+    span name one trace. `None` is stored as NULL: a starter handed no trace id
+    leaves an unknown one, and a guessed or borrowed id would join the row to a
+    trace that is not its own.
     """
     with db.session_scope() as session:
-        run = Run(status=RUNNING)
+        run = Run(status=RUNNING, trace_id=trace_id)
         session.add(run)
         session.flush()  # the row's id, and the columns' defaults, exist here
         return run_summary(run)  # read before the commit expires it
@@ -455,6 +466,9 @@ def _start_run(request: Request, starter: RunStarter, pipeline: Pipeline) -> Run
     The trace id this request is being served under is read here and handed over as
     a value (#90): the starter may run the work on a thread of its own, whose
     context starts empty, so a value read inside the work would be no value at all.
+    It is read before the row is written, because `_claim_run` stores it on the row
+    in the same unit of work that inserts it (#102) -- and because a row's trace id
+    is only ever the request's own, never one read back from anywhere.
     """
     _require_admitted_caller(request)
 
@@ -463,15 +477,15 @@ def _start_run(request: Request, starter: RunStarter, pipeline: Pipeline) -> Run
             status_code=409, detail="A run is already in progress in this process"
         )
 
+    trace_id = telemetry.current_trace_id()
     try:
-        run = _claim_run()
+        run = _claim_run(trace_id)
     except Exception as error:
         _run_in_progress.release()
         raise HTTPException(
             status_code=500, detail="The run could not be recorded in the database"
         ) from error
 
-    trace_id = telemetry.current_trace_id()
     try:
         starter(lambda: _run(run.id, pipeline, trace_id))
     except Exception as error:

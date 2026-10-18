@@ -251,7 +251,7 @@ def test_contract_describes_the_tick_and_the_run_it_started() -> None:
     read = contract["paths"]["/runs/{id}"]["get"]
 
     # One shape for a run wherever a client meets one: the `202` answers with the
-    # body the read answers with, and that body is the row's ten columns plus the
+    # body the read answers with, and that body is the row's columns plus the
     # per-company outcomes the run recorded (#59).
     started = tick["responses"]["202"]["content"]["application/json"]["schema"]
     summary = read["responses"]["200"]["content"]["application/json"]["schema"]
@@ -268,6 +268,7 @@ def test_contract_describes_the_tick_and_the_run_it_started() -> None:
         "matches_emailed",
         "companies_not_fetched",
         "postings_not_rematched",
+        "trace_id",
         "company_outcomes",
     }
     assert run["required"] == list(run["properties"])
@@ -295,6 +296,12 @@ def test_contract_describes_the_tick_and_the_run_it_started() -> None:
     # a positive value is how many the cap left -- so it is nullable and required.
     assert run["properties"]["postings_not_rematched"]["anyOf"] == [
         {"type": "integer"},
+        {"type": "null"},
+    ]
+    # #102's field: the trace of the request that started the run, or NULL when the
+    # row names no trace -- so it is a required, nullable string.
+    assert run["properties"]["trace_id"]["anyOf"] == [
+        {"type": "string"},
         {"type": "null"},
     ]
 
