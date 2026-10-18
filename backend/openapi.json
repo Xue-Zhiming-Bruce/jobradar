@@ -738,6 +738,32 @@
         }
       }
     },
+    "/telemetry/metrics/buckets": {
+      "get": {
+        "tags": [
+          "telemetry"
+        ],
+        "summary": "Read the window's per-minute metrics buckets",
+        "description": "The last `METRICS_WINDOW` as per-route, `METRICS_BUCKET`-wide buckets.\n\nOrdered by `bucket_start` ascending and then by route, so one window reads the\nsame body twice and a client can walk a route's minute series in the order it\nhappened. A bucket's numbers are the metrics read's own for that route and\nminute: the minute is stored whole, so both are counted from the same spans.\n\nA minute with no span of that route answers no row -- a bucket exists because a\nspan does -- and the whole window answering `[]` is what a window with no span\nin it answers. Both the window's length and the bucket size are constants of this\nmodule and neither is a deployment variable or a request parameter.",
+        "operationId": "read_metric_buckets_telemetry_metrics_buckets_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BucketMetric"
+                  },
+                  "type": "array",
+                  "title": "Response Read Metric Buckets Telemetry Metrics Buckets Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/telemetry/traces": {
       "get": {
         "tags": [
@@ -804,6 +830,41 @@
           "file"
         ],
         "title": "Body_upload_resume_resume_post"
+      },
+      "BucketMetric": {
+        "properties": {
+          "route": {
+            "type": "string",
+            "title": "Route"
+          },
+          "bucket_start": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Bucket Start"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          },
+          "errors": {
+            "type": "integer",
+            "title": "Errors"
+          },
+          "p95_ms": {
+            "type": "integer",
+            "title": "P95 Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "route",
+          "bucket_start",
+          "count",
+          "errors",
+          "p95_ms"
+        ],
+        "title": "BucketMetric",
+        "description": "One route's minute, as `GET /telemetry/metrics/buckets` answers it.\n\nThe fields `metric_bucket` stores and no sixth: the route template, the\nminute-aligned UTC instant the bucket begins, the minute's span count, the ones\nwhose status code is 500 or more, and the nearest-rank 95th percentile of the\nminute's durations. `bucket_start` is what `GET /telemetry/metrics` cannot\nanswer with -- its row is the whole window -- so a chart can read one value per\nminute from this read."
       },
       "CompanyCreate": {
         "properties": {

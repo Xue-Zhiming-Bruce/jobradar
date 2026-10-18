@@ -1029,6 +1029,112 @@ def test_105_ac1_a_bucket_write_that_fails_leaves_no_span_behind(
     assert stored_spans() == [] and stored_buckets() == []
 
 
+# #105 AC2: the window's buckets, oldest start first, then by route, and `[]` when
+# the window holds no span.
+
+
+def test_105_ac2_the_window_answers_its_buckets_oldest_first_then_by_route(
+    client: TestClient,
+) -> None:
+    """AC2: one object per stored bucket, carrying the five fields AC1 stores and no sixth."""
+    base = telemetry.bucket_start_of(datetime.now(UTC)) - timedelta(minutes=4)
+    store_a_span(route="/matches", duration_ms=5, started_at=base)
+    store_a_span(route="/watchlist", duration_ms=3, started_at=base + timedelta(minutes=1))
+    store_a_span(route="/matches", duration_ms=4, started_at=base + timedelta(minutes=1))
+
+    body = client.get("/telemetry/metrics/buckets").json()
+
+    # This read's own request is a span in the current minute, and so a bucket of its
+    # own: the fixtures' minutes are the four before it, so it is filtered out here.
+    rows = [row for row in body if row["route"] != "/telemetry/metrics/buckets"]
+    assert [(row["route"], datetime.fromisoformat(row["bucket_start"])) for row in rows] == [
+        ("/matches", base),  # the oldest bucket first...
+        ("/matches", base + timedelta(minutes=1)),  # ...then that minute's routes
+        ("/watchlist", base + timedelta(minutes=1)),
+    ]
+    assert set(rows[0]) == {"route", "bucket_start", "count", "errors", "p95_ms"}
+    assert (rows[0]["count"], rows[0]["errors"], rows[0]["p95_ms"]) == (1, 0, 5)
+
+
+def test_105_ac2_a_bucket_older_than_the_window_is_not_answered(client: TestClient) -> None:
+    """AC2: the window is the bound: a bucket before it is not in the body."""
+    aged = telemetry.bucket_start_of(
+        datetime.now(UTC) - telemetry.METRICS_WINDOW - timedelta(minutes=1)
+    )
+    store_a_span(route="/old", started_at=aged)
+    store_a_span(route="/new", started_at=datetime.now(UTC) - timedelta(minutes=1))
+
+    body = client.get("/telemetry/metrics/buckets").json()
+
+    assert [row["route"] for row in body if row["route"] != "/telemetry/metrics/buckets"] == [
+        "/new"
+    ]
+
+
+def test_105_ac2_a_window_with_no_span_answers_an_empty_list(client: TestClient) -> None:
+    """AC2: nothing in the window is `[]`, not one zero row per route."""
+    forget_every_span()
+
+    assert client.get("/telemetry/metrics/buckets").json() == []
+
+
+def test_105_ac2_the_window_and_the_bucket_are_constants_of_this_module() -> None:
+    """AC2: an hour of one-minute buckets, and this read takes no parameter at all."""
+    assert telemetry.METRICS_WINDOW == timedelta(hours=1)
+    assert telemetry.METRICS_BUCKET == timedelta(minutes=1)
+
+    route = app.openapi()["paths"]["/telemetry/metrics/buckets"]["get"]
+    assert "parameters" not in route
+
+
+# #105 AC3: a bucket's numbers are the metrics read's own, per route and minute.
+
+
+def test_105_ac3_a_bucket_agrees_with_the_metrics_read_for_its_route_and_minute(
+    client: TestClient,
+) -> None:
+    """AC3: spans across two buckets, and both reads agree about the route's numbers."""
+    base = telemetry.bucket_start_of(datetime.now(UTC)) - timedelta(minutes=5)
+    for duration in (10, 20, 30, 40):
+        store_a_span(route="/matches", duration_ms=duration, started_at=base + timedelta(seconds=10))
+    store_a_span(
+        route="/matches",
+        status_code=500,
+        duration_ms=50,
+        started_at=base + timedelta(minutes=2, seconds=5),
+    )
+    store_a_span(route="/healthz", duration_ms=7, started_at=base + timedelta(minutes=2))
+
+    buckets = client.get("/telemetry/metrics/buckets").json()
+    metrics = client.get("/telemetry/metrics").json()
+
+    matches = [row for row in buckets if row["route"] == "/matches"]
+    starts = [datetime.fromisoformat(row["bucket_start"]) for row in matches]
+    # The minute between the two holds no span of `/matches`: the read's contract is
+    # no row for it rather than a zero row, and no span of either minute is dropped.
+    assert starts == [base, base + timedelta(minutes=2)]
+    assert [(row["count"], row["errors"], row["p95_ms"]) for row in matches] == [
+        (4, 0, 40),  # the nearest rank of that minute's [10, 20, 30, 40]
+        (1, 1, 50),
+    ]
+
+    # What the metrics read answers for the route is what its buckets add up to, and a
+    # route whose spans are all in one minute answers the bucket's numbers as its own.
+    (matches_metric,) = [row for row in metrics if row["route"] == "/matches"]
+    assert matches_metric["count"] == sum(row["count"] for row in matches)
+    assert matches_metric["errors"] == sum(row["errors"] for row in matches)
+    assert matches_metric["p95_ms"] == telemetry.nearest_rank_p95([10, 20, 30, 40, 50])
+
+    (healthz_bucket,) = [row for row in buckets if row["route"] == "/healthz"]
+    (healthz_metric,) = [row for row in metrics if row["route"] == "/healthz"]
+    assert datetime.fromisoformat(healthz_bucket["bucket_start"]) == base + timedelta(minutes=2)
+    assert (healthz_bucket["count"], healthz_bucket["errors"], healthz_bucket["p95_ms"]) == (
+        healthz_metric["count"],
+        healthz_metric["errors"],
+        healthz_metric["p95_ms"],
+    )
+
+
 # #105 AC4: retention covers the buckets, and a bucket the window needs is never deleted.
 
 

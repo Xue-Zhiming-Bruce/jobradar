@@ -67,6 +67,7 @@ def test_contract_lists_every_registered_path_in_registration_order() -> None:
         "/matches",
         "/matches/{id}",
         "/telemetry/metrics",
+        "/telemetry/metrics/buckets",
         "/telemetry/traces",
     ]
 

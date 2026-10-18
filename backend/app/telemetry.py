@@ -625,6 +625,24 @@ class RouteMetric(BaseModel):
     p95_ms: int
 
 
+class BucketMetric(BaseModel):
+    """One route's minute, as `GET /telemetry/metrics/buckets` answers it.
+
+    The fields `metric_bucket` stores and no sixth: the route template, the
+    minute-aligned UTC instant the bucket begins, the minute's span count, the ones
+    whose status code is 500 or more, and the nearest-rank 95th percentile of the
+    minute's durations. `bucket_start` is what `GET /telemetry/metrics` cannot
+    answer with -- its row is the whole window -- so a chart can read one value per
+    minute from this read.
+    """
+
+    route: str
+    bucket_start: datetime
+    count: int
+    errors: int
+    p95_ms: int
+
+
 class SpanSummary(BaseModel):
     """One span as the trace read renders it: the row's own facts, minus the trace id.
 
@@ -726,6 +744,44 @@ def read_metrics() -> list[RouteMetric]:
         )
         for route in durations
     ]
+
+
+@router.get(
+    "/telemetry/metrics/buckets",
+    response_model=list[BucketMetric],
+    tags=["telemetry"],
+    summary="Read the window's per-minute metrics buckets",
+)
+def read_metric_buckets() -> list[BucketMetric]:
+    """The last `METRICS_WINDOW` as per-route, `METRICS_BUCKET`-wide buckets.
+
+    Ordered by `bucket_start` ascending and then by route, so one window reads the
+    same body twice and a client can walk a route's minute series in the order it
+    happened. A bucket's numbers are the metrics read's own for that route and
+    minute: the minute is stored whole, so both are counted from the same spans.
+
+    A minute with no span of that route answers no row -- a bucket exists because a
+    span does -- and the whole window answering `[]` is what a window with no span
+    in it answers. Both the window's length and the bucket size are constants of this
+    module and neither is a deployment variable or a request parameter.
+    """
+    since = datetime.now(UTC) - METRICS_WINDOW
+    with db.session_scope() as session:
+        buckets = session.scalars(
+            select(MetricBucket)
+            .where(MetricBucket.bucket_start >= since)
+            .order_by(MetricBucket.bucket_start, MetricBucket.route)
+        ).all()
+        return [
+            BucketMetric(
+                route=bucket.route,
+                bucket_start=bucket.bucket_start,
+                count=bucket.count,
+                errors=bucket.errors,
+                p95_ms=bucket.p95_ms,
+            )
+            for bucket in buckets
+        ]
 
 
 @router.get(
