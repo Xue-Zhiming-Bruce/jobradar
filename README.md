@@ -2,10 +2,7 @@
 
 **JobRadar is a one-user job-search assistant that turns a list of companies you
 want to work for into one daily digest of the new postings there, matched against
-your uploaded resume, each with a plain-English reason and the gaps.** The
-problem it solves is the two bad options in front of a job seeker: check many
-career pages by hand, or drown in a job-board firehose where most postings are
-irrelevant — and neither says *why* a role fits, so the same postings get re-read.
+your uploaded resume, each with a plain-English reason and the gaps.**
 
 **The live instance: <https://jobradar-c75b.onrender.com>** (Render's free plan
 with Neon Postgres — the first request after a quiet period takes about a minute,
@@ -13,11 +10,12 @@ see [Deployment](#deployment)).
 
 ## Problem
 
-One person, the owner. No accounts, no login, no multi-tenancy.
+**Who has it.** One person: the owner. No accounts, no login, no multi-tenancy.
 
-Finding the openings worth applying to means either checking many company career
-pages by hand or drowning in a job-board firehose where most postings are
-irrelevant. Neither tells you *why* a role fits, so the same postings get re-read.
+**Why the obvious options fall short.** Finding the openings worth applying to
+means either checking many company career pages by hand or drowning in a job-board
+firehose where most postings are irrelevant. Neither tells you *why* a role fits,
+so the same postings get re-read.
 
 **What the system does.** A company is added by name, board slug and source; once
 a day — or whenever the owner presses the in-app **"Run digest now"** button — the
@@ -772,6 +770,8 @@ part of the repository — and is stored outside it, in `UPLOADS_DIR` (a volume
 under compose, `~/.jobradar/uploads` otherwise). Its text is user data: it is
 never logged, never returned to a client except through the app's own
 `GET /resume/{id}/file`, and never committed, and neither is the database file.
+The app's validation handler answers a rejected upload with `422` and drops each
+error's offending input, so the file itself cannot reach an error body either.
 Secrets live in `.env`, which is gitignored, and in a deployment they arrive as the
 platform's environment variables (Render) and GitHub repository secrets. The names
 are the table above; no value ever appears in this file.
@@ -978,38 +978,30 @@ flowchart LR
    (`_docs/decisions/2026-10-11-deploy-and-repo.md`), and the measured cost of one
    is [above](#evaluation).
 
-**Technologies**, and the seam each talks through:
+**Technologies**, and the seam each talks through — the six pieces above are the
+architecture; this is what each is built from:
 
-- **FastAPI** — the API, and the server of the frontend's build. One app object in
+- **FastAPI** — the API, and the server of the frontend's build: one app object in
   `backend/app/main.py`, one router module per resource in `backend/app/routes/`,
-  `uvicorn` as the server. The app object carries the startup that creates the
-  tables and prunes old spans, the validation handler that keeps an upload's
-  contents out of an error body, the telemetry middleware and exporter, the hosted
-  MCP endpoint, and the UI mount.
-- **React + TypeScript + Vite** — the UI, in `frontend/`. Screens in
-  `frontend/src/screens/`, and every backend call funnelled through one module,
-  `frontend/src/api/client.ts`; `frontend/src/api/noStrayFetch.test.ts` fails if
-  any other file under `src/` reaches the network, which is what keeps the
-  one-origin design honest. Vite builds it, the tests run under `vitest`.
-- **SQLAlchemy over SQLite and Postgres** — storage, the same models on both
-  engines; the suite's engine fixture is parametrised over both.
-- **Docker + `compose.yaml`** — packaging and the local whole-system path, one
-  image built from the repository root and one compose file that brings it up with
-  its database and its named volumes.
+  `uvicorn` as the server.
+- **React + TypeScript + Vite** — the UI, in `frontend/`, with every backend call
+  funnelled through `frontend/src/api/client.ts`.
+- **SQLAlchemy over SQLite and Postgres** — storage, one set of models on both
+  engines.
+- **Docker + `compose.yaml`** — packaging and the local whole-system path.
 - **GitHub Actions** — CI, deployment, the daily tick, the hourly alert and the
   on-call agent, in `.github/workflows/` (see [CI/CD](#cicd) and
   [Monitoring](#monitoring)).
-- **The committed contract, `backend/openapi.json`** — 16 paths as of this
-  commit, generated from the FastAPI app rather than written by hand; a route
-  change that was not exported is caught by the suite and by CI's `contract` job.
-- **The MCP server in `mcp/`** — the app reachable by an MCP client: a uv project,
-  `jobradar-mcp`, that drives this app over HTTP through seven bounded tools, in a
-  process of its own over **stdio**, and — since the hosted endpoint was added —
-  served a second way, over **MCP streamable HTTP**, mounted into the app's own
-  process at `/mcp`. Keeping the tools in a separate project was originally so the
-  `mcp` dependency never entered the backend's tree or the deployed image; serving
-  the endpoint from the one container reversed that, and the tools stayed one
-  implementation rather than a copy
+- **The committed contract, `backend/openapi.json`** — 16 paths as of this commit,
+  generated from the FastAPI app rather than written by hand; a route change that
+  was not exported is caught by the suite and by CI's `contract` job.
+- **The MCP server in `mcp/`** — a uv project, `jobradar-mcp`, that drives this app
+  over HTTP through seven bounded tools, in a process of its own over **stdio**,
+  and — since the hosted endpoint was added — over **MCP streamable HTTP**,
+  mounted into the app's own process at `/mcp`. Keeping the tools in a separate
+  project was originally so the `mcp` dependency never entered the backend's tree
+  or the deployed image; serving the endpoint from the one container reversed
+  that, and the tools stayed one implementation rather than a copy
   (`_docs/decisions/2026-10-14-hosted-mcp.md`).
 
 ### The MCP server
