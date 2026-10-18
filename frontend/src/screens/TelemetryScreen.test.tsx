@@ -245,6 +245,10 @@ describe('the telemetry chart', () => {
     expect(drawn('requests')[59]).toBe('09:01 requests 1')
     // The fixture's two spans, each in its own minute and nowhere else.
     expect(requestingMinutes()).toEqual(['09:00 requests 1', '09:01 requests 1'])
+    // Each series' own value on both of those minutes: 09:00 answers one 41 ms
+    // request, 09:01 one 4 ms, and neither the 202 nor anything else is an error.
+    expect(drawn('p95')).toEqual(['09:00 p95 41 ms', '09:01 p95 4 ms'])
+    expect(drawn('errors')[59]).toBe('09:01 errors 0')
   })
 
   it("counts a span in its own startedAt minute, and drops a span outside the window (AC2)", async () => {
