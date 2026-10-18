@@ -1,4 +1,4 @@
-"""The seven tables JobRadar stores, declared once and nowhere else.
+"""The eight tables JobRadar stores, declared once and nowhere else.
 
 `app.db.init_db()` builds every table from these models with SQLAlchemy's
 `create_all`, which creates only what is missing. It never alters a table that
@@ -41,7 +41,7 @@ from sqlalchemy.types import TypeDecorator
 
 
 class Base(DeclarativeBase):
-    """One metadata object holding all seven tables, for `create_all`."""
+    """One metadata object holding all eight tables, for `create_all`."""
 
 
 def _utcnow() -> datetime:
@@ -324,6 +324,40 @@ class TelemetrySpan(Base):
     # precision, and an integer orders the same way on both engines.
     duration_ms: Mapped[int] = mapped_column(Integer)
     started_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class MetricBucket(Base):
+    """One route's minute: the metrics window cut into per-minute buckets (#105).
+
+    The bucket a span is counted into is its route and its `METRICS_BUCKET` (one
+    clock minute), and the three numbers are recounted from the spans of that
+    route and minute rather than accumulated: `count` is how many there were,
+    `errors` those answering 500 or more, and `p95_ms` the nearest-rank 95th
+    percentile of their durations. One row per route and minute, which the unique
+    key makes the database's rule and not the writer's. Written by
+    `app.telemetry.store_span` in the span's own transaction, so a span write that
+    failed leaves no bucket behind; read by `GET /telemetry/metrics/buckets`; and
+    deleted by `prune_spans` with the spans it counts. `route` is a route template
+    or `telemetry.UNMATCHED_ROUTE`, never a path a caller chose, and the three
+    numbers are counted from stored spans, so nothing caller-chosen is stored here.
+    """
+
+    __tablename__ = "metric_bucket"
+    __table_args__ = (
+        UniqueConstraint("route", "bucket_start", name="uq_metric_bucket_route_start"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    route: Mapped[str] = mapped_column(String(255))
+    # The minute-aligned UTC instant this bucket begins: the span's own start with
+    # its sub-minute fields dropped, never a value a client sent.
+    bucket_start: Mapped[datetime] = mapped_column(UTCDateTime())
+    count: Mapped[int] = mapped_column(Integer)
+    # The spans of this route and minute whose status code is 500 or more.
+    errors: Mapped[int] = mapped_column(Integer)
+    # Whole milliseconds, by the same nearest-rank rule `GET /telemetry/metrics`
+    # answers with, so a bucket and that read cannot disagree about a minute.
+    p95_ms: Mapped[int] = mapped_column(Integer)
 
 
 class RunCompany(Base):

@@ -24,7 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import db
-from app.models import Base, Company, Match, Posting, Resume, Run, TelemetrySpan
+from app.models import Base, Company, Match, MetricBucket, Posting, Resume, Run, TelemetrySpan
 
 # A known instant in the past, so `datetime.now(UTC) - stored` is a positive
 # delta on both engines instead of the TypeError SQLite used to raise.
@@ -45,7 +45,7 @@ _LONG_TEXT_COLUMNS = [
     (Run, "error"),
 ]
 
-# Every timestamp column in the seven tables: each one has to round-trip.
+# Every timestamp column in the eight tables: each one has to round-trip.
 _TIMESTAMP_COLUMNS = [
     (Resume, "uploaded_at"),
     (Company, "created_at"),
@@ -57,6 +57,7 @@ _TIMESTAMP_COLUMNS = [
     (Run, "started_at"),
     (Run, "finished_at"),
     (TelemetrySpan, "started_at"),
+    (MetricBucket, "bucket_start"),
 ]
 
 # Test data is synthetic on purpose: the repository is public and holds no
@@ -96,7 +97,7 @@ def _add_company_with_posting(
     return company, posting
 
 
-def test_create_read_update_delete_round_trip_over_all_seven_tables(engine: Engine) -> None:
+def test_create_read_update_delete_round_trip_over_all_eight_tables(engine: Engine) -> None:
     assert set(inspect(engine).get_table_names()) == set(Base.metadata.tables)
 
     with db.session_scope() as session:
@@ -115,6 +116,15 @@ def test_create_read_update_delete_round_trip_over_all_seven_tables(engine: Engi
             )
         )
         session.add(
+            MetricBucket(
+                route="/matches/{id}",
+                bucket_start=KNOWN_UTC,
+                count=4,
+                errors=1,
+                p95_ms=120,
+            )
+        )
+        session.add(
             Resume(
                 filename="synthetic-resume.txt",
                 content_type="text/plain",
@@ -130,6 +140,7 @@ def test_create_read_update_delete_round_trip_over_all_seven_tables(engine: Engi
         run = session.scalars(select(Run)).one()
         resume = session.scalars(select(Resume)).one()
         span = session.scalars(select(TelemetrySpan)).one()
+        bucket = session.scalars(select(MetricBucket)).one()
 
         assert (company.name, company.slug) == ("Acme", "acme")
         assert posting.company_id == company.id  # the link through company_id holds
@@ -141,6 +152,8 @@ def test_create_read_update_delete_round_trip_over_all_seven_tables(engine: Engi
         assert resume.text == SYNTHETIC_RESUME_TEXT
         assert (span.name, span.route, span.method) == ("http", "/matches/{id}", "GET")
         assert (span.status_code, span.duration_ms) == (200, 12)
+        assert (bucket.route, bucket.bucket_start) == ("/matches/{id}", KNOWN_UTC)
+        assert (bucket.count, bucket.errors, bucket.p95_ms) == (4, 1, 120)
 
         # Columns where absence is legitimate stay unset, and come back as None
         # on both engines rather than as an empty string.
@@ -160,6 +173,7 @@ def test_create_read_update_delete_round_trip_over_all_seven_tables(engine: Engi
         session.scalars(select(Run)).one().status = "succeeded"
         session.scalars(select(Resume)).one().is_active = False
         session.scalars(select(TelemetrySpan)).one().status_code = 404
+        session.scalars(select(MetricBucket)).one().errors = 2
 
     with db.session_scope() as session:
         assert session.scalars(select(Company)).one().name == "Acme Renamed"
@@ -168,13 +182,14 @@ def test_create_read_update_delete_round_trip_over_all_seven_tables(engine: Engi
         assert session.scalars(select(Run)).one().status == "succeeded"
         assert session.scalars(select(Resume)).one().is_active is False
         assert session.scalars(select(TelemetrySpan)).one().status_code == 404
+        assert session.scalars(select(MetricBucket)).one().errors == 2
 
     with db.session_scope() as session:
-        for model in (Match, Posting, Company, Resume, Run, TelemetrySpan):
+        for model in (Match, Posting, Company, Resume, Run, TelemetrySpan, MetricBucket):
             session.delete(session.scalars(select(model)).one())
 
     with db.session_scope() as session:
-        for model in (Match, Posting, Company, Resume, Run, TelemetrySpan):
+        for model in (Match, Posting, Company, Resume, Run, TelemetrySpan, MetricBucket):
             assert session.scalars(select(model)).all() == []
 
 
@@ -240,6 +255,9 @@ def test_timestamps_round_trip_as_the_same_aware_instant(engine: Engine) -> None
             )
         )
         session.add(
+            MetricBucket(route="/healthz", bucket_start=KNOWN_UTC, count=0, errors=0, p95_ms=0)
+        )
+        session.add(
             Resume(
                 filename="synthetic-resume.txt",
                 content_type="text/plain",
@@ -252,7 +270,7 @@ def test_timestamps_round_trip_as_the_same_aware_instant(engine: Engine) -> None
     with db.session_scope() as session:
         rows = {
             model.__tablename__: session.scalars(select(model)).one()
-            for model in (Resume, Company, Posting, Match, Run, TelemetrySpan)
+            for model in (Resume, Company, Posting, Match, Run, TelemetrySpan, MetricBucket)
         }
 
         for model, column in _TIMESTAMP_COLUMNS:

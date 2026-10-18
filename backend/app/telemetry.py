@@ -53,11 +53,20 @@ names are a contract: #91 renders this body and #92 and #93 quote these trace id
 so a rename here breaks them. Both windows are constants here and neither is a
 deployment variable or a request parameter.
 
+`GET /telemetry/metrics/buckets` is the same window cut into `METRICS_BUCKET`s: one
+row per route and clock minute, so a chart reads a series with a time on every point
+instead of one row per route (#105). `store_span` writes the span and its bucket in
+one transaction, and the bucket's count, errors and p95 are recounted from the
+minute's stored spans rather than accumulated, so a bucket is the metrics read's own
+numbers for that route and minute and a span write that failed leaves no bucket
+behind. `bucket_start` is the minute the bucket begins, in UTC. A minute with no
+span of that route answers no row, because a bucket exists because a span does.
+
 `prune_spans()` is the only deleter of spans, called once per process start from
-`app.main`'s lifespan beside `reap_stale_runs()`. `SPAN_RETENTION` is strictly
-longer than `METRICS_WINDOW`, so every span a metric counted is still stored when
-the metric is read.
-"""
+`app.main`'s lifespan beside `reap_stale_runs()`. It deletes a span's bucket with the
+span: `SPAN_RETENTION` is strictly longer than `METRICS_WINDOW`, so every span a
+metric counted and every bucket that counted it are still stored when the metric is
+read."""
 
 import json
 import logging
@@ -77,11 +86,12 @@ import httpx2
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app import db
-from app.models import TelemetrySpan
+from app.models import MetricBucket, TelemetrySpan
 
 logger = logging.getLogger(__name__)
 
@@ -116,12 +126,14 @@ RUN_SPAN_NAME = "run"
 # middleware re-raises, so the answer is still the app's own `500`.
 ERROR_STATUS_CODE = 500
 
-# The window `GET /telemetry/metrics` counts over, and how long a span is kept.
-# Both are constants of this module and neither is configurable: a window that can
-# be set per deployment or per request is a window two readers cannot compare.
-# Retention is strictly longer, so a span a metric counted is still stored.
+# The window `GET /telemetry/metrics` counts over, how long a span is kept, and the
+# bucket that window is stored in. All three are constants of this module and none is
+# configurable: a window that can be set per deployment or per request is a window two
+# readers cannot compare. Retention is strictly longer, so a span a metric counted is
+# still stored.
 METRICS_WINDOW = timedelta(hours=1)
 SPAN_RETENTION = timedelta(days=7)
+METRICS_BUCKET = timedelta(minutes=1)
 
 # The one variable the OTLP export reads, and the path an OTLP/HTTP traces request
 # is posted to under it. There is no default endpoint: unset or empty builds no
@@ -206,6 +218,16 @@ def elapsed_milliseconds(started: float) -> int:
     return max(0, round((time.perf_counter() - started) * 1000))
 
 
+def bucket_start_of(started_at: datetime) -> datetime:
+    """The minute-aligned start of the `METRICS_BUCKET` this instant falls in, in UTC.
+
+    `METRICS_BUCKET` is one clock minute, so dropping the sub-minute fields is the
+    bucket: there is no part of a minute a bucket could begin inside. The instant
+    keeps its own UTC offset, and every writer stores one from a stored span.
+    """
+    return started_at.replace(second=0, microsecond=0)
+
+
 @dataclass(frozen=True)
 class Span:
     """One span, in the seven facts `telemetry_span` holds.
@@ -225,15 +247,58 @@ class Span:
 
 
 def store_span(span: Span) -> None:
-    """Write one span. The one writer of `telemetry_span`, and the only one.
+    """Write one span and, for an HTTP span, count it into its route's minute.
 
     One `db.session_scope()`, so the connection is closed on every path -- a
-    failure leaves no connection behind. It raises whatever the database raises:
-    whether that may reach the response is `record_span`'s decision and not this
-    function's, and a test replaces this name to drive that decision.
+    failure leaves no connection behind -- and the span and its bucket are one
+    transaction: a write that fails leaves neither the row nor a bucket counting
+    it. It raises whatever the database raises: whether that may reach the response
+    is `record_span`'s decision and not this function's, and a test replaces this
+    name to drive that decision.
+
+    A span with no route is the run's own and has no bucket: a bucket is a route's
+    minute, and `metric_bucket.route` is not nullable.
     """
     with db.session_scope() as session:
         session.add(TelemetrySpan(**asdict(span)))
+        if span.route is not None:
+            update_bucket(session, span)
+
+
+def update_bucket(session: Session, span: Span) -> None:
+    """Count one HTTP span into its route's minute, in the caller's transaction.
+
+    The bucket is recounted from the stored spans of that route and minute -- the
+    span just added is one of them, because the session flushes before this reads
+    -- so its `count`, `errors` and `p95_ms` are the numbers `GET /telemetry/metrics`
+    answers for that route and minute, by the nearest-rank rule rather than a running
+    estimate that could drift. `route` and `bucket_start` are the stored row's key,
+    so this finds the one row or adds it; the count, the error count and the
+    percentile are written from the spans and never from the span's own fields alone.
+
+    shortcut: the recount reads that minute's rows once per span, so one busy minute
+    costs its own length per request; store a duration distribution instead if a
+    minute ever holds thousands of spans.
+    """
+    start = bucket_start_of(span.started_at)
+    minute = session.execute(
+        select(TelemetrySpan.status_code, TelemetrySpan.duration_ms).where(
+            TelemetrySpan.route == span.route,
+            TelemetrySpan.started_at >= start,
+            TelemetrySpan.started_at < start + METRICS_BUCKET,
+        )
+    ).all()
+    bucket = session.scalars(
+        select(MetricBucket).where(
+            MetricBucket.route == span.route, MetricBucket.bucket_start == start
+        )
+    ).one_or_none()
+    if bucket is None:
+        bucket = MetricBucket(route=span.route, bucket_start=start, count=0, errors=0, p95_ms=0)
+        session.add(bucket)
+    bucket.count = len(minute)
+    bucket.errors = sum(1 for status_code, _ in minute if is_an_error(status_code))
+    bucket.p95_ms = nearest_rank_p95([duration_ms for _, duration_ms in minute])
 
 
 def record_span(span: Span) -> None:
@@ -560,6 +625,24 @@ class RouteMetric(BaseModel):
     p95_ms: int
 
 
+class BucketMetric(BaseModel):
+    """One route's minute, as `GET /telemetry/metrics/buckets` answers it.
+
+    The fields `metric_bucket` stores and no sixth: the route template, the
+    minute-aligned UTC instant the bucket begins, the minute's span count, the ones
+    whose status code is 500 or more, and the nearest-rank 95th percentile of the
+    minute's durations. `bucket_start` is what `GET /telemetry/metrics` cannot
+    answer with -- its row is the whole window -- so a chart can read one value per
+    minute from this read.
+    """
+
+    route: str
+    bucket_start: datetime
+    count: int
+    errors: int
+    p95_ms: int
+
+
 class SpanSummary(BaseModel):
     """One span as the trace read renders it: the row's own facts, minus the trace id.
 
@@ -593,6 +676,15 @@ class TraceSummary(BaseModel):
 UNUSABLE_LIMIT_RESPONSE = {
     422: {"description": "The limit is not a whole number of traces this read answers"}
 }
+
+
+def is_an_error(status_code: int | None) -> bool:
+    """Whether a span's status code is a failure: 500 or more, and `None` is not one.
+
+    The one spelling of the rule, read by both metric reads and by the bucket the
+    writer counts a span into, so no two of them can disagree about what an error is.
+    """
+    return status_code is not None and status_code >= ERROR_STATUS_CODE
 
 
 def nearest_rank_p95(durations: Sequence[int]) -> int:
@@ -638,7 +730,7 @@ def read_metrics() -> list[RouteMetric]:
     errors: dict[str, int] = {}
     for route, status_code, duration_ms in rows:
         durations.setdefault(route, []).append(duration_ms)
-        if status_code is not None and status_code >= ERROR_STATUS_CODE:
+        if is_an_error(status_code):
             errors[route] = errors.get(route, 0) + 1
 
     # The rows were read ordered by route, so the mapping is iterated in that
@@ -652,6 +744,44 @@ def read_metrics() -> list[RouteMetric]:
         )
         for route in durations
     ]
+
+
+@router.get(
+    "/telemetry/metrics/buckets",
+    response_model=list[BucketMetric],
+    tags=["telemetry"],
+    summary="Read the window's per-minute metrics buckets",
+)
+def read_metric_buckets() -> list[BucketMetric]:
+    """The last `METRICS_WINDOW` as per-route, `METRICS_BUCKET`-wide buckets.
+
+    Ordered by `bucket_start` ascending and then by route, so one window reads the
+    same body twice and a client can walk a route's minute series in the order it
+    happened. A bucket's numbers are the metrics read's own for that route and
+    minute: the minute is stored whole, so both are counted from the same spans.
+
+    A minute with no span of that route answers no row -- a bucket exists because a
+    span does -- and the whole window answering `[]` is what a window with no span
+    in it answers. Both the window's length and the bucket size are constants of this
+    module and neither is a deployment variable or a request parameter.
+    """
+    since = datetime.now(UTC) - METRICS_WINDOW
+    with db.session_scope() as session:
+        buckets = session.scalars(
+            select(MetricBucket)
+            .where(MetricBucket.bucket_start >= since)
+            .order_by(MetricBucket.bucket_start, MetricBucket.route)
+        ).all()
+        return [
+            BucketMetric(
+                route=bucket.route,
+                bucket_start=bucket.bucket_start,
+                count=bucket.count,
+                errors=bucket.errors,
+                p95_ms=bucket.p95_ms,
+            )
+            for bucket in buckets
+        ]
 
 
 @router.get(
@@ -721,17 +851,20 @@ def _span_summary(span: TelemetrySpan) -> SpanSummary:
 
 
 def prune_spans() -> int:
-    """Delete every span older than `SPAN_RETENTION`, and answer how many there were.
+    """Delete every span older than `SPAN_RETENTION`, and the buckets that counted it.
 
     The only deleter of spans, called once per process start from `app.main`'s
-    lifespan beside `reap_stale_runs()`, and never a route. One statement in one
-    `db.session_scope()`, so nothing is held open: the retained window is the whole
-    story the reads tell, and a span that ages out of it is a row nobody will ask
-    for again. `SPAN_RETENTION` is longer than `METRICS_WINDOW`, so no span a
-    metric counted is deleted while that metric still counts it.
+    lifespan beside `reap_stale_runs()`, and never a route. The buckets go with the
+    spans in the same `db.session_scope()`, so the table the bucket read answers from
+    is as bounded as the spans are, and it answers the number of spans deleted -- the
+    unit the caller's own log line names. `SPAN_RETENTION` is longer than
+    `METRICS_WINDOW`, so no span a metric counted and no bucket that counted it is
+    deleted while that metric still reads them: a bucket inside the window began at
+    most an hour ago and the cutoff is seven days back.
     """
     cutoff = datetime.now(UTC) - SPAN_RETENTION
     with db.session_scope() as session:
+        session.execute(delete(MetricBucket).where(MetricBucket.bucket_start < cutoff))
         return session.execute(
             delete(TelemetrySpan).where(TelemetrySpan.started_at < cutoff)
         ).rowcount
