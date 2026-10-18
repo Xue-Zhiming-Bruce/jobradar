@@ -1,4 +1,4 @@
-"""`ops/oncall/impact_check.py`'s four predicates, pinned offline over synthetic responses.
+"""`ops/oncall/impact_check.py`'s five predicates, pinned offline over synthetic responses.
 
 #92's AC9: this drives the classifier with the bodies the app's reads would answer
 -- no app, no socket and no credential -- and pins which inputs alert and which do
@@ -6,6 +6,11 @@ not. Each of AC3--AC6's four predicates is exercised in its firing form and in t
 awkward cases: an empty run list, a newest run still `running`, a matches window
 truncated by the page's limit, a window mixing `scored` and `not_scored`, a
 telemetry window with zero requests, and a read that does not answer `200`.
+
+#99's `app_unreachable` is pinned in the same style: the app answering, one probe
+that did not answer -- a cold free-tier instance -- and both probes still silent,
+which is the one case where a read that never answered is user impact and does
+alert, through the same one-open-issue path as the journey predicates.
 
 `fetch` itself is pinned against a fake `urlopen` too (#108): a socket timeout on
 connect and one on `read()` -- the escape that killed the hourly run -- a refused
@@ -228,11 +233,22 @@ def test_http_5xx_rate_is_quiet_on_a_window_with_no_journey_requests() -> None:
     assert not verdict.fired
 
 
-# The classifier as a whole: one healthy input, and one read that fails.
+# The classifier as a whole: one healthy input, one read that fails, and #99's
+# unreachable app.
 
 
-def test_check_fires_none_on_a_healthy_journey() -> None:
-    reads = {
+def _healthy_reads() -> dict[str, Any]:
+    """A healthy journey's three reads, plus the two probes #99 reads first."""
+    return {
+        impact_check.HEALTHZ_READ: {"status": "ok"},
+        impact_check.UNREACHABLE_RUNS_READ: [
+            run(
+                7,
+                "succeeded",
+                started_at=NOW - timedelta(hours=1),
+                finished_at=NOW - timedelta(minutes=59),
+            )
+        ],
         impact_check.RUNS_READ: [
             run(
                 7,
@@ -247,10 +263,116 @@ def test_check_fires_none_on_a_healthy_journey() -> None:
         impact_check.METRICS_READ: [metric("/internal/tick", count=10, errors=0)],
     }
 
-    report = impact_check.check(reads.__getitem__, NOW)
+
+def _raise_read_failures(
+    reads: dict[str, Any], unreachable: dict[str, Any] | None = None
+) -> Any:
+    """`reads` as a `read` callable, with `unreachable`'s paths raising instead."""
+    failures = unreachable or {}
+
+    def read(path: str) -> Any:
+        if path in failures:
+            raise failures[path]
+        return reads[path]
+
+    return read
+
+
+def test_check_fires_none_on_a_healthy_journey() -> None:
+    report = impact_check.check(_healthy_reads().__getitem__, NOW)
 
     assert report.healthy
     assert report.fired == []
+
+
+def test_check_does_not_alert_on_one_probe_that_did_not_answer() -> None:
+    """AC1 (#99): a cold start loses the first read; the second answering is enough."""
+    healthz_down = {
+        impact_check.HEALTHZ_READ: impact_check.ReadFailed(
+            impact_check.HEALTHZ_READ,
+            None,
+            TimeoutError("The read operation timed out"),
+        )
+    }
+
+    report = impact_check.check(
+        _raise_read_failures(_healthy_reads(), healthz_down), NOW
+    )
+    unreachable = next(
+        verdict for verdict in report.verdicts if verdict.name == "app_unreachable"
+    )
+
+    assert report.healthy, report.body
+    assert report.fired == []
+    assert unreachable.values["probes_failed"] == 1
+
+
+def test_check_fires_app_unreachable_when_both_probes_still_fail() -> None:
+    """AC1/AC2 (#99): `/healthz` and then `/runs?limit=1` both never answered."""
+    calls: list[str] = []
+
+    def read(path: str) -> Any:
+        calls.append(path)
+        if path in impact_check.APP_PROBES:
+            raise impact_check.ReadFailed(
+                path, None, urllib.error.URLError("connection refused")
+            )
+        raise AssertionError(f"no journey read may follow an unreachable app: {path}")
+
+    report = impact_check.check(read, NOW)
+
+    assert calls == list(impact_check.APP_PROBES)
+    assert report.fired == ["app_unreachable"]
+    assert report.runs == []
+    assert "app_unreachable" in report.title
+    assert impact_check.HEALTHZ_READ in report.body
+    assert impact_check.UNREACHABLE_RUNS_READ in report.body
+    assert "none was read: the app did not answer" in report.body
+
+
+def test_app_unreachable_evidence_names_each_read_and_what_it_answered() -> None:
+    """AC2 (#99): the status or the error of the failed read, and no body."""
+    report = impact_check.check(
+        _raise_read_failures(
+            _healthy_reads(),
+            {
+                impact_check.HEALTHZ_READ: impact_check.ReadFailed(
+                    impact_check.HEALTHZ_READ, 503
+                ),
+                impact_check.UNREACHABLE_RUNS_READ: impact_check.ReadFailed(
+                    impact_check.UNREACHABLE_RUNS_READ,
+                    None,
+                    TimeoutError("The read operation timed out"),
+                ),
+            },
+        ),
+        NOW,
+    )
+    verdict = report.verdicts[0]
+
+    assert verdict.name == "app_unreachable"
+    assert verdict.values["probes_failed"] == 2
+    assert verdict.values["failed_reads"] == [
+        {"path": impact_check.HEALTHZ_READ, "status": 503, "error": None},
+        {
+            "path": impact_check.UNREACHABLE_RUNS_READ,
+            "status": None,
+            "error": "The read operation timed out",
+        },
+    ]
+    assert "503" in report.body
+    assert "The read operation timed out" in report.body
+
+
+def test_app_unreachable_is_quiet_on_a_single_probe_and_on_a_reachable_app() -> None:
+    """One failed read is not an outage, and neither is a reading app."""
+    healthz_down = impact_check.ReadFailed(impact_check.HEALTHZ_READ, 503)
+
+    assert not impact_check.app_unreachable([]).fired
+    assert not impact_check.app_unreachable([healthz_down]).fired
+    assert impact_check.app_unreachable(
+        [healthz_down, impact_check.ReadFailed(impact_check.UNREACHABLE_RUNS_READ, 503)]
+    ).fired
 
 
 def test_check_raises_read_failed_naming_the_read_that_did_not_answer_200() -> None:
@@ -281,6 +403,7 @@ def test_the_alert_body_names_the_impact_and_carries_no_private_value() -> None:
         ],
         impact_check.MATCHES_READ: [],
         impact_check.METRICS_READ: [],
+        impact_check.HEALTHZ_READ: {"status": "ok"},
     }
 
     report = impact_check.check(reads.__getitem__, NOW)
@@ -460,12 +583,18 @@ def test_fetch_answers_the_parsed_json_of_a_200(monkeypatch: pytest.MonkeyPatch)
     assert impact_check.fetch("https://example.test", impact_check.RUNS_READ) == [{"id": 1}]
 
 
-def test_main_prints_one_line_and_exits_non_zero_when_a_read_never_answers(
+def test_main_prints_one_line_and_exits_non_zero_when_a_journey_read_never_answers(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """AC3: no traceback, one line naming the read, a non-zero exit, no report."""
+    """AC3: no traceback, one line naming the read, a non-zero exit, no report.
+
+    The app answered its liveness probe and then lost a journey read, so this is a
+    broken monitor and not `app_unreachable` (#99): red, and no issue opened.
+    """
 
     def unreachable(request: Any, timeout: float | None = None) -> Any:
+        if request.full_url.endswith(impact_check.HEALTHZ_READ):
+            return _Response(payload=b'{"status": "ok"}')
         raise urllib.error.URLError("connection refused")
 
     _no_delay(monkeypatch)
@@ -483,11 +612,40 @@ def test_main_prints_one_line_and_exits_non_zero_when_a_read_never_answers(
     assert "connection refused" in captured.err
 
 
+def test_main_prints_the_report_and_exits_zero_when_the_app_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC1/AC2 (#99): an unreachable app is user impact, so the workflow gets the
+    `healthy: false` report it opens or comments its one `alert` issue with.
+    """
+
+    def refused(request: Any, timeout: float | None = None) -> Any:
+        raise urllib.error.URLError("connection refused")
+
+    _no_delay(monkeypatch)
+    monkeypatch.setenv("JOBRADAR_URL", "https://example.test")
+    monkeypatch.setattr(impact_check.urllib.request, "urlopen", refused)
+
+    exit_code = impact_check.main()
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert captured.err == ""
+    assert report["healthy"] is False
+    assert report["fired"] == ["app_unreachable"]
+    assert report["title"]
+    assert impact_check.HEALTHZ_READ in report["body"]
+    assert impact_check.UNREACHABLE_RUNS_READ in report["body"]
+    assert "connection refused" in report["body"]
+
+
 def test_the_report_json_is_the_machine_readable_half_the_workflow_reads() -> None:
     reads = {
         impact_check.RUNS_READ: [run(7, "failed", finished_at=NOW)],
         impact_check.MATCHES_READ: [],
         impact_check.METRICS_READ: [],
+        impact_check.HEALTHZ_READ: {"status": "ok"},
     }
 
     payload = json.loads(json.dumps(impact_check.check(reads.__getitem__, NOW).as_json()))
@@ -500,4 +658,5 @@ def test_the_report_json_is_the_machine_readable_half_the_workflow_reads() -> No
         "model_scored_none",
         "digest_stalled",
         "http_5xx_rate",
+        "app_unreachable",
     }

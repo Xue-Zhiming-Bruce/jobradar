@@ -571,9 +571,9 @@ relies on.
 
 A third workflow, `alert.yml`, runs hourly (and by hand) and asks one question:
 is the digest journey showing user impact right now? `ops/oncall/impact_check.py`
-reads the deployed app over HTTP and only over HTTP -- `GET /runs?limit=50`,
-`GET /matches?limit=200` and `GET /telemetry/metrics`, all from `JOBRADAR_URL` --
-and classifies the journey through four named predicates:
+reads the deployed app over HTTP and only over HTTP -- `GET /healthz`,
+`GET /runs?limit=50`, `GET /matches?limit=200` and `GET /telemetry/metrics`, all
+from `JOBRADAR_URL` -- and classifies the journey through five named predicates:
 
 | Predicate | Fires when |
 | --- | --- |
@@ -581,6 +581,7 @@ and classifies the journey through four named predicates:
 | `model_scored_none` | the newest run finished, stored matches inside its `[started_at, finished_at]` window, and not one of them was scored: the model call failed on every row it reached |
 | `digest_stalled` | no run succeeded within 26 hours, or nothing ran at all in that time |
 | `http_5xx_rate` | the journey's two routes (`POST /internal/tick`, `GET /runs/{id}`) answered 5xx at or above 5% over the metrics window |
+| `app_unreachable` | `GET /healthz` and then `GET /runs?limit=1` both still fail to answer `200` (a connection error, a timeout or a 5xx) after the reads' own retries: one failed read is a cold free-tier start, not an outage |
 
 When any predicate fires, the workflow opens a GitHub issue labelled `alert`
 whose body names the impact and carries the evidence -- the newest run's id,
@@ -596,10 +597,16 @@ trace (#91).
 
 Nothing private rides along: the alert text names ids, statuses, counts, instants
 and route names, and no resume text, file name, credential, request body, CPU or
-memory number. A read that does not answer `200` is neither a healthy journey nor
-user impact -- the check exits non-zero naming the read, the workflow goes red
-and opens no issue. Alerting when the deployed app is unreachable at all is #99;
-the on-call agent that consumes the alert is #93.
+memory number. An app that never answered `200` to `GET /healthz` and then to
+`GET /runs?limit=1` is `app_unreachable`, and that alert goes through the same
+one-open-issue path: the outage is reported as user impact, naming each read with
+the status or the error it answered, instead of as a red workflow nobody watches.
+An unreachable app answers no journey read, so that report carries the one
+verdict. A read that did not answer while the app did -- one probe of the two, or
+a journey read after the probes answered -- is neither a healthy journey nor user
+impact: the check exits non-zero naming the read, the workflow goes red and opens
+no issue, because one un-answered read is a cold free-tier start. The on-call
+agent that consumes the alert is #93.
 
 The local equivalent, with the app on port 8123, and the check's own offline
 test:
