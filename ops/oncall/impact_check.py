@@ -103,7 +103,8 @@ APP_PROBES = (HEALTHZ_READ, UNREACHABLE_RUNS_READ)
 # How many times one read is attempted before it is `ReadFailed`. The read is
 # retried at least once -- a cold free instance answers again within a start or
 # two -- and the bound is named so the hourly run's worst case is visible here:
-# `READ_ATTEMPTS * fetch`'s timeout, no more.
+# `READ_ATTEMPTS * fetch`'s timeout per read, and two reads when the first probe
+# did not answer and `app_unreachable` probes `/runs?limit=1` after it.
 READ_ATTEMPTS = 3
 
 # How long the check waits between two attempts of one read. Long enough to
