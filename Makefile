@@ -14,7 +14,7 @@
 # prints the one it used.
 TEST_DB_PORT = 5433
 
-.PHONY: test
+.PHONY: test test-backend test-integration test-frontend test-mcp
 
 test:
 	./scripts/test.sh $(TEST_DB_PORT) \
@@ -22,3 +22,23 @@ test:
 	  integration "cd backend && uv run pytest -m integration" \
 	  frontend "cd frontend && npm test" \
 	  mcp "cd mcp && uv run pytest"
+
+# One suite on its own, for a caller that wants that suite's verdict and its own
+# database: `.github/workflows/ci.yml`'s four suite jobs each reach the suite
+# through the target here -- against the service container the job starts and
+# the `TEST_DATABASE_URL` it passes -- so the four commands are spelled in this
+# file and not a second time in the workflow. Each target runs the command the
+# `test` target's own line for that suite names;
+# `backend/tests/test_ci_make_parity.py` fails when a target and the recipe stop
+# naming the same one.
+test-backend:
+	cd backend && uv run pytest
+
+test-integration:
+	cd backend && uv run pytest -m integration
+
+test-frontend:
+	cd frontend && npm test
+
+test-mcp:
+	cd mcp && uv run pytest
