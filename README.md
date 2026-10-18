@@ -420,6 +420,16 @@ from the run with `issues: write`, and `LLM_API_KEY` is optional — unset means
 deterministic path and is not a failure. A required value that is unset fails the
 job with an `::error::` naming it rather than skipping.
 
+A gateway key needs two more **optional repository variables**, `LLM_MODEL` and
+`LLM_BASE_URL`, which the wake's decide step and both proposal steps are handed: a
+key whose gateway is not OpenAI's would otherwise be sent to OpenAI's own endpoint
+and answer `401` even though the key is valid. Both are unset in a default
+repository, and unset or empty changes nothing — the responder and the proposer
+fall back to their own `gpt-4o-mini` at `https://api.openai.com/v1`, so an OpenAI
+key works as before. Neither is a credential, so both may appear in the log: the
+proposal's configuration check prints them in a `::notice::`, which is what shows a
+configured run the model and endpoint it will really call, before any model call.
+
 One `alert` issue is one wake. A `concurrency` group keyed on the issue's number
 serialises the deliveries, and the responder refuses an issue that already carries
 its own comment marker, so the `opened` and `labeled` deliveries cannot remediate
