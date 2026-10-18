@@ -368,8 +368,8 @@ def test_the_module_issues_one_gh_command_and_none_that_could_start_a_run(
         assert token not in " ".join(issued[0])
 
 
-def test_the_schedule_runs_the_re_check_alone_and_grants_no_way_to_start_a_run() -> None:
-    """`oncall.yml`'s own conditions and permissions: the schedule starts nothing else."""
+def test_the_schedule_and_the_dispatch_run_the_re_check_alone_and_grant_no_way_to_start_a_run() -> None:
+    """`oncall.yml`'s own conditions and permissions: neither trigger starts anything else."""
     text = WORKFLOW.read_text(encoding="utf-8")
 
     conditions = re.findall(r"^    if: (.+)$", text, re.MULTILINE)
@@ -380,8 +380,14 @@ def test_the_schedule_runs_the_re_check_alone_and_grants_no_way_to_start_a_run()
         if condition.startswith("github.event_name == 'issues'")
     ]
     assert len(issues_only) == 2 and all("'alert'" in condition for condition in issues_only)
-    assert [condition for condition in conditions if condition == "github.event_name == 'schedule'"]
+    assert [
+        condition
+        for condition in conditions
+        if condition == "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+    ]
     assert "\n  schedule:" in text
+    # #115's on-demand half: a bare dispatch, no inputs, so it runs the schedule's path.
+    assert re.search(r"^  workflow_dispatch:\s*$", text, re.MULTILINE)
     # No job is granted the scope a workflow dispatch needs, so none can start a run.
     grants = re.findall(
         r"^\s{2,6}(actions|contents|issues|pull-requests): (\S+)$", text, re.MULTILINE
