@@ -71,8 +71,11 @@
 # autodeploy setting. This job's `permissions` are job-scoped and larger than the wake's,
 # because pushing a branch needs `contents: write` and opening a pull request needs
 # `pull-requests: write`; the wake above keeps `contents: read`. `LLM_API_KEY` and
-# `PROPOSAL_REVIEWER` are required here, so an unconfigured repository is red with a
-# `::error::` naming the value rather than quietly proposing nothing.
+# `PROPOSAL_REVIEWER` are optional configuration on this path: when either is unset or
+# empty, the job emits a `::notice::` naming it and skips, so the run stays green -- an
+# optional proposal must not redden every alert wake. A fully configured repository runs
+# the path below, unchanged. `ISSUE_NUMBER` comes from the event rather than from
+# configuration, so a malformed one still fails the job.
 #
 # The local equivalent, with the app on port 8123 (8000 belongs to compose), a scratch
 # issue labelled `alert`, and `RENDER_API_KEY`, `RENDER_SERVICE_ID` and `GH_TOKEN`
@@ -209,32 +212,34 @@ jobs:
       - uses: actions/checkout@v7
 
       # The model drafts the patch and the reviewer is who the pull request is opened
-      # for; neither is optional on this path, so an unconfigured repository is loudly
-      # red with an annotation naming the value instead of quietly proposing nothing.
-      - name: Require LLM_API_KEY and PROPOSAL_REVIEWER
+      # for. Both are optional configuration: an unconfigured repository skips the
+      # proposal below with a notice instead of reddening a wake that the responder
+      # above already answered. The step exports whether both resolved, which is what
+      # guards the proposal step, so a skip issues no `python3`, `git` or `gh` command.
+      - name: Check LLM_API_KEY and PROPOSAL_REVIEWER
+        id: configuration
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           PROPOSAL_REVIEWER: ${{ github.repository_owner }}
         run: |
-          missing=0
-          if [ -z "${LLM_API_KEY}" ]; then
-            echo "::error::The repository secret LLM_API_KEY is unset or empty, so no patch can be drafted. The wake above still answers the alert without it; this job cannot propose without it."
-            missing=1
+          # Whitespace-only resolves the same as unset, exactly as `proposer.main` strips it.
+          configured=true
+          if [[ -z "${LLM_API_KEY//[[:space:]]/}" ]]; then
+            echo "::notice::LLM_API_KEY is unset or empty, so no patch can be drafted and this proposal is skipped. Set it under Settings > Secrets and variables > Actions to enable the proposal; the wake above still answers the alert without it."
+            configured=false
           fi
-          if [ -z "${PROPOSAL_REVIEWER}" ]; then
-            echo "::error::PROPOSAL_REVIEWER (the repository owner) is empty, so no review can be requested on the proposal."
-            missing=1
+          if [[ -z "${PROPOSAL_REVIEWER//[[:space:]]/}" ]]; then
+            echo "::notice::PROPOSAL_REVIEWER (the repository owner) is empty, so no review can be requested and this proposal is skipped."
+            configured=false
           fi
-          if [ "${missing}" -ne 0 ]; then
-            echo "::error::No proposal was attempted. Set LLM_API_KEY under Settings > Secrets and variables > Actions."
-            exit 1
-          fi
+          echo "configured=${configured}" >> "$GITHUB_OUTPUT"
 
       # One proposal attempt per incident. The proposer reads the alert issue and the
       # responder's answer on it, pushes `oncall/proposal-<issue number>` alone, opens
       # it as a draft against `main` with the owner's review requested, and comments the
       # link on the issue. A human merges it or rejects it; nothing here does.
       - name: Propose a fix behind the human review gate
+        if: steps.configuration.outputs.configured == 'true'
         env:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
