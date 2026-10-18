@@ -607,6 +607,29 @@ test:
     JOBRADAR_URL=http://127.0.0.1:8123 python3 ops/oncall/impact_check.py
     cd backend && uv run pytest tests/test_impact_check.py
 
+The GitHub issue is the channel a person reads; it can also wake someone on a
+third-party pager. `alert.yml`'s last step runs `ops/oncall/notifier.py` after the
+issue step, and sends that report's own title and body -- the same evidence the
+issue carries, and no more. The pager is opt-in through repository secrets:
+
+| Secret | What it is |
+| --- | --- |
+| `PAGER_URL` | the pager's HTTPS endpoint: one JSON `POST` of `{"title": ..., "body": ...}` |
+| `PAGER_TOKEN` | the credential, sent as `Authorization: Bearer <token>`; optional |
+
+`PAGER_URL` unset or empty is a **documented no-op**: no call is made and the step
+succeeds, so a repository that reads GitHub alone is unchanged. The call is bounded
+-- one timeout and at most one retry -- and the title and body pass through the
+responder's redaction, so no resume text, file name, API key, connection string or
+request body reaches the pager. A page that fails after its retry is an `::error::`
+and a red step, and the `alert` issue the previous step opened stays open -- a page
+that did not arrive cannot lose it. A healthy run pages nobody.
+
+Its offline test is in the responder's suite, over a fake pager endpoint with no
+socket and no credential:
+
+    uv run --project backend pytest ops/oncall
+
 ### On-call response
 
 The `alert` issue #92 opens is also a wake-up call. `.github/workflows/oncall.yml`
