@@ -91,5 +91,5 @@ tells you *why* a role fits, so you re-read the same postings repeatedly.
 | Containerization | Dockerfile + compose |
 | Integration testing | Separate suite: upload resume → poll → match → digest |
 | Deployment | Live URL on Render + Neon |
-| CI/CD | GitHub Actions: test then deploy |
+| CI/CD | GitHub Actions: test then deploy — the rubric's third tier (a dev environment plus a manual production deploy) is declined in `_docs/decisions/2026-10-18-ci-cd-third-tier.md` |
 | Reproducibility | Single documented path from clone to running |
