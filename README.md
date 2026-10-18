@@ -717,9 +717,12 @@ autodeploy setting the same way. Nothing lands on `main` without a human merge, 
 approved. The request is opened as a draft as well, which GitHub refuses to merge
 until a human marks it ready for review. The proposal job's token is scoped to it
 (`contents: write` and `pull-requests: write`, where the wake keeps
-`contents: read`), and `LLM_API_KEY` is required there: unset is a red job with a
-`::error::` naming it, not a silent skip. The local equivalent, with a token that
-may push a branch:
+`contents: read`), and `LLM_API_KEY` and `PROPOSAL_REVIEWER` are optional there: unset
+or empty means an `::notice::` naming it and a green skip, not a red job and not a
+proposal attempted with no model or nobody asked to review it. A fully configured
+repository runs the same path; `ISSUE_NUMBER` comes from the event rather than from
+configuration, so a malformed one still fails the job. The local equivalent, with a
+token that may push a branch:
 
     ISSUE_NUMBER=<n> PROPOSAL_REVIEWER=<login> \
       LLM_API_KEY=${LLM_API_KEY} GH_TOKEN=${GH_TOKEN} python3 ops/oncall/proposer.py
