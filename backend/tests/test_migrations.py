@@ -9,7 +9,7 @@ count #36 added, then the two board-validator columns #55 added, then the run's
 unfetched-company count #56 added, then the company key widened from `slug`
 to `(source, slug)` #57, then the per-company outcome table #59 added, then the
 re-match's cap count #64 added, then the re-match's resume position #76 added,
-then the span table #90 added. Two
+then the span table #90 added, then the run's own trace id #102 added. Two
 paths to one schema
 can drift, so nothing here assumes a revision is right: every test runs `alembic
 upgrade head` -- in-process, through `alembic.command.upgrade` -- against the
@@ -77,7 +77,7 @@ ALEMBIC_INI = BACKEND_ROOT / "alembic.ini"
 REVISIONS_DIR = BACKEND_ROOT / "migrations" / "versions"
 
 # The readable revision ids, in the order they apply, and the files that hold
-# them. The head is the last of the thirteen.
+# them. The head is the last of the fourteen.
 BASELINE_REVISION = "0001_baseline"
 BASELINE_REVISION_FILE = "0001_baseline_five_tables.py"
 PARSED_FIELDS_REVISION = "0002_parsed_fields"
@@ -104,6 +104,8 @@ REMATCH_CURSOR_REVISION = "0012_run_rematch_cursor"
 REMATCH_CURSOR_REVISION_FILE = "0012_run_rematch_cursor.py"
 TELEMETRY_SPAN_REVISION = "0013_telemetry_span"
 TELEMETRY_SPAN_REVISION_FILE = "0013_telemetry_span.py"
+RUN_TRACE_ID_REVISION = "0014_run_trace_id"
+RUN_TRACE_ID_REVISION_FILE = "0014_run_trace_id.py"
 THE_REVISION_FILES = (
     BASELINE_REVISION_FILE,
     PARSED_FIELDS_REVISION_FILE,
@@ -118,8 +120,9 @@ THE_REVISION_FILES = (
     POSTINGS_NOT_REMATCHED_REVISION_FILE,
     REMATCH_CURSOR_REVISION_FILE,
     TELEMETRY_SPAN_REVISION_FILE,
+    RUN_TRACE_ID_REVISION_FILE,
 )
-HEAD_REVISION = TELEMETRY_SPAN_REVISION
+HEAD_REVISION = RUN_TRACE_ID_REVISION
 
 # Alembic's own bookkeeping table: one row per applied revision. It is not one of
 # the seven the models declare, and `alembic current` reads it.
@@ -1086,6 +1089,47 @@ def test_the_rematch_cursor_is_added_null_with_no_backfill(database: Engine) -> 
     command.downgrade(_config(), POSTINGS_NOT_REMATCHED_REVISION)
 
     assert "rematch_cursor" not in _reflected_columns(database, "run")
+    assert _run_rows_before_the_column(database) == before
+
+
+def test_the_run_trace_id_is_added_null_with_no_backfill(database: Engine) -> None:
+    """#102's column: a database at #90 with two run rows gains it, both NULL.
+
+    The fixture's database is rebuilt at #90 -- the schema before this revision --
+    and two run rows go in, the same two the #36 case seeds. `upgrade head` adds the
+    column: every row reads NULL, which means "unknown" and not "some trace" -- those
+    runs were started before the column existed, so no request's id can be recovered
+    for them, and a guessed id would join a row to a trace that is not its own -- and
+    no row's status, end, error or other count is rewritten. `downgrade()` takes the
+    column away again and leaves the rows exactly as they were.
+    """
+    Base.metadata.drop_all(database)
+    command.upgrade(_config(), TELEMETRY_SPAN_REVISION)
+    _store_a_run_row_before_this_revision(
+        database, status="succeeded", error=None, postings_seen=12, matches_created=4
+    )
+    _store_a_run_row_before_this_revision(
+        database,
+        status="failed",
+        error="the board refused: acme",
+        postings_seen=1,
+        matches_created=0,
+    )
+    before = _run_rows_before_the_column(database)
+    assert "trace_id" not in _reflected_columns(database, "run")
+
+    command.upgrade(_config(), "head")
+
+    assert _reflected_columns(database, "run")["trace_id"] == ("VARCHAR(64)", True)
+    assert _run_column_values(database, "trace_id") == [None, None]
+    assert _run_rows_before_the_column(database) == before
+    assert [row[1] for row in before] == ["succeeded", "failed"]
+    assert [row[4] for row in before] == [None, "the board refused: acme"]
+    assert [row[5:] for row in before] == [(12, 4), (1, 0)]
+
+    command.downgrade(_config(), TELEMETRY_SPAN_REVISION)
+
+    assert "trace_id" not in _reflected_columns(database, "run")
     assert _run_rows_before_the_column(database) == before
 
 
