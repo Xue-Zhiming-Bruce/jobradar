@@ -5,22 +5,30 @@
 # Postgres one below, which the README already publishes for an ephemeral
 # container.
 #
+# The four suite jobs reach their suite through the root `Makefile`'s own
+# target for it -- `make test-backend`, `make test-integration`,
+# `make test-frontend` and `make test-mcp`, the per-suite counterparts of the
+# `test` target that runs all four in one local invocation (#88) -- so the four
+# commands are spelled in the `Makefile` and not a second time here. Each job
+# keeps its own service container, its own parallelism and its own verdict.
+#
 # What each job runs, and the local command that stands in for it:
 #
-#   backend      cd backend && uv sync && uv run pytest, against the throwaway
-#                server the `integration` block below starts, named by the
-#                variable the `engine` matrix reads:
+#   backend      cd backend && uv sync, then `make test-backend`, against the
+#                throwaway server the `service:` block below starts, named by
+#                the variable the `engine` matrix reads:
 #
-#                  cd backend && TEST_DATABASE_URL=postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:5433/jobradar uv run pytest
+#                  TEST_DATABASE_URL=postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:5433/jobradar make test-backend
 #
-#                one pass over both parameters of the `engine` matrix: the
-#                SQLite-only run this job used to be is now the both-engines
-#                run, not a second copy of it standing beside. The marked
-#                integration suite is still collected and deselected here (`2
-#                deselected`), and the run fails on a summary that skipped
+#                from the repository root, against a throwaway server of your
+#                own on 5433. One pass over both parameters of the `engine`
+#                matrix: the SQLite-only run this job used to be is now the
+#                both-engines run, not a second copy of it standing beside. The
+#                marked integration suite is still collected and deselected here
+#                (`2 deselected`), and the run fails on a summary that skipped
 #                anything -- an unset variable makes every `[postgres]` case
 #                skip, which is the half-run this job exists to catch.
-#   frontend     cd frontend && npm ci && npm run build && npm test
+#   frontend     cd frontend && npm ci && npm run build && make test-frontend
 #                `npm ci` installs the committed `frontend/package-lock.json`
 #   integration  the marked suite against the throwaway server, on port 5433
 #                because 5432 is taken on a development machine:
@@ -28,7 +36,7 @@
 #                  docker run --rm -d --name jobradar-test-db -p 5433:5432 \
 #                    -e POSTGRES_USER=jobradar -e POSTGRES_PASSWORD=jobradar-throwaway \
 #                    -e POSTGRES_DB=jobradar postgres:17
-#                  cd backend && TEST_DATABASE_URL=postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:5433/jobradar uv run pytest -m integration
+#                  TEST_DATABASE_URL=postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:5433/jobradar make test-integration
 #                  docker rm -f jobradar-test-db
 #
 #                the job itself uses a service container, not the local compose
@@ -37,7 +45,7 @@
 #                git diff --exit-code -- backend/openapi.json
 #                a stale or hand-edited contract rewrites the file, so the diff
 #                is non-empty and this fails with the diff printed
-#   mcp          cd mcp && uv sync && uv run pytest
+#   mcp          cd mcp && uv sync, then `make test-mcp`
 #                the stdio server's own suite, over the fake app the cases build
 #                from `httpx2.MockTransport`. It needs no app, no network and no
 #                `.env`: the autouse guard in `mcp/tests/conftest.py` refuses a
@@ -142,13 +150,12 @@ jobs:
       - name: Run the on-call responder's offline test
         run: uv run --project backend pytest ops/oncall
       - name: Run the whole suite against the throwaway PostgreSQL
-        working-directory: backend
         env:
           TEST_DATABASE_URL: postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:5432/jobradar
         run: |
           set -o pipefail
           test -n "$TEST_DATABASE_URL"
-          uv run pytest | tee /tmp/pytest-summary.txt
+          make test-backend | tee /tmp/pytest-summary.txt
       # AC2, structural: one complete pass, nothing skipped, a non-zero passed
       # count -- never a pinned total, which another lane's new tests would move.
       - name: Fail when the run skipped anything
@@ -170,8 +177,7 @@ jobs:
         working-directory: frontend
       - run: npm run build
         working-directory: frontend
-      - run: npm test
-        working-directory: frontend
+      - run: make test-frontend
 
   integration:
     runs-on: ubuntu-latest
@@ -201,8 +207,7 @@ jobs:
         working-directory: backend
       # `backend/tests/integration/conftest.py` fails rather than skips on an
       # unset URL, so a job that lost this variable is red, not green.
-      - run: uv run pytest -m integration
-        working-directory: backend
+      - run: make test-integration
         env:
           TEST_DATABASE_URL: postgresql+psycopg://jobradar:jobradar-throwaway@127.0.0.1:5432/jobradar
 
@@ -234,10 +239,9 @@ jobs:
       # case is deselected by `addopts`, not skipped -- so a `skipped` count
       # means the run was not the full offline default.
       - name: Run the offline suite
-        working-directory: mcp
         run: |
           set -o pipefail
-          uv run pytest | tee /tmp/pytest-summary.txt
+          make test-mcp | tee /tmp/pytest-summary.txt
       - name: Fail when the run skipped anything
         run: |
           grep -qE '[1-9][0-9]* passed' /tmp/pytest-summary.txt
