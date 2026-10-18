@@ -572,9 +572,12 @@ def subprocess_command(argv: Sequence[str], stdin: str | None = None) -> Ran:
 def main() -> int:
     """Read the environment, propose once, and print a redacted one-line outcome.
 
-    The three values a proposal needs are the ones `oncall.yml`'s guard step has already
-    checked; this refuses them again rather than drafting a patch with no model or
-    opening a pull request with nobody asked to review it. No wake reads a resolved
+    `LLM_API_KEY` and `PROPOSAL_REVIEWER` are optional configuration: without either
+    there is nothing to propose, so this prints the one-line skip notice and returns
+    the skip exit code rather than drafting a patch with no model or opening a pull
+    request with nobody asked to review it. `oncall.yml`'s guard skips the same way,
+    so an unconfigured repository stays green. The issue number is not optional -- the
+    event supplies it -- so an unreadable one still fails. No wake reads a resolved
     value into its output.
     """
     number_text = os.environ.get("ISSUE_NUMBER", "").strip()
@@ -587,15 +590,13 @@ def main() -> int:
         return 2
     api_key = os.environ.get("LLM_API_KEY", "").strip()
     if not api_key:
-        print("proposer: LLM_API_KEY is unset or empty, so no patch can be drafted.", file=sys.stderr)
-        return 2
+        # An unset key is unconfigured, not broken: skip green rather than redden a wake.
+        print("proposer: LLM_API_KEY is unset or empty, so this proposal is skipped.")
+        return 0
     reviewer = os.environ.get("PROPOSAL_REVIEWER", "").strip()
     if not reviewer:
-        print(
-            "proposer: PROPOSAL_REVIEWER is unset or empty, so no review can be requested.",
-            file=sys.stderr,
-        )
-        return 2
+        print("proposer: PROPOSAL_REVIEWER is unset or empty, so this proposal is skipped.")
+        return 0
 
     secrets = responder.secrets_from_environment()
     config = Config(reviewer=reviewer, secrets=secrets)

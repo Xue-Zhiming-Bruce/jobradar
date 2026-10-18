@@ -501,23 +501,46 @@ def test_a_secret_in_the_evidence_and_the_model_summary_reaches_none_of_them() -
 # The wake's own environment guard.
 
 
-@pytest.mark.parametrize("missing", ["ISSUE_NUMBER", "LLM_API_KEY", "PROPOSAL_REVIEWER"])
+def _unexpected_command(*args: Any, **kwargs: Any) -> Any:
+    """A tripwire for the command seam: the skip must issue none."""
+    raise AssertionError("the skip issued a command")
+
+
+@pytest.mark.parametrize("missing", ["LLM_API_KEY", "PROPOSAL_REVIEWER"])
+@pytest.mark.parametrize("value", [None, "", "   "])
 def test_main_refuses_an_environment_without_the_values_a_proposal_needs(
-    monkeypatch: pytest.MonkeyPatch, missing: str
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    missing: str,
+    value: str | None,
 ) -> None:
+    """An unset, empty or whitespace-only value skips green, naming it, issuing nothing."""
     monkeypatch.setenv("ISSUE_NUMBER", str(ISSUE_NUMBER))
     monkeypatch.setenv("LLM_API_KEY", "a-key")
     monkeypatch.setenv("PROPOSAL_REVIEWER", REVIEWER)
-    monkeypatch.delenv(missing)
+    if value is None:
+        monkeypatch.delenv(missing, raising=False)
+    else:
+        monkeypatch.setenv(missing, value)
+    monkeypatch.setattr(responder, "gh_issue", _unexpected_command)
 
-    assert proposer.main() == 2
+    assert proposer.main() == 0
+
+    printed = capsys.readouterr()
+    assert missing in printed.out
+    assert "::error::" not in printed.out + printed.err
 
 
+@pytest.mark.parametrize("issue_number", [None, "", "not a number"])
 def test_main_refuses_an_issue_number_that_is_not_a_number(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, issue_number: str | None
 ) -> None:
-    monkeypatch.setenv("ISSUE_NUMBER", "not a number")
+    """The event supplies the issue number, so an absent or unreadable one still fails."""
     monkeypatch.setenv("LLM_API_KEY", "a-key")
     monkeypatch.setenv("PROPOSAL_REVIEWER", REVIEWER)
+    if issue_number is None:
+        monkeypatch.delenv("ISSUE_NUMBER", raising=False)
+    else:
+        monkeypatch.setenv("ISSUE_NUMBER", issue_number)
 
     assert proposer.main() == 2
