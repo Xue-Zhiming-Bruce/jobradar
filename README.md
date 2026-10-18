@@ -118,7 +118,7 @@ What each piece is, where it sits, and the seam it talks through.
   command that stands in for every job it runs, so the pipeline is reproducible
   off GitHub.
   `tick.yml` is the scheduled convenience: one `POST /internal/tick` a day,
-  deliberately red until #16 supplies its two inputs.
+  skipped with a `::notice::` until #16 supplies its two inputs.
 - **The committed contract, `backend/openapi.json`** -- what the API answers,
   generated from the FastAPI app rather than written by hand. `uv run pytest`
   compares the file with the document the app generates now and fails when the
@@ -557,8 +557,11 @@ be reproduced without GitHub Actions.
   then fail on a diff). It has no deploy step; deploying a green `main` is #45.
 - `tick.yml` calls `POST /internal/tick` once a day, taking the secret from the
   repository secret `TICK_SECRET` and the base URL from the repository variable
-  `JOBRADAR_URL`. No secret value is in either file. Until #16 sets
-  `JOBRADAR_URL`, that job is red on purpose rather than silently green.
+  `JOBRADAR_URL`. No secret value is in either file. While either input is unset,
+  empty or whitespace-only -- #16 sets `JOBRADAR_URL` -- the job emits a
+  `::notice::` naming the missing one and skips the call, so the daily schedule
+  stays green instead of failing; a configured repository runs the same call
+  unchanged and still fails loudly on a non-2xx answer.
 
 The schedule is best-effort: GitHub Actions cron drifts by minutes to hours and
 can skip a run entirely, and it is disabled after 60 days of repository
