@@ -284,8 +284,12 @@ def redact(text: str, secrets: Sequence[str]) -> str:
     return CONNECTION_STRING.sub("[redacted connection string]", text)
 
 
-def _last_lines(output: str, limit: int = _QUOTED_OUTPUT_LIMIT) -> str:
-    """The tail of a command's output, on one line and bounded, for a comment."""
+def last_lines(output: str, limit: int = _QUOTED_OUTPUT_LIMIT) -> str:
+    """The tail of a command's output, on one line and bounded, for a comment.
+
+    Public because `ops/oncall/proposer.py` (#96) quotes a failed `git` or `gh`
+    command the same way the failed rollback is quoted here.
+    """
     collapsed = " / ".join(line.strip() for line in output.splitlines() if line.strip())
     if len(collapsed) > limit:
         return "..." + collapsed[-limit:]
@@ -420,12 +424,13 @@ def decision_prompt(evidence: Evidence, base_url: str) -> str:
     )
 
 
-def parse_decision(raw: str) -> tuple[str | None, str]:
-    """The `action` and `reason` of the first JSON object in a model's answer.
+def parse_json_object(raw: str) -> Mapping[str, Any] | None:
+    """The first JSON object in a model's answer, or `None` when it carries none.
 
     The whole answer is tried first, then the first `{...}` inside it, so a model
-    that wraps its JSON in prose still parses. Anything unparseable answers
-    `(None, "")`, which `llm_decision` turns into `escalate`.
+    that wraps its JSON in prose still parses. `parse_decision` reads a decision
+    through this, and so does `ops/oncall/proposer.py` (#96) a selection and a
+    patch, so both refuse a nonsense answer the same way.
     """
     candidate = raw.strip()
     payload: Any = None
@@ -438,7 +443,17 @@ def parse_decision(raw: str) -> tuple[str | None, str]:
                 payload = json.loads(candidate[start : end + 1])
             except ValueError:
                 payload = None
-    if not isinstance(payload, Mapping):
+    return payload if isinstance(payload, Mapping) else None
+
+
+def parse_decision(raw: str) -> tuple[str | None, str]:
+    """The `action` and `reason` of the first JSON object in a model's answer.
+
+    Anything unparseable answers `(None, "")`, which `llm_decision` turns into
+    `escalate`.
+    """
+    payload = parse_json_object(raw)
+    if payload is None:
         return None, ""
     action = payload.get("action")
     reason = payload.get("reason")
@@ -716,7 +731,7 @@ def _decide_and_act(
             performed = "attempted `ops/rollback.sh`, which refused or failed"
             owner_action = (
                 "the rollback could not be completed: "
-                f"{redact(_last_lines(output), config.secrets)}. A human must roll back by hand."
+                f"{redact(last_lines(output), config.secrets)}. A human must roll back by hand."
             )
         else:
             performed = "ran `ops/rollback.sh`, which re-deployed the newest known-good commit"
