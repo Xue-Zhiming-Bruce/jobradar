@@ -681,8 +681,8 @@ until a human marks it ready for review. The proposal job's token is scoped to i
 `::error::` naming it, not a silent skip. The local equivalent, with a token that
 may push a branch:
 
-    ISSUE_NUMBER=<n> PROPOSAL_REVIEWER=<login> LLM_API_KEY=<key> GH_TOKEN=<token> \
-      python3 ops/oncall/proposer.py
+    ISSUE_NUMBER=<n> PROPOSAL_REVIEWER=<login> \
+      LLM_API_KEY=${LLM_API_KEY} GH_TOKEN=${GH_TOKEN} python3 ops/oncall/proposer.py
 
 Its offline test -- no model, no `git`, no `gh`, no repository -- runs with the
 responder's:

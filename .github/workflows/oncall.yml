@@ -65,11 +65,12 @@
 #   JOBRADAR_URL=http://127.0.0.1:8123 ISSUE_NUMBER=<n> \
 #     python3 ops/oncall/responder.py
 #
-# and, for the proposal path alone -- a login whose review is requested, a model key and
-# a `GH_TOKEN` with `contents: write` and `pull-requests: write`:
+# and, for the proposal path alone -- a login whose review is requested, and
+# `LLM_API_KEY` and `GH_TOKEN` from your own shell (the latter with `contents: write`
+# and `pull-requests: write`):
 #
-#   ISSUE_NUMBER=<n> PROPOSAL_REVIEWER=<login> LLM_API_KEY=<key> GH_TOKEN=<token> \
-#     python3 ops/oncall/proposer.py
+#   ISSUE_NUMBER=<n> PROPOSAL_REVIEWER=<login> \
+#     LLM_API_KEY=${LLM_API_KEY} GH_TOKEN=${GH_TOKEN} python3 ops/oncall/proposer.py
 #
 # and both modules' own offline tests, no app, no model, no `git` and no credential:
 #
