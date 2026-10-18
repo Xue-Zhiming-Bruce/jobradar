@@ -12,13 +12,13 @@
 # `ops/oncall/responder.py`'s docstring; this file is the trigger, the credential
 # guard and the one-run rule.
 #
-# Triggers are the `issues` event alone, and nothing else: no `schedule`, no
-# `workflow_dispatch`, no `pull_request`. The `opened` action covers an issue that
-# is created already labelled `alert`, and `labeled` covers a label added later;
-# the job's `if` admits only an issue that carries the label, so no other issue
-# event starts a wake. No secret value is in this file -- every one arrives as
-# `${{ secrets.* }}` at runtime -- and no step enables shell tracing, so no value
-# can reach the log.
+# The triggers are `issues` (the wake and the proposal), `schedule` and
+# `workflow_dispatch` (the re-check alone -- see below), and no `pull_request`. The
+# `opened` action covers an issue that is created already labelled `alert`, and
+# `labeled` covers a label added later; the job's `if` admits only an issue that
+# carries the label, so no other issue event starts a wake. No secret value is in
+# this file -- every one arrives as `${{ secrets.* }}` at runtime -- and no step
+# enables shell tracing, so no value can reach the log.
 #
 # One wake, one responder run. `concurrency` serialises the deliveries of a single
 # alert under the issue's own number with `cancel-in-progress: false`, and the
@@ -126,14 +126,19 @@ on:
   # schedule is disabled after 60 days of repository inactivity.
   schedule:
     - cron: "30 * * * *"
+  # On demand, because GitHub's scheduler is best-effort and can drift or skip a slot
+  # entirely (#115). No inputs: a dispatch runs the same all-open-`alert`-issues path
+  # the schedule runs, and the two `issues` jobs below are still guarded to the
+  # `issues` event alone, so a dispatch cannot start a wake or a proposal.
+  workflow_dispatch:
 
 permissions:
   contents: read
   issues: write
 
 # One issue number is one group, so the `opened` and `labeled` deliveries of one alert
-# serialise; a scheduled run carries no issue number, so the scheduled runs serialise
-# among themselves under this same group.
+# serialise; a scheduled or dispatched run carries no issue number, so those runs
+# serialise among themselves under this same group.
 concurrency:
   group: oncall-${{ github.event.issue.number }}
   cancel-in-progress: false
@@ -247,9 +252,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 ops/oncall/proposer.py
 
-  # #97's scheduled re-check. It runs for the `schedule` event alone -- never for an
-  # `issues` event, which the wake and the proposal above already answer -- on every open
-  # `alert` issue, and `ops/oncall/recheck.py` makes at most one bounded attempt each.
+  # #97's scheduled re-check, and #115's on-demand one. It runs for the `schedule` and
+  # `workflow_dispatch` events alone -- never for an `issues` event, which the wake and
+  # the proposal above already answer -- on every open `alert` issue, and
+  # `ops/oncall/recheck.py` makes at most one bounded attempt each.
   # Its `permissions` are the smallest this path needs and deliberately no larger: it
   # reads the repository and the app, comments and closes an issue, and is granted no
   # `actions: write`, so it cannot start a run of its own, and no `contents: write`, so it
@@ -260,7 +266,7 @@ jobs:
     # A re-check makes at most one attempt per open issue, and an attempt is bounded by
     # the same `ops/rollback.sh` and `/healthz` waits a wake is; 30 matches the wake's cap.
     timeout-minutes: 30
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v7
 
