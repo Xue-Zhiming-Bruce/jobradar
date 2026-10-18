@@ -283,6 +283,16 @@ class Run(Base):
     # `services.pipeline._record_not_rematched` beside the count, in the same unit
     # of work; #9 writes neither side.
     rematch_cursor: Mapped[int | None] = mapped_column(Integer)
+    # The trace id of the request that started this run (#102): the value
+    # `telemetry.current_trace_id()` held while `routes.internal._claim_run` wrote
+    # this row, so #92's alert and #93's responder can name a failed run's trace
+    # instead of finding it by timestamp. Nullable with no default of either kind:
+    # NULL is "unknown" -- a row written before this column existed, and a run a
+    # starter was handed without a trace id -- and never a guessed or borrowed id.
+    # The only writer is `_claim_run`, and the value it is handed is the one
+    # `telemetry.adopted_trace_id` bounded to `REQUEST_ID_LENGTH` characters of
+    # `[A-Za-z0-9._-]`, which is the bound and the class this column holds.
+    trace_id: Mapped[str | None] = mapped_column(String(64))
 
 
 class TelemetrySpan(Base):

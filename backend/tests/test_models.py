@@ -75,6 +75,7 @@ _EXPECTED_COLUMNS = {
         "companies_not_fetched",
         "postings_not_rematched",
         "rematch_cursor",
+        "trace_id",
     },
     "run_company": {"id", "run_id", "company_id", "outcome", "error"},
     "telemetry_span": {
@@ -116,6 +117,7 @@ _STRING_LENGTHS = {
     ("match", "prompt_version"): 50,
     ("run", "status"): 20,
     ("run", "error"): None,
+    ("run", "trace_id"): 64,
     ("run_company", "outcome"): 20,
     ("run_company", "error"): None,
     ("telemetry_span", "trace_id"): 64,

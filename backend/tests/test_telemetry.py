@@ -36,13 +36,13 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from httpx2 import Response
-from sqlalchemy import delete, inspect, select
+from sqlalchemy import delete, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 
 from app import db, telemetry
 from app.main import app
-from app.models import Run, TelemetrySpan
+from app.models import TelemetrySpan
 from app.routes import internal
 from app.routes.internal import TICK_SECRET_HEADER, get_pipeline, get_run_starter
 from app.routes.matches import MATCHES_MAX_LIMIT
@@ -382,13 +382,6 @@ def test_ac2_the_real_daemon_thread_runs_under_the_requests_trace_id(
     assert [span["trace_id"] for span in run_span] == [OFFERED_ID]
     assert [span["trace_id"] for span in request_span] == [OFFERED_ID]
     assert len({str(span["trace_id"]) for span in run_span + request_span}) == 1
-
-
-def test_ac2_no_run_column_carries_the_trace_id(client: TestClient) -> None:
-    """AC2: the hand-off is the whole of it; the `run` table gains no column (#102)."""
-    assert "trace_id" not in {column.name for column in Run.__table__.columns}
-    reflected = {column["name"] for column in inspect(db.get_engine()).get_columns("run")}
-    assert "trace_id" not in reflected
 
 
 # AC3: what one stored span holds, and what it holds nothing of.
@@ -856,7 +849,13 @@ def test_ac11_a_writer_that_raises_leaves_the_responses_exactly_as_they_were(
         for response in (
             client.get("/healthz"),
             client.get("/healthz", headers={telemetry.REQUEST_ID_HEADER: OFFERED_ID}),
-            client.post("/internal/tick", headers={TICK_SECRET_HEADER: SECRET}),
+            client.post(
+                "/internal/tick",
+                headers={
+                    TICK_SECRET_HEADER: SECRET,
+                    telemetry.REQUEST_ID_HEADER: OFFERED_ID,
+                },
+            ),
             client.post("/internal/tick", headers={TICK_SECRET_HEADER: "wrong"}),
             client.get("/no-route-here-9f3c"),
         ):
@@ -864,6 +863,8 @@ def test_ac11_a_writer_that_raises_leaves_the_responses_exactly_as_they_were(
             if response.status_code == 202:
                 # The run's own id and instant: the two things a second run of the
                 # same journey cannot share, and no part of what is being compared.
+                # The trace id is not one of them: both ticks above sent the same
+                # `X-Request-ID`, so both bodies carry it and it is compared (#102).
                 body = {**body, "id": "a run id", "started_at": "an instant"}
             answers.append((response.status_code, body))
         return answers

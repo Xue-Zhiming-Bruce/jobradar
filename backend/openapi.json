@@ -1261,6 +1261,17 @@
             ],
             "title": "Postings Not Rematched"
           },
+          "trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Id"
+          },
           "company_outcomes": {
             "items": {
               "$ref": "#/components/schemas/RunCompanyOutcome"
@@ -1281,10 +1292,11 @@
           "matches_emailed",
           "companies_not_fetched",
           "postings_not_rematched",
+          "trace_id",
           "company_outcomes"
         ],
         "title": "RunSummary",
-        "description": "One `run` row as this API renders it: its ten columns and its per-company outcomes.\n\nThe same body a `202` from `POST /internal/tick` carries. `finished_at` and\n`error` are absent until the run ends, and the two counts the walk earns are\n0 from the moment the row is written: what the boards returned and how many\nmatches `record_score` wrote (#34), never a score computed here.\n`matches_emailed` is the third: how many matches this run's own digest emailed\n(#36), NULL until that digest records it -- which is the honest value for a\nrun still in flight, a row written before the column existed, and a run whose\nsend failed, and a different answer from a run that really did email none.\n`companies_not_fetched` is NULL for a run the board-call budget did not stop,\nwhich includes a run still in flight, and holds the count of active companies\nthe walk left for a later run when it did (#56). `postings_not_rematched` is\nthe same shape for a re-match: NULL for every tick and every row written\nbefore the column existed, `0` for a re-match that decided every candidate it\nfound, and a positive count of the passers its cap left for a later run (#64).\n`company_outcomes` is one entry per company the run attempted and is empty for\na run that has not attempted one yet -- the `202`'s fresh row -- so a client\nreads the same shape from both routes at every point in a run's life."
+        "description": "One `run` row as this API renders it: its columns and its per-company outcomes.\n\nThe same body a `202` from `POST /internal/tick` carries. `finished_at` and\n`error` are absent until the run ends, and the two counts the walk earns are\n0 from the moment the row is written: what the boards returned and how many\nmatches `record_score` wrote (#34), never a score computed here.\n`matches_emailed` is the third: how many matches this run's own digest emailed\n(#36), NULL until that digest records it -- which is the honest value for a\nrun still in flight, a row written before the column existed, and a run whose\nsend failed, and a different answer from a run that really did email none.\n`companies_not_fetched` is NULL for a run the board-call budget did not stop,\nwhich includes a run still in flight, and holds the count of active companies\nthe walk left for a later run when it did (#56). `postings_not_rematched` is\nthe same shape for a re-match: NULL for every tick and every row written\nbefore the column existed, `0` for a re-match that decided every candidate it\nfound, and a positive count of the passers its cap left for a later run (#64).\n`company_outcomes` is one entry per company the run attempted and is empty for\na run that has not attempted one yet -- the `202`'s fresh row -- so a client\nreads the same shape from both routes at every point in a run's life.\n`trace_id` is the trace of the request that started this run (#102), the id the\nrequest's own span and the run's span share; NULL means the row names no trace\n-- a row written before the column existed, or a run a starter was handed\nwithout an id -- and is never guessed at."
       },
       "SpanSummary": {
         "properties": {

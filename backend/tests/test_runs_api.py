@@ -11,7 +11,9 @@ the `run` row, and it answers `404` for an id that is not there rather than an
 empty body or a row made up on the spot. A `run` row is seeded directly through
 the app's own session where a run's end state is what the test is about; the
 `202` and the `GET` are then compared against each other so the two routes that
-answer `RunSummary` cannot drift apart.
+answer `RunSummary` cannot drift apart. `trace_id` (#102) is the row's own as
+well: a tick writes the trace id of the request that started it, and the read
+serves that value back -- NULL on a row no request wrote.
 
 A `running` row a dead process left behind is finished here as well, because it is
 the same row this module reads: `reap_stale_runs()` is called once from the app's
@@ -29,17 +31,18 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx2 import Response
 from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 
-from app import db, main
+from app import db, main, telemetry
 from app.main import app
 from app.models import Company, Match, Posting, Resume, Run, RunCompany
 from app.routes import internal
 from app.routes.internal import get_pipeline, get_run_starter
 from app.routes.runs import RUNS_DEFAULT_LIMIT, RUNS_MAX_LIMIT, REAPED_RUN_ERROR, reap_stale_runs
 
-# The ten columns of a run plus the per-company outcomes it recorded, and
+# The run columns this route serves plus the per-company outcomes it recorded, and
 # therefore the whole body this route may answer with. A field that is not here is
 # a field the route invented.
 RUN_FIELDS = {
@@ -53,6 +56,7 @@ RUN_FIELDS = {
     "matches_emailed",
     "companies_not_fetched",
     "postings_not_rematched",
+    "trace_id",
     "company_outcomes",
 }
 
@@ -102,6 +106,7 @@ def test_a_running_run_reads_back_exactly_as_its_row_holds_it(client: TestClient
     assert body["matches_emailed"] is None  # no digest of this run has recorded one yet
     assert body["companies_not_fetched"] is None  # and no budget stopped it yet
     assert body["postings_not_rematched"] is None  # and it is a tick, not a re-match
+    assert body["trace_id"] is None  # and no request started it, so it names no trace
     assert body["company_outcomes"] == []  # and no company has been attempted yet
     assert datetime.fromisoformat(body["started_at"]) is not None
 
@@ -388,7 +393,9 @@ def test_reading_a_run_needs_no_secret(
 def test_the_body_carries_no_secret_no_resume_text_and_no_database_url(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The body is the row's ten columns and its per-company outcomes: nothing private rides along."""
+    """The body is the run columns this route serves and its per-company outcomes: nothing
+    private rides along.
+    """
     monkeypatch.setenv("TICK_SECRET", SECRET)
     run_id = seed(status="failed", error="the board refused: acme")
 
@@ -410,6 +417,97 @@ def test_the_body_is_exactly_the_run_summary_the_api_declares(client: TestClient
 
     assert set(body) == set(RunSummary.model_fields)
     assert set(body) == RUN_FIELDS
+
+
+# #102: the run names the trace of the request that started it -- the tick's own
+# `X-Request-ID` (#90), on the row and in the read a client does of it.
+
+# A trace id of the shape #90 adopts: what the tick hands the row and what the
+# response echoes back, so a case asserts one value in three places.
+REQUEST_TRACE_ID = "trace-9f3c1d1a04"
+
+# What may not be adopted, so #90 generates one instead: a value longer than the
+# bound, and one with a character outside the accepted class.
+_UNADOPTABLE_IDS = [
+    pytest.param("x" * 65, id="one character over the bound"),
+    pytest.param("trace id with spaces", id="a character outside the class"),
+]
+
+
+@pytest.fixture
+def startable_tick(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Callable[[], None]]]:
+    """The secret and the two work seams of a tick, so a case can start a run on purpose.
+
+    The work is recorded and never run: the row is what these cases read. The
+    teardown gives back the process's one-run-at-a-time guard, which a recorded
+    work would have released.
+    """
+    monkeypatch.setenv(internal.TICK_SECRET_VARIABLE, SECRET)
+    work: list[Callable[[], None]] = []
+    app.dependency_overrides[get_run_starter] = lambda: work.append
+    app.dependency_overrides[get_pipeline] = lambda: lambda run_id: None
+    try:
+        yield work
+    finally:
+        app.dependency_overrides.pop(get_run_starter, None)
+        app.dependency_overrides.pop(get_pipeline, None)
+        if internal._run_in_progress.locked():  # the guard is the process's, not this test's
+            internal._run_in_progress.release()
+
+
+def tick(client: TestClient, request_id: str | None) -> Response:
+    """One tick of `/internal/tick`, with the secret and the trace id a case chose."""
+    headers = {internal.TICK_SECRET_HEADER: SECRET}
+    if request_id is not None:
+        headers[telemetry.REQUEST_ID_HEADER] = request_id
+    return client.post("/internal/tick", headers=headers)
+
+
+def test_a_tick_writes_the_requests_own_trace_id_onto_the_run_it_started(
+    client: TestClient, startable_tick: list[Callable[[], None]]
+) -> None:
+    """AC4: the `202`, the read and the trace read all name the id the response echoed."""
+    response = tick(client, REQUEST_TRACE_ID)
+
+    assert response.status_code == 202
+    echoed = response.headers[telemetry.REQUEST_ID_HEADER]
+    assert echoed == REQUEST_TRACE_ID  # the request's own id, adopted and sent back
+
+    body = response.json()
+    assert body["trace_id"] == echoed  # the row the `202` carries names that trace
+    assert read(client, body["id"]).json()["trace_id"] == echoed  # and so does the read
+
+    # The same value is the tick request's own span in the trace read (#90): the
+    # run and the request that started it are one trace, and not two by timestamp.
+    traces = client.get("/telemetry/traces").json()
+    assert echoed in [trace["trace_id"] for trace in traces]
+    assert len(startable_tick) == 1  # the real route handed the work over once
+
+
+def test_a_run_written_without_a_trace_id_reads_null(client: TestClient) -> None:
+    """AC2/AC4: a starter handed no trace id writes NULL -- unknown, never a borrowed id."""
+    summary = internal._claim_run(None)
+    assert summary.trace_id is None
+
+    body = read(client, summary.id).json()
+
+    assert body["trace_id"] is None
+    assert body["status"] == "running"  # the ordinary row it would be without one
+
+
+@pytest.mark.parametrize("offered", _UNADOPTABLE_IDS)
+def test_an_unadoptable_trace_id_header_never_reaches_the_column(
+    client: TestClient, startable_tick: list[Callable[[], None]], offered: str
+) -> None:
+    """AC5: the bound #90 puts on an adopted id is the bound the column and the read hold."""
+    response = tick(client, offered)
+
+    assert response.status_code == 202
+    echoed = response.headers[telemetry.REQUEST_ID_HEADER]
+    assert echoed != offered
+    assert telemetry.REQUEST_ID_PATTERN.fullmatch(echoed) is not None
+    assert read(client, response.json()["id"]).json()["trace_id"] == echoed
+    assert offered not in response.text  # the offered text is nowhere in the answer
 
 
 # The reap: what a dead process left in `running`, and what it must leave alone.
