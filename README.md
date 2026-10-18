@@ -42,9 +42,10 @@ trigger — the daily workflow is a convenience, and cron drifts (see
 bare JSON. `POST /resume` accepted a synthetic resume and answered `201`; the
 active resume row is id 2. `GET /matches` on the same instance then answered rows
 scored against it: read from the deployed database, 80 `match` rows hold
-`outcome = 'scored'`, 75 of them a score of 1 or more, over the 0 to 30 range the
-scorer produces, and the rows name the model `deepseek/deepseek-v4.1-flash` with
-prompt version 1 as their provenance. The press that wrote them is run id 6 —
+`outcome = 'scored'`, 75 of them a score of 1 or more, on the 0–100 scale the
+scorer's prompt and the `match` table's own constraint define — the deployed rows'
+own maximum is 30 — and the rows name the model `deepseek/deepseek-v4.1-flash`
+with prompt version 1 as their provenance. The press that wrote them is run id 6 —
 `succeeded`, `2026-10-18T12:44:56Z` to `12:49:35Z`, 50 matches decided. Those 50
 keep the `created_at` of the run that first scored them, because a re-match
 updates the `match` row its posting already keys rather than inserting one. No
@@ -1436,9 +1437,7 @@ Each with what it costs, because a limitation without a consequence is a slogan.
 
 ## Future work
 
-Work that is genuinely open is tracked in GitHub issues; the non-goals above are
-deliberate boundaries, recorded in `_docs/plan.md` and in [Limitations](#limitations),
-and no issue tracks them because they are not planned.
+Work that is genuinely open is tracked in GitHub issues:
 
 - **Record the first real on-call runs.** The responder, the proposer and the
   scheduled re-check are implemented and their offline suites pass, but an
@@ -1448,7 +1447,16 @@ and no issue tracks them because they are not planned.
   scheduled re-check on
   [#97](https://github.com/Xue-Zhiming-Bruce/jobradar/issues/97), including each
   run's URL and whether the effect it claims is visible in the app.
+- **The frontend has had no visual design pass.** The screens are centred,
+  unstyled sections with default widgets — functional and tested, but designed by
+  nobody. Tracked by
+  [#114](https://github.com/Xue-Zhiming-Bruce/jobradar/issues/114).
+- **A re-check can only be started by the schedule.** GitHub throttles and skips
+  cron runs, so there is no way to ask for a re-check on demand; a
+  `workflow_dispatch` trigger on `oncall.yml` is tracked by
+  [#115](https://github.com/Xue-Zhiming-Bruce/jobradar/issues/115).
 
-No other work is queued: the project's next step is decided by the owner in a
-groomed issue, and the process for that is
+The non-goals above are deliberate boundaries, recorded in `_docs/plan.md` and in
+[Limitations](#limitations), and no issue tracks them because they are not planned;
+a new task starts as a groomed issue, and the process for that is
 [above](#the-workflow-the-repository-defines).
