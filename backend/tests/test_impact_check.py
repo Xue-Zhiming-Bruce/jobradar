@@ -7,6 +7,11 @@ awkward cases: an empty run list, a newest run still `running`, a matches window
 truncated by the page's limit, a window mixing `scored` and `not_scored`, a
 telemetry window with zero requests, and a read that does not answer `200`.
 
+`fetch` itself is pinned against a fake `urlopen` too (#108): a socket timeout on
+connect and one on `read()` -- the escape that killed the hourly run -- a refused
+connection, a DNS failure, a read that times out and then answers, and a read
+that times out on every attempt, each one `ReadFailed` and never a traceback.
+
 The module lives under `ops/`, outside the backend package, so it is loaded by
 path the way `backend/tests/test_rollback_script.py` drives `ops/rollback.sh` by
 path: it is the real file, not a copy that could drift.
@@ -313,39 +318,169 @@ def test_fetch_maps_a_non_200_answer_to_read_failed(monkeypatch: pytest.MonkeyPa
     assert "503" in str(failure.value)
 
 
+class _Response:
+    """One `urlopen` answer: a `200` whose `read()` answers `payload`."""
+
+    status = 200
+
+    def __init__(self, payload: bytes = b'[{"id": 1}]') -> None:
+        self.payload = payload
+
+    def __enter__(self) -> "_Response":
+        return self
+
+    def __exit__(self, *exception: object) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self.payload
+
+
+def _no_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drive the retries without waiting out the real `RETRY_DELAY_SECONDS`."""
+    monkeypatch.setattr(impact_check, "RETRY_DELAY_SECONDS", 0)
+
+
+def test_the_read_is_retried_at_least_once_after_a_short_named_delay() -> None:
+    """AC2's bound, read off the module: at least one retry, and a short wait."""
+    assert impact_check.READ_ATTEMPTS >= 2
+    assert 0 < impact_check.RETRY_DELAY_SECONDS <= 5
+
+
 def test_fetch_names_a_read_that_never_answered(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A connection that never answered is `ReadFailed` too, and it names the read."""
+    """A refused connection is `ReadFailed` too, it names the read, and it retries."""
+    calls: list[int] = []
 
     def unreachable(request: Any, timeout: float | None = None) -> Any:
+        calls.append(1)
         raise urllib.error.URLError("connection refused")
 
+    _no_delay(monkeypatch)
     monkeypatch.setattr(impact_check.urllib.request, "urlopen", unreachable)
 
     with pytest.raises(impact_check.ReadFailed) as failure:
         impact_check.fetch("https://example.test", impact_check.METRICS_READ)
 
+    assert len(calls) == impact_check.READ_ATTEMPTS
     assert impact_check.METRICS_READ in str(failure.value)
     assert "no answer" in str(failure.value)
+    assert "connection refused" in str(failure.value)
 
 
-def test_fetch_answers_the_parsed_json_of_a_200(monkeypatch: pytest.MonkeyPatch) -> None:
-    class Response:
+def test_fetch_maps_a_connect_timeout_to_read_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`urlopen` itself timing out -- the connect half of AC1's socket timeout."""
+
+    def slow(request: Any, timeout: float | None = None) -> Any:
+        raise TimeoutError("timed out")
+
+    _no_delay(monkeypatch)
+    monkeypatch.setattr(impact_check.urllib.request, "urlopen", slow)
+
+    with pytest.raises(impact_check.ReadFailed) as failure:
+        impact_check.fetch("https://example.test", impact_check.METRICS_READ)
+
+    assert impact_check.METRICS_READ in str(failure.value)
+    assert "timed out" in str(failure.value)
+
+
+def test_fetch_maps_a_dns_failure_to_read_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+
+    def unresolved(request: Any, timeout: float | None = None) -> Any:
+        raise urllib.error.URLError("[Errno -2] Name or service not known")
+
+    _no_delay(monkeypatch)
+    monkeypatch.setattr(impact_check.urllib.request, "urlopen", unresolved)
+
+    with pytest.raises(impact_check.ReadFailed) as failure:
+        impact_check.fetch("https://example.test", impact_check.RUNS_READ)
+
+    assert "Name or service not known" in str(failure.value)
+
+
+def test_fetch_gives_up_as_read_failed_when_a_read_times_out_on_every_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The observed bug: a cold instance answers, then `read()` times out."""
+    reads: list[int] = []
+
+    class ColdResponse:
         status = 200
 
-        def __enter__(self) -> "Response":
+        def __enter__(self) -> "ColdResponse":
             return self
 
         def __exit__(self, *exception: object) -> bool:
             return False
 
         def read(self) -> bytes:
-            return b'[{"id": 1}]'
+            reads.append(1)
+            raise TimeoutError("The read operation timed out")
 
+    _no_delay(monkeypatch)
     monkeypatch.setattr(
-        impact_check.urllib.request, "urlopen", lambda request, timeout=None: Response()
+        impact_check.urllib.request,
+        "urlopen",
+        lambda request, timeout=None: ColdResponse(),
+    )
+
+    with pytest.raises(impact_check.ReadFailed) as failure:
+        impact_check.fetch("https://example.test", impact_check.RUNS_READ)
+
+    assert len(reads) == impact_check.READ_ATTEMPTS
+    assert impact_check.RUNS_READ in str(failure.value)
+    assert "timed out" in str(failure.value)
+
+
+def test_fetch_retries_and_returns_the_body_when_the_read_then_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC2's retry path: one read that timed out, the next one `200`."""
+    calls: list[int] = []
+
+    def once_cold(request: Any, timeout: float | None = None) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            raise TimeoutError("The read operation timed out")
+        return _Response()
+
+    _no_delay(monkeypatch)
+    monkeypatch.setattr(impact_check.urllib.request, "urlopen", once_cold)
+
+    assert impact_check.fetch("https://example.test", impact_check.RUNS_READ) == [{"id": 1}]
+    assert len(calls) == 2
+
+
+def test_fetch_answers_the_parsed_json_of_a_200(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        impact_check.urllib.request,
+        "urlopen",
+        lambda request, timeout=None: _Response(),
     )
 
     assert impact_check.fetch("https://example.test", impact_check.RUNS_READ) == [{"id": 1}]
+
+
+def test_main_prints_one_line_and_exits_non_zero_when_a_read_never_answers(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC3: no traceback, one line naming the read, a non-zero exit, no report."""
+
+    def unreachable(request: Any, timeout: float | None = None) -> Any:
+        raise urllib.error.URLError("connection refused")
+
+    _no_delay(monkeypatch)
+    monkeypatch.setenv("JOBRADAR_URL", "https://example.test")
+    monkeypatch.setattr(impact_check.urllib.request, "urlopen", unreachable)
+
+    exit_code = impact_check.main()
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert captured.out == ""
+    assert captured.err.count("\n") == 1
+    assert "Traceback" not in captured.err
+    assert impact_check.RUNS_READ in captured.err
+    assert "connection refused" in captured.err
 
 
 def test_the_report_json_is_the_machine_readable_half_the_workflow_reads() -> None:
