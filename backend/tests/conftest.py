@@ -101,7 +101,7 @@ def engine(
     )
 
     if request.param == POSTGRES:
-        # The suite owns these seven table names in the test database: drop what
+        # The suite owns these eight table names in the test database: drop what
         # it created and release the connections, leaving no trace behind.
         Base.metadata.drop_all(engine)
         engine.dispose()

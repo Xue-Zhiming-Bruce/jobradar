@@ -263,7 +263,7 @@ def _require_postgres(engine: Engine) -> None:
 
 
 def _reset_tables(engine: Engine) -> None:
-    """Empty the six tables, so a run starts from nothing and leaves nothing behind.
+    """Empty the eight tables, so a run starts from nothing and leaves nothing behind.
 
     This script owns these table names in the throwaway database it was given, the
     way `tests/integration/conftest.py` does: rows a previous run left would make

@@ -1,4 +1,4 @@
-"""The seven tables, declared once, under the column names later tasks read.
+"""The eight tables, declared once, under the column names later tasks read.
 
 `__tablename__` may appear in no module other than `app/models.py`: one place
 declares table structure, so one place has to be migrated (#21) when it changes.
@@ -88,6 +88,7 @@ _EXPECTED_COLUMNS = {
         "duration_ms",
         "started_at",
     },
+    "metric_bucket": {"id", "route", "bucket_start", "count", "errors", "p95_ms"},
 }
 
 # The length of every string column: the budget #2 declared, so a column is not
@@ -124,6 +125,7 @@ _STRING_LENGTHS = {
     ("telemetry_span", "name"): 50,
     ("telemetry_span", "route"): 255,
     ("telemetry_span", "method"): 10,
+    ("metric_bucket", "route"): 255,
 }
 
 _UNBOUNDED_STRING_COLUMNS = {
@@ -152,6 +154,7 @@ _TIMESTAMP_COLUMNS = {
     ("run", "started_at"),
     ("run", "finished_at"),
     ("telemetry_span", "started_at"),
+    ("metric_bucket", "bucket_start"),
 }
 
 # The columns whose default is a Python callable or literal. `outcome` is not
@@ -196,7 +199,7 @@ def _both_ddl() -> dict[str, str]:
     return {name: _ddl(_dialect(name)) for name in ("sqlite", "postgres")}
 
 
-def test_the_seven_tables_are_declared_and_no_others() -> None:
+def test_the_eight_tables_are_declared_and_no_others() -> None:
     assert set(Base.metadata.tables) == set(_EXPECTED_COLUMNS)
 
 
@@ -365,7 +368,7 @@ def test_defaults_are_python_side_except_the_outcome_the_database_fills() -> Non
 
 
 @pytest.mark.parametrize("dialect_name", sorted(_MATCH_TABLE_DDL))
-def test_the_rendered_ddl_creates_the_seven_tables(dialect_name: str) -> None:
+def test_the_rendered_ddl_creates_the_eight_tables(dialect_name: str) -> None:
     dialect = sqlite.dialect() if dialect_name == "sqlite" else postgresql.dialect()
 
     ddl = _ddl(dialect)
@@ -411,7 +414,7 @@ def test_the_docstring_says_tables_only_are_created_and_names_21() -> None:
 
 
 def test_the_dedupe_keys_are_declared_as_unique_constraints() -> None:
-    """The three keys a re-run, a double click or a re-score must not get past."""
+    """The keys a re-run, a double click or a re-score must not get past, and one bucket per minute."""
     unique_constraints = {
         table.name: [
             [column.name for column in constraint.columns]
@@ -427,6 +430,7 @@ def test_the_dedupe_keys_are_declared_as_unique_constraints() -> None:
     assert unique_constraints["posting"] == [["company_id", "external_id"]]
     assert unique_constraints["match"] == [["posting_id"]]
     assert unique_constraints["run_company"] == [["run_id", "company_id"]]
+    assert unique_constraints["metric_bucket"] == [["route", "bucket_start"]]
 
 
 def test_uniqueness_never_leans_on_a_collation() -> None:
