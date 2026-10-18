@@ -27,6 +27,18 @@ would be worse than no telemetry, so a database that is down or a table that is
 missing is one warning line naming the database through `db.redacted_database_url()`
 and a response that is exactly what it would have been.
 
+The second sink is `#101`'s: with `OTEL_EXPORTER_OTLP_ENDPOINT` set to an OTLP/HTTP
+endpoint, `configure_export()` -- called once at process start from `app.main`
+beside `configure_logging()` -- builds the one `OtlpExporter`, and `record_span()`
+hands it the same span it stored. The export rides beside the database write and
+behind the response the request already got, and `OtlpExporter.export()` never
+raises, so a collector that is unreachable changes neither. Unset or empty builds
+no exporter at all, which is exactly the deployment `#90` shipped. What leaves the
+process is one OTLP `resourceSpans` document holding the same facts the row holds
+and no eighth: the duration is the row's own whole milliseconds, and a body, a
+query string, a header value, a resume text and a file name have no attribute to
+reach.
+
 `JsonFormatter` is the app's own log format, installed once from `app.main` so
 `uvicorn`, the app and the suite all log that way: one JSON object per line, with
 the line's trace id in a field of its own and `null` on a line written outside any
@@ -49,6 +61,7 @@ the metric is read.
 
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -60,6 +73,7 @@ from datetime import UTC, datetime, timedelta
 from math import ceil
 from typing import Any
 
+import httpx2
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 from sqlalchemy import delete, select
@@ -108,6 +122,25 @@ ERROR_STATUS_CODE = 500
 # Retention is strictly longer, so a span a metric counted is still stored.
 METRICS_WINDOW = timedelta(hours=1)
 SPAN_RETENTION = timedelta(days=7)
+
+# The one variable the OTLP export reads, and the path an OTLP/HTTP traces request
+# is posted to under it. There is no default endpoint: unset or empty builds no
+# exporter, so a deployment that does not configure one makes no outbound call
+# (`#101` AC1).
+OTLP_ENDPOINT_VARIABLE = "OTEL_EXPORTER_OTLP_ENDPOINT"
+OTLP_SPANS_PATH = "/v1/traces"
+
+# The `service.name` and scope name a collector groups these spans by, and how long
+# one export may take before it is abandoned. The timeout is short because the
+# export rides beside the request and never holds it for a collector.
+OTLP_SERVICE_NAME = "jobradar"
+OTLP_SCOPE_NAME = "jobradar.telemetry"
+OTLP_TIMEOUT_SECONDS = 5.0
+
+# Nanoseconds in one second and in one millisecond, so a duration -- whole
+# milliseconds in the row -- is the instant arithmetic OTLP carries.
+NANOSECONDS_PER_SECOND = 1_000_000_000
+NANOSECONDS_PER_MILLISECOND = 1_000_000
 
 # The nearest-rank percentile the metrics read answers, as the fraction it is.
 P95 = 0.95
@@ -204,13 +237,18 @@ def store_span(span: Span) -> None:
 
 
 def record_span(span: Span) -> None:
-    """Store one span, and never raise: telemetry must not fail the request it observes.
+    """Store one span, export it beside the write, and never raise.
 
     A database that is down, a table that is missing and anything else the writer
     raises is one warning line naming the database through `db.redacted_database_url()`
     -- never the URL itself, never a request body -- and the response is exactly
     what it would have been. The exception's own type is named and its message is
     not, because a driver's message can carry the connection string.
+
+    The export (`#101`) is attempted whatever the write did, so an endpoint that is
+    configured still sees the span when the table write failed; `export_span` is a
+    no-op with no exporter and never raises with one, so neither sink can reach the
+    response the request already got.
     """
     try:
         store_span(span)
@@ -221,6 +259,138 @@ def record_span(span: Span) -> None:
             db.redacted_database_url(),
             type(error).__name__,
         )
+    export_span(span)
+
+
+# The one exporter this process built, or `None` when no endpoint is configured.
+# `configure_export` sets it once at process start, and `export_span` reads it.
+_exporter: "OtlpExporter | None" = None
+
+
+def otlp_endpoint() -> str:
+    """`OTEL_EXPORTER_OTLP_ENDPOINT`, or "" when it is unset or empty."""
+    return os.environ.get(OTLP_ENDPOINT_VARIABLE, "").strip()
+
+
+def otlp_payload(span: Span) -> dict[str, object]:
+    """One span as an OTLP/HTTP JSON body: `resourceSpans` -> `scopeSpans` -> one span.
+
+    The facts the row holds and nothing else. The name is the span's own, and the
+    route template, the method and the status code are the three standard
+    attributes OTLP has for an HTTP span -- written only when the row sets them, so
+    the run's own span carries none. A span's duration is carried the way OTLP
+    carries one, as the end instant minus the start, and the end is the row's start
+    plus its whole milliseconds, so the two differ by exactly the number stored.
+
+    Nothing here is read from a request: no body, no query string, no header value,
+    no resume text, no file name and no credential has a field or an attribute to
+    reach, because the `Span` itself holds none of them and this copies its fields
+    and no other value. The trace id goes over verbatim -- see the note beside it.
+    """
+    attributes: list[dict[str, object]] = []
+    if span.route is not None:
+        attributes.append({"key": "http.route", "value": {"stringValue": span.route}})
+    if span.method is not None:
+        attributes.append({"key": "http.request.method", "value": {"stringValue": span.method}})
+    if span.status_code is not None:
+        attributes.append(
+            {"key": "http.response.status_code", "value": {"intValue": str(span.status_code)}}
+        )
+
+    started_nanoseconds = int(span.started_at.timestamp() * NANOSECONDS_PER_SECOND)
+    return {
+        "resourceSpans": [
+            {
+                "resource": {
+                    "attributes": [
+                        {"key": "service.name", "value": {"stringValue": OTLP_SERVICE_NAME}}
+                    ]
+                },
+                "scopeSpans": [
+                    {
+                        "scope": {"name": OTLP_SCOPE_NAME},
+                        "spans": [
+                            {
+                                # The row's trace id, verbatim: a generated one is
+                                # 32 hex (16 bytes, what OTLP wants), an adopted
+                                # X-Request-ID need not be and goes over as it is.
+                                # shortcut: a non-hex adopted id may be refused by a
+                                # strict collector, upgrade if it must round-trip.
+                                "traceId": span.trace_id,
+                                # 8 bytes of span id, which is what OTLP carries.
+                                "spanId": uuid.uuid4().hex[:16],
+                                "name": span.name,
+                                "startTimeUnixNano": str(started_nanoseconds),
+                                "endTimeUnixNano": str(
+                                    started_nanoseconds
+                                    + span.duration_ms * NANOSECONDS_PER_MILLISECOND
+                                ),
+                                "attributes": attributes,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+
+class OtlpExporter:
+    """The one exporter: posts a span's OTLP/HTTP JSON body to the configured endpoint.
+
+    Built by `configure_export()` from `OTEL_EXPORTER_OTLP_ENDPOINT`, whose value
+    gets `/v1/traces` -- the OTLP/HTTP traces path -- appended. `export()` never
+    raises: a collector that is down, slow or answering an error is one warning
+    line naming the failure and never a span's own facts, so the response and the
+    stored row are exactly what they would have been with no exporter at all
+    (`#101` AC3). The endpoint is not logged: a URL can carry a credential.
+    """
+
+    def __init__(self, endpoint: str, client: httpx2.Client | None = None) -> None:
+        self.url = endpoint.rstrip("/") + OTLP_SPANS_PATH
+        self._client = client if client is not None else httpx2.Client(timeout=OTLP_TIMEOUT_SECONDS)
+
+    def export(self, span: Span) -> None:
+        """Post one span and swallow every failure: the request is already answered."""
+        try:
+            response = self._client.post(self.url, json=otlp_payload(span))
+        except Exception as error:
+            logger.warning(
+                "Could not export a %s span over OTLP: %s", span.name, type(error).__name__
+            )
+            return
+        if response.is_error:
+            logger.warning(
+                "The OTLP endpoint answered %s to a %s span", response.status_code, span.name
+            )
+
+
+def configure_export() -> OtlpExporter | None:
+    """Build the one exporter, or none when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset.
+
+    Called once at process start from `app.main`, beside `configure_logging`. Unset
+    or empty stores `None`, so no span leaves the process and the app makes no
+    outbound call (`#101` AC1); a value builds exactly one exporter for the
+    process. A second call replaces the first, as a second `configure_logging`
+    does.
+    """
+    global _exporter
+    endpoint = otlp_endpoint()
+    _exporter = OtlpExporter(endpoint) if endpoint else None
+    return _exporter
+
+
+def export_span(span: Span) -> None:
+    """Send one span to the configured endpoint, and never raise.
+
+    A no-op when no exporter was configured -- the default, and the deployment
+    `#90` shipped. Otherwise it rides beside `store_span` in `record_span`, after
+    the database write and behind the response that was already sent, and
+    `OtlpExporter.export()` is what keeps an unreachable collector from changing
+    either (`#101` AC3).
+    """
+    if _exporter is not None:
+        _exporter.export(span)
 
 
 @contextmanager
